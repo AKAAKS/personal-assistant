@@ -11,6 +11,7 @@ import winsound
 
 import numpy as np
 import websockets
+import websockets.exceptions
 
 from voice.audio_io import MicrophoneStream, VoiceActivityDetector
 from voice.wake_word import WakeWordDetector
@@ -27,10 +28,15 @@ class VoiceClient:
         print("Loading wake-word model...")
         self.mic = MicrophoneStream()
         self.vad = VoiceActivityDetector(aggressiveness=int(os.getenv("VAD_AGGRESSIVENESS", "2")))
-        self.wake_word = WakeWordDetector(
-            model_name=os.getenv("WAKE_WORD_MODEL", "hey_jarvis_v0.1"),
-            threshold=float(os.getenv("WAKE_WORD_THRESHOLD", "0.5")),
-        )
+        try:
+            self.wake_word = WakeWordDetector(
+                model_name=os.getenv("WAKE_WORD_MODEL", "hey_jarvis_v0.1"),
+                threshold=float(os.getenv("WAKE_WORD_THRESHOLD", "0.5")),
+            )
+        except Exception as e:
+            log.error("Wake-word model unavailable: %s", e)
+            print(f"Wake-word model unavailable: {e}")
+            raise SystemExit(1)
         self._wake_buf = np.array([], dtype=np.int16)
 
     def _capture_utterance(self) -> bytes | None:
@@ -97,6 +103,8 @@ def main():
         asyncio.run(VoiceClient(url).run())
     except KeyboardInterrupt:
         print("\nBye.")
+    except websockets.exceptions.ConnectionClosed:
+        print(f"Lost connection to jarvisd at {url}. Is it running? Start it with: python -m jarvisd")
     except (ConnectionRefusedError, OSError):
         print(f"Cannot reach jarvisd at {url}. Start it with: python -m jarvisd")
 
