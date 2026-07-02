@@ -1,0 +1,192 @@
+"""Claude-powered agent core: routing, cost tracking, tool-use loop."""
+
+import logging
+
+import anthropic
+
+from jarvisd.tools import build_registry
+from router.classifier import IntentClassifier, Tier
+from router.cost_tracker import CostTracker
+from router.ollama_backend import OllamaBackend
+from security.audit import AuditLogger
+from security.guard import SecurityGuard, Verdict
+from system_client import SystemClient
+
+log = logging.getLogger(__name__)
+
+HAIKU_MODEL = "claude-haiku-4-5"
+SONNET_MODEL = "claude-sonnet-5"
+
+SYSTEM_PROMPT = """You are JARVIS, a personal AI assistant. You control the user's smart home, Spotify, Android TV, and PC.
+
+Capabilities:
+- **Smart home** (Home Assistant): lights, switches, climate, sensors, notifications
+- **Spotify**: search, play on any device, control playback
+- **Android TV**: launch/navigate apps, type in search fields, remote control
+- **PC control**: launch/close apps, list processes, open URLs, system info
+
+Security policy (strictly enforced):
+- NO access to bank accounts, cards, financial services, or sensitive IDs
+- Banking/payment/trading URLs are blocked
+- Destructive actions require user confirmation
+
+Guidelines:
+- Be conversational but concise. Confirm actions after performing them.
+- Chain multiple actions when appropriate (e.g. "movie night" = dim lights + open Netflix).
+- Spotify: search first for URIs, then play. Target specific devices if asked.
+- TV: launch app first, then navigate to search, then type query.
+"""
+
+
+class Assistant:
+
+    MAX_HISTORY = 40
+
+    def __init__(
+        self,
+        ha_client,
+        anthropic_api_key: str,
+        spotify_client=None,
+        tv_client=None,
+        system_client=None,
+        monthly_budget: float = 20.0,
+        ollama_model: str = "qwen2.5:3b-instruct-q4_K_M",
+    ):
+        spotify = None
+        if spotify_client is not None and getattr(spotify_client, "is_authenticated", lambda: True)():
+            spotify = spotify_client
+
+        self.client = anthropic.Anthropic(api_key=anthropic_api_key)
+        self.conversation: list[dict] = []
+        self.guard = SecurityGuard()
+        self.audit = AuditLogger()
+        self.classifier = IntentClassifier()
+        self.cost_tracker = CostTracker(monthly_budget=monthly_budget)
+        self.ollama = OllamaBackend(model=ollama_model)
+
+        self.tools, self._handlers = build_registry(
+            ha_client,
+            system_client if system_client is not None else SystemClient(),
+            spotify_client=spotify,
+            tv_client=tv_client,
+        )
+        if self.tools:
+            self.tools[-1] = {**self.tools[-1], "cache_control": {"type": "ephemeral"}}
+
+        self._system_prompt = [
+            {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}
+        ]
+
+    def _execute_tool(self, tool_name: str, tool_input: dict) -> str:
+        handler = self._handlers.get(tool_name)
+        if handler is None:
+            return f"Unknown tool: {tool_name}"
+        try:
+            return handler(tool_input)
+        except Exception as e:
+            return f"Error executing {tool_name}: {e}"
+
+    def process(self, user_message: str) -> str:
+        """Classify intent, route to cheapest capable tier, return response."""
+        tier = self.classifier.classify(user_message)
+
+        if self.cost_tracker.should_force_downgrade() and tier == Tier.SONNET:
+            log.warning("Budget near limit — downgrading Sonnet to Haiku")
+            tier = Tier.HAIKU
+
+        if tier == Tier.LOCAL:
+            resp = self._handle_local(user_message)
+            if resp is not None:
+                self.conversation.append({"role": "user", "content": user_message})
+                self.conversation.append({"role": "assistant", "content": resp})
+                return resp
+            tier = Tier.HAIKU
+
+        model = HAIKU_MODEL if tier == Tier.HAIKU else SONNET_MODEL
+        log.info("Routing to %s", model)
+        return self._claude_loop(user_message, model)
+
+    def _handle_local(self, text: str) -> str | None:
+        """Handle simple messages without an API call."""
+        t = text.lower().strip().rstrip("!?.")
+
+        if t in ("hey", "hi", "hello", "howdy", "yo", "sup"):
+            return "Hey! What can I do for you?"
+        if t in ("thanks", "thank you", "cheers", "thanks a lot", "thanks so much"):
+            return "You're welcome!"
+        if t in ("bye", "goodbye", "see ya", "later"):
+            return "Goodbye! Let me know if you need anything."
+        if t.startswith("good morning"):
+            return "Good morning! How can I help today?"
+        if t.startswith("good night") or t == "goodnight":
+            return "Goodnight! Sleep well."
+        if t in ("ok", "ok cool", "cool", "got it", "alright", "sure", "nice", "np", "no problem"):
+            return "Let me know if you need anything else!"
+
+        if self.ollama.is_available():
+            try:
+                return self.ollama.generate(text)
+            except Exception as e:
+                log.warning("Ollama failed, escalating: %s", e)
+
+        return None
+
+    def _claude_loop(self, user_message: str, model: str) -> str:
+        """Agentic tool-use loop with Claude."""
+        self.conversation.append({"role": "user", "content": user_message})
+        self._compact_history()
+
+        while True:
+            response = self.client.messages.create(
+                model=model,
+                max_tokens=1024,
+                system=self._system_prompt,
+                tools=self.tools,
+                messages=self.conversation,
+            )
+
+            u = response.usage
+            self.cost_tracker.record(
+                model, u.input_tokens, u.output_tokens,
+                cache_read_tokens=getattr(u, "cache_read_input_tokens", 0) or 0,
+                cache_creation_tokens=getattr(u, "cache_creation_input_tokens", 0) or 0,
+            )
+
+            assistant_content = response.content
+            self.conversation.append({"role": "assistant", "content": assistant_content})
+
+            tool_use_blocks = [b for b in assistant_content if b.type == "tool_use"]
+
+            if not tool_use_blocks:
+                text_parts = [b.text for b in assistant_content if b.type == "text"]
+                return "\n".join(text_parts)
+
+            tool_results = []
+            for tool_block in tool_use_blocks:
+                check = self.guard.check(tool_block.name, tool_block.input)
+
+                if check.verdict == Verdict.BLOCK:
+                    result = f"SECURITY BLOCK: {check.reason}"
+                    self.audit.log(tool_block.name, tool_block.input, "blocked", check.reason)
+                elif check.verdict == Verdict.CONFIRM_REQUIRED:
+                    result = f"CONFIRMATION REQUIRED: {check.reason}"
+                    self.audit.log(tool_block.name, tool_block.input, "confirm_required", check.reason)
+                else:
+                    result = self._execute_tool(tool_block.name, tool_block.input)
+                    self.audit.log(tool_block.name, tool_block.input, "allowed", check.reason, result)
+
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_block.id,
+                    "content": result,
+                })
+
+            self.conversation.append({"role": "user", "content": tool_results})
+
+    def _compact_history(self):
+        if len(self.conversation) > self.MAX_HISTORY:
+            self.conversation = self.conversation[-self.MAX_HISTORY:]
+
+    def reset_conversation(self):
+        """Clear conversation history."""
+        self.conversation = []
