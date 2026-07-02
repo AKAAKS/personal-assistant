@@ -17,6 +17,10 @@ Design docs: `docs/superpowers/specs/`.
     python -m clients.cli             # typed chat
     python -m clients.voice_client    # "hey jarvis" voice mode
 
+The daemon binds `127.0.0.1:8765` (override with `JARVIS_HOST`/`JARVIS_PORT`).
+Warning: the WebSocket has no authentication — do not set `JARVIS_HOST` to a
+non-loopback address; that would expose full HA/PC/TV control to your network.
+
 ## Always-on
 
     scripts\install_autostart.bat     # registers a logon task; logs -> logs/jarvisd.log
