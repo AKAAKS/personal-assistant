@@ -33,7 +33,11 @@ class TextToSpeech:
         self.engine.runAndWait()
 
     def synthesize(self, text: str) -> bytes | None:
-        """Render text to WAV bytes (SAPI5 writes RIFF WAV). None for empty text."""
+        """Render text to WAV bytes (SAPI5 writes RIFF WAV).
+
+        Returns None for empty text or on synthesis failure (e.g. COM/SAPI5
+        errors) so callers can degrade to a text-only reply.
+        """
         if not text:
             return None
         import os
@@ -45,6 +49,9 @@ class TextToSpeech:
             self.engine.runAndWait()
             with open(path, "rb") as f:
                 return f.read()
+        except Exception:
+            log.warning("TTS synthesis failed; returning None", exc_info=True)
+            return None
         finally:
             os.unlink(path)
 

@@ -1,6 +1,7 @@
 import asyncio
 import json
 
+import numpy as np
 import websockets
 
 from jarvisd.server import JarvisServer
@@ -68,9 +69,6 @@ def test_audio_without_stt_is_an_error():
 
     reply = run_client(JarvisServer(FakeAssistant()), scenario)
     assert reply["type"] == "error"
-
-
-import numpy as np
 
 
 class FakeSTT:
