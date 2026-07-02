@@ -8,9 +8,14 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 MODEL_PRICING = {
-    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00},
+    # Standard list prices per MTok. (Sonnet 5 has intro pricing of $2/$10
+    # through 2026-08-31; we track at list price — conservative overestimate.)
+    "claude-sonnet-5": {"input": 3.00, "output": 15.00},
     "claude-haiku-4-5": {"input": 1.00, "output": 5.00},
 }
+
+CACHE_READ_MULT = 0.1    # cache reads bill at ~0.1x input price
+CACHE_WRITE_MULT = 1.25  # 5-minute-TTL cache writes bill at 1.25x input price
 
 
 class CostTracker:
@@ -21,15 +26,31 @@ class CostTracker:
         self.monthly_budget = monthly_budget
         self._month_cache: tuple[str, float] | None = None
 
-    def record(self, model: str, input_tokens: int, output_tokens: int) -> float:
+    def record(
+        self,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_creation_tokens: int = 0,
+        source: str = "interactive",
+    ) -> float:
         pricing = MODEL_PRICING.get(model, {"input": 3.0, "output": 15.0})
-        cost = (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
+        cost = (
+            input_tokens * pricing["input"]
+            + cache_read_tokens * pricing["input"] * CACHE_READ_MULT
+            + cache_creation_tokens * pricing["input"] * CACHE_WRITE_MULT
+            + output_tokens * pricing["output"]
+        ) / 1_000_000
 
         entry = {
             "ts": datetime.now().isoformat(),
             "model": model,
             "in": input_tokens,
             "out": output_tokens,
+            "cache_read": cache_read_tokens,
+            "cache_write": cache_creation_tokens,
+            "source": source,
             "cost": round(cost, 6),
         }
 
