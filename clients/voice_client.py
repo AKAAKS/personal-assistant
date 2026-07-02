@@ -1,0 +1,105 @@
+"""Thin voice client: wake word + VAD locally; audio to jarvisd; plays replies.
+
+Run: python -m clients.voice_client
+"""
+
+import asyncio
+import json
+import logging
+import os
+import winsound
+
+import numpy as np
+import websockets
+
+from voice.audio_io import MicrophoneStream, VoiceActivityDetector
+from voice.wake_word import WakeWordDetector
+
+log = logging.getLogger(__name__)
+
+WAKE_WORD_CHUNK = 1280  # openwakeword expects 80ms chunks at 16kHz
+
+
+class VoiceClient:
+
+    def __init__(self, url: str):
+        self.url = url
+        print("Loading wake-word model...")
+        self.mic = MicrophoneStream()
+        self.vad = VoiceActivityDetector(aggressiveness=int(os.getenv("VAD_AGGRESSIVENESS", "2")))
+        self.wake_word = WakeWordDetector(
+            model_name=os.getenv("WAKE_WORD_MODEL", "hey_jarvis_v0.1"),
+            threshold=float(os.getenv("WAKE_WORD_THRESHOLD", "0.5")),
+        )
+        self._wake_buf = np.array([], dtype=np.int16)
+
+    def _capture_utterance(self) -> bytes | None:
+        """Block until wake word, then record until silence. PCM bytes or None."""
+        while True:
+            frame = self.mic.read_frame(timeout=1.0)
+            if frame is None:
+                continue
+            self._wake_buf = np.concatenate([self._wake_buf, frame])
+            if len(self._wake_buf) < WAKE_WORD_CHUNK:
+                continue
+            chunk = self._wake_buf[:WAKE_WORD_CHUNK]
+            self._wake_buf = self._wake_buf[WAKE_WORD_CHUNK:]
+            if not self.wake_word.process_frame(chunk):
+                continue
+
+            log.info("Wake word detected")
+            try:
+                winsound.Beep(800, 200)
+            except Exception:
+                pass
+            self.mic.clear()
+            self._wake_buf = np.array([], dtype=np.int16)
+
+            audio = self.vad.record_until_silence(
+                self.mic, max_seconds=15.0, silence_ms=800, speech_timeout_sec=5.0,
+            )
+            if audio is None or len(audio) < 1600:
+                log.info("No speech after wake word")
+                return None
+            return audio.tobytes()
+
+    async def run(self):
+        self.mic.start()
+        print("Voice client active. Listening for wake word... Ctrl+C to exit.\n")
+        try:
+            async with websockets.connect(self.url, max_size=32 * 1024 * 1024) as ws:
+                while True:
+                    pcm = await asyncio.to_thread(self._capture_utterance)
+                    if pcm is None:
+                        continue
+                    await ws.send(pcm)
+                    reply = json.loads(await ws.recv())
+                    if reply.get("type") == "error":
+                        print(f"  [error] {reply.get('error')}\n")
+                        continue
+                    if reply.get("heard"):
+                        print(f"  You: {reply['heard']}")
+                    if reply.get("text"):
+                        print(f"  JARVIS: {reply['text']}\n")
+                    if reply.get("audio_follows"):
+                        wav = await ws.recv()
+                        await asyncio.to_thread(
+                            winsound.PlaySound, bytes(wav), winsound.SND_MEMORY
+                        )
+        finally:
+            self.mic.stop()
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s", datefmt="%H:%M:%S")
+    url = os.getenv("JARVIS_URL", "ws://127.0.0.1:8765")
+    try:
+        asyncio.run(VoiceClient(url).run())
+    except KeyboardInterrupt:
+        print("\nBye.")
+    except (ConnectionRefusedError, OSError):
+        print(f"Cannot reach jarvisd at {url}. Start it with: python -m jarvisd")
+
+
+if __name__ == "__main__":
+    main()
