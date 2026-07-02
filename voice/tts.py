@@ -32,6 +32,22 @@ class TextToSpeech:
         self.engine.say(text)
         self.engine.runAndWait()
 
+    def synthesize(self, text: str) -> bytes | None:
+        """Render text to WAV bytes (SAPI5 writes RIFF WAV). None for empty text."""
+        if not text:
+            return None
+        import os
+        import tempfile
+        fd, path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        try:
+            self.engine.save_to_file(text, path)
+            self.engine.runAndWait()
+            with open(path, "rb") as f:
+                return f.read()
+        finally:
+            os.unlink(path)
+
     def list_voices(self) -> list[dict]:
         """List available system voices."""
         voices = self.engine.getProperty("voices")

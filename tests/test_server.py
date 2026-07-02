@@ -68,3 +68,45 @@ def test_audio_without_stt_is_an_error():
 
     reply = run_client(JarvisServer(FakeAssistant()), scenario)
     assert reply["type"] == "error"
+
+
+import numpy as np
+
+
+class FakeSTT:
+    def transcribe(self, audio):
+        assert audio.dtype == np.int16
+        return "turn on the light"
+
+
+class FakeTTS:
+    def synthesize(self, text):
+        return b"RIFF-fake-wav:" + text.encode()
+
+
+def test_audio_round_trip_with_speech():
+    async def scenario(ws):
+        await ws.send(np.zeros(16000, dtype=np.int16).tobytes())
+        reply = json.loads(await ws.recv())
+        wav = await ws.recv()
+        return reply, wav
+
+    server = JarvisServer(FakeAssistant(), stt=FakeSTT(), tts=FakeTTS())
+    reply, wav = run_client(server, scenario)
+    assert reply["heard"] == "turn on the light"
+    assert reply["text"] == "echo: turn on the light"
+    assert reply["audio_follows"] is True
+    assert isinstance(wav, (bytes, bytearray)) and wav.startswith(b"RIFF-fake-wav:")
+
+
+def test_silent_audio_returns_empty_reply():
+    class SilentSTT:
+        def transcribe(self, audio):
+            return "   "
+
+    async def scenario(ws):
+        await ws.send(np.zeros(1600, dtype=np.int16).tobytes())
+        return json.loads(await ws.recv())
+
+    reply = run_client(JarvisServer(FakeAssistant(), stt=SilentSTT(), tts=FakeTTS()), scenario)
+    assert reply["heard"] == "" and reply["audio_follows"] is False
