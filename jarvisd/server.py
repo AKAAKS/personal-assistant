@@ -75,10 +75,13 @@ class JarvisServer:
             return
         import numpy as np
         audio = np.frombuffer(pcm, dtype=np.int16)
+        log.info("Audio in: %.1fs (%d bytes)", len(audio) / 16000, len(pcm))
         heard = await asyncio.to_thread(self.stt.transcribe, audio)
         if not heard.strip():
+            log.info("Transcription empty — no reply generated")
             await ws.send(json.dumps({"type": "reply", "text": "", "heard": "", "audio_follows": False}))
             return
+        log.info("Heard: %s", heard)
         reply = await self._process(heard)
         await self._send_reply(ws, reply, heard=heard, speak=True)
 

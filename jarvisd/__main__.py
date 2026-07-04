@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import logging
 import os
+import sys
 from pathlib import Path
 
 from jarvisd.bootstrap import create_assistant
@@ -12,14 +13,14 @@ from jarvisd.server import JarvisServer
 
 def setup_logging(verbose: bool):
     Path("logs").mkdir(exist_ok=True)
+    handlers = [logging.FileHandler("logs/jarvisd.log", encoding="utf-8")]
+    if sys.stderr is not None:  # no console under pythonw
+        handlers.append(logging.StreamHandler())
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         datefmt="%H:%M:%S",
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler("logs/jarvisd.log", encoding="utf-8"),
-        ],
+        handlers=handlers,
     )
     if not verbose:
         logging.getLogger("faster_whisper").setLevel(logging.WARNING)
@@ -31,7 +32,22 @@ def main():
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
     setup_logging(args.verbose)
+    log = logging.getLogger("jarvisd")
 
+    try:
+        run(args, log)
+    except KeyboardInterrupt:
+        print("\njarvisd stopped.")
+    except OSError as e:
+        log.error("Cannot bind %s:%s (%s) — is another jarvisd already running?",
+                  os.getenv("JARVIS_HOST", "127.0.0.1"), os.getenv("JARVIS_PORT", "8765"), e)
+        raise SystemExit(1)
+    except Exception:
+        log.exception("jarvisd crashed during startup")
+        raise SystemExit(1)
+
+
+def run(args, log):
     ai, features = create_assistant()
 
     stt = tts = None
@@ -52,10 +68,8 @@ def main():
     )
     print(f"\nJARVIS brain ready. Integrations: {', '.join(features)}")
     print(f"Budget: {ai.cost_tracker.summary()}")
-    try:
-        asyncio.run(server.serve_forever())
-    except KeyboardInterrupt:
-        print("\njarvisd stopped.")
+    log.info("Integrations: %s | Budget: %s", ", ".join(features), ai.cost_tracker.summary())
+    asyncio.run(server.serve_forever())
 
 
 if __name__ == "__main__":

@@ -54,20 +54,31 @@ class VoiceClient:
                 continue
 
             log.info("Wake word detected")
+            self.mic.clear()  # drop the wake phrase, keep anything said from here on
+            self._wake_buf = np.array([], dtype=np.int16)
             try:
                 winsound.Beep(800, 200)
             except Exception:
                 pass
-            self.mic.clear()
-            self._wake_buf = np.array([], dtype=np.int16)
+            print("  Listening...")
 
             audio = self.vad.record_until_silence(
                 self.mic, max_seconds=15.0, silence_ms=800, speech_timeout_sec=5.0,
             )
             if audio is None or len(audio) < 1600:
                 log.info("No speech after wake word")
+                print("  (no speech detected)\n")
+                self._failure_beep()
                 return None
+            log.info("Captured %.1fs of audio", len(audio) / 16000)
             return audio.tobytes()
+
+    @staticmethod
+    def _failure_beep():
+        try:
+            winsound.Beep(400, 250)
+        except Exception:
+            pass
 
     async def run(self):
         self.mic.start()
@@ -82,6 +93,11 @@ class VoiceClient:
                     reply = json.loads(await ws.recv())
                     if reply.get("type") == "error":
                         print(f"  [error] {reply.get('error')}\n")
+                        self._failure_beep()
+                        continue
+                    if not reply.get("heard") and not reply.get("text"):
+                        print("  (didn't catch that)\n")
+                        self._failure_beep()
                         continue
                     if reply.get("heard"):
                         print(f"  You: {reply['heard']}")
