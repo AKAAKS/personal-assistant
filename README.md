@@ -24,7 +24,14 @@ non-loopback address; that would expose full HA/PC/TV control to your network.
 ## Always-on
 
     scripts\install_autostart.bat     # registers a logon task; logs -> logs/jarvisd.log
+    schtasks /Run /TN "jarvisd"       # start it now (or just re-logon)
+    scripts\stop_jarvisd.bat          # stop it (ends the task AND frees the port)
     scripts\uninstall_autostart.bat
+
+Only one daemon can hold the port: if `python -m jarvisd` reports "Cannot
+bind", the scheduled task's instance is already running — stop it first.
+Spotify auth opens a browser once; after that the refresh token is cached
+in `data/spotify_tokens.json` and startup is silent.
 
 ## Tests
 

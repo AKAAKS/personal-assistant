@@ -1,5 +1,7 @@
 """Spotify Web API client for search, playback control, and device targeting."""
 
+import json
+import os
 import time
 import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -26,8 +28,39 @@ class SpotifyClient:
         self.access_token: str | None = None
         self.refresh_token: str | None = None
         self.token_expiry: float = 0
+        self._cache_path: str | None = None
 
     # --- Authentication ---
+
+    def ensure_authorized(self, cache_path: str = os.path.join("data", "spotify_tokens.json")):
+        """Authenticate silently from a cached refresh token, or fall back to the browser flow."""
+        self._cache_path = cache_path
+        if self._load_tokens():
+            try:
+                self.token_expiry = 0
+                self._refresh_if_needed()
+                print("Spotify authenticated from cached token.")
+                return
+            except Exception:
+                print("Cached Spotify token invalid; re-authorizing...")
+        self.authorize()
+
+    def _load_tokens(self) -> bool:
+        try:
+            with open(self._cache_path, encoding="utf-8") as f:
+                self.refresh_token = json.load(f).get("refresh_token")
+            return bool(self.refresh_token)
+        except (OSError, ValueError):
+            return False
+
+    def _save_tokens(self):
+        if not self._cache_path:
+            return
+        cache_dir = os.path.dirname(self._cache_path)
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
+        with open(self._cache_path, "w", encoding="utf-8") as f:
+            json.dump({"refresh_token": self.refresh_token}, f)
 
     def authorize(self):
         """Open browser for Spotify login and capture the auth code via local redirect."""
@@ -90,6 +123,7 @@ class SpotifyClient:
         self.access_token = data["access_token"]
         self.refresh_token = data["refresh_token"]
         self.token_expiry = time.time() + data["expires_in"] - 60
+        self._save_tokens()
 
     def _refresh_if_needed(self):
         """Refresh the access token if it's expired."""
@@ -107,6 +141,7 @@ class SpotifyClient:
         self.token_expiry = time.time() + data["expires_in"] - 60
         if "refresh_token" in data:
             self.refresh_token = data["refresh_token"]
+            self._save_tokens()
 
     def _headers(self) -> dict:
         self._refresh_if_needed()

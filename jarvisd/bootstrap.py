@@ -38,7 +38,7 @@ def create_assistant() -> tuple[Assistant, list[str]]:
     if spotify_id and spotify_secret:
         spotify = SpotifyClient(spotify_id, spotify_secret)
         try:
-            spotify.authorize()
+            spotify.ensure_authorized()
             print("Spotify connected!")
         except Exception as e:
             print(f"Spotify auth failed: {e}")
