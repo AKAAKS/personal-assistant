@@ -7,9 +7,9 @@ set PYTHONW=pythonw
 schtasks /Create /F /TN "jarvisd" /SC ONLOGON ^
   /TR "\"%PYTHONW%\" \"%PROJ%\scripts\jarvisd_launcher.py\""
 if %errorlevel%==0 (
-  echo jarvisd registered. It will start at next logon.
-  echo Start it now with:  schtasks /Run /TN "jarvisd"
-  echo Stop it with:       scripts\stop_jarvisd.bat
+  echo jarvisd registered. NOTE: it is NOT running yet - it starts at next
+  echo logon, or right now with:  scripts\start_jarvisd.bat
+  echo Stop it with:              scripts\stop_jarvisd.bat
 ) else (
   echo FAILED - run this script from an elevated prompt if access was denied.
 )

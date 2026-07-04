@@ -23,8 +23,8 @@ non-loopback address; that would expose full HA/PC/TV control to your network.
 
 ## Always-on
 
-    scripts\install_autostart.bat     # registers a logon task; logs -> logs/jarvisd.log
-    schtasks /Run /TN "jarvisd"       # start it now (or just re-logon)
+    scripts\install_autostart.bat     # registers a logon task (does NOT start it)
+    scripts\start_jarvisd.bat         # start it now; logs -> logs/jarvisd.log
     scripts\stop_jarvisd.bat          # stop it (ends the task AND frees the port)
     scripts\uninstall_autostart.bat
 
