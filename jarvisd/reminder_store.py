@@ -53,15 +53,16 @@ class ReminderStore:
 
     def mark_fired(self, reminder_id: int, now: datetime) -> None:
         row = self._conn.execute(
-            "SELECT recurrence, due_ts FROM reminders WHERE id = ?", (reminder_id,)
+            "SELECT recurrence, due_ts, status FROM reminders WHERE id = ?", (reminder_id,)
         ).fetchone()
-        if row is None:
+        if row is None or row["status"] != "active":
             return
 
         recurrence = row["recurrence"]
         if recurrence == "none":
             self._conn.execute(
-                "UPDATE reminders SET status = 'done' WHERE id = ?", (reminder_id,)
+                "UPDATE reminders SET status = 'done' WHERE id = ? AND status = 'active'",
+                (reminder_id,),
             )
         else:
             step = _STEP[recurrence]
@@ -69,7 +70,7 @@ class ReminderStore:
             while due_ts <= now:
                 due_ts += step
             self._conn.execute(
-                "UPDATE reminders SET due_ts = ? WHERE id = ?",
+                "UPDATE reminders SET due_ts = ? WHERE id = ? AND status = 'active'",
                 (due_ts.isoformat(timespec="seconds"), reminder_id),
             )
         self._conn.commit()

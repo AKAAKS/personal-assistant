@@ -193,3 +193,23 @@ def test_mark_fired_weekly_catches_up_missed_weeks_fires_once(tmp_path):
 def test_mark_fired_missing_id_is_noop(tmp_path):
     store, conn = make_store(tmp_path)
     store.mark_fired(999, datetime(2026, 7, 5, 10, 0, 0))  # must not raise
+
+
+def test_mark_fired_cancelled_none_reminder_stays_cancelled(tmp_path):
+    store, conn = make_store(tmp_path)
+    rid = store.add("x", "2026-07-05T10:00:00")
+    store.cancel(rid)
+    store.mark_fired(rid, datetime(2026, 7, 5, 10, 0, 0))
+    row = conn.execute("SELECT status, due_ts FROM reminders WHERE id=?", (rid,)).fetchone()
+    assert row["status"] == "cancelled"
+    assert row["due_ts"] == "2026-07-05T10:00:00"
+
+
+def test_mark_fired_cancelled_daily_reminder_untouched(tmp_path):
+    store, conn = make_store(tmp_path)
+    rid = store.add("x", "2026-07-05T09:30:00", recurrence="daily")
+    store.cancel(rid)
+    store.mark_fired(rid, datetime(2026, 7, 8, 12, 0, 0))
+    row = conn.execute("SELECT status, due_ts FROM reminders WHERE id=?", (rid,)).fetchone()
+    assert row["status"] == "cancelled"
+    assert row["due_ts"] == "2026-07-05T09:30:00"
