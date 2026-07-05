@@ -9,13 +9,12 @@ def make_store(tmp_path):
     return MemoryStore(conn), conn
 
 
-def test_migration_reaches_v2_and_is_idempotent(tmp_path):
+def test_migration_reaches_current_version_and_is_idempotent(tmp_path):
     path = str(tmp_path / "jarvis.db")
     db.connect(path).close()
     conn = db.connect(path)  # must not re-run migrations / raise
     row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
-    assert row["v"] == 2
-    assert db.SCHEMA_VERSION == 2
+    assert row["v"] == db.SCHEMA_VERSION
     conn.close()
 
 
