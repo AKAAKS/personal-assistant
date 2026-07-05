@@ -119,7 +119,7 @@ def test_push_proactive_skips_broken_client_and_reaches_others():
             async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
                 await _wait_for_client_count(server, 1)
                 broken = BrokenWS()
-                server._clients.add(broken)
+                server._clients[broken] = asyncio.Lock()
                 reached = await server.push_proactive("hi")
                 msg = json.loads(await ws.recv())
                 still_registered = broken in server._clients
@@ -326,6 +326,96 @@ def test_no_notifier_does_not_touch_reply():
 
     reply = run_client(JarvisServer(FakeAssistant()), scenario)
     assert reply["text"] == "echo: hi"
+
+
+# --- per-connection write serialization ---
+
+
+class GatedWS:
+    """Records frames; blocks (before recording) on one specific payload until gated."""
+
+    def __init__(self, gate: asyncio.Event, block_on: bytes):
+        self.frames = []
+        self.gate = gate
+        self.block_on = block_on
+
+    async def send(self, payload):
+        if isinstance(payload, (bytes, bytearray)) and bytes(payload) == self.block_on:
+            await self.gate.wait()
+        self.frames.append(payload)
+
+
+def test_concurrent_reply_and_push_never_split_json_wav_pairs():
+    """A proactive push racing a reply on the SAME connection must not interleave
+    frames: the client would misattribute WAV audio. Frame pairs stay atomic."""
+
+    async def _run():
+        server = JarvisServer(FakeAssistant(), tts=FakeTTS())
+        gate = asyncio.Event()
+        ws = GatedWS(gate, block_on=b"RIFF-fake-wav:the reply")
+        server._clients[ws] = asyncio.Lock()
+
+        reply_task = asyncio.create_task(
+            server._send_reply(ws, "the reply", heard=None, speak=True)
+        )
+        await asyncio.sleep(0.05)  # _send_reply has sent its JSON, is blocked on the WAV
+        push_task = asyncio.create_task(server.push_proactive("surprise"))
+        await asyncio.sleep(0.05)  # window where an unserialized push would interleave
+        gate.set()
+        await asyncio.gather(reply_task, push_task)
+        return ws.frames
+
+    frames = asyncio.run(_run())
+    labels = [
+        "wav:" + bytes(f).decode().split(":", 1)[1] if isinstance(f, (bytes, bytearray))
+        else "json:" + json.loads(f)["type"]
+        for f in frames
+    ]
+    assert labels == ["json:reply", "wav:the reply", "json:proactive_say", "wav:surprise"]
+
+
+# --- end-to-end: due reminder -> notify -> thread bridge -> live client ---
+
+
+def test_e2e_due_reminder_reaches_live_client_through_full_chain(tmp_path):
+    """serve_forever running, real ReminderStore + Notifier, real loopback client:
+    fire_due_reminders -> notify (worker thread) -> _push_from_thread bridge ->
+    push_proactive -> proactive_say arrives on the client socket."""
+    conn = db.connect(str(tmp_path / "jarvis.db"))
+    reminder_store = ReminderStore(conn)
+    notifier = Notifier(conn, quiet_hours="")
+    server = JarvisServer(
+        FakeAssistant(), notifier=notifier, reminder_store=reminder_store, port=0
+    )
+
+    async def _run():
+        serve_task = asyncio.create_task(server.serve_forever())
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 2.0
+        while server._ws_server is None:
+            if loop.time() > deadline:
+                raise TimeoutError("server never bound its socket")
+            await asyncio.sleep(0.01)
+        port = server._ws_server.sockets[0].getsockname()[1]
+        try:
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                await _wait_for_client_count(server, 1)
+                # Added only after the client is connected so the startup tick
+                # (which ran against an empty store) cannot consume it first.
+                reminder_store.add("stretch", "2000-01-01T00:00:00")
+                await server._fire_due_reminders()
+                return json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+        finally:
+            serve_task.cancel()
+            try:
+                await serve_task
+            except asyncio.CancelledError:
+                pass
+
+    msg = asyncio.run(_run())
+    assert msg == {"type": "proactive_say", "text": "Reminder: stretch", "audio_follows": False}
+    # Delivered live to a client -> nothing fell back to the notice queue.
+    assert notifier.drain() == []
 
 
 # --- backward-compatible construction ---

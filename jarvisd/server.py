@@ -53,9 +53,12 @@ class JarvisServer:
         # (the HA event listener runs rule actions under this same lock). Defaults to
         # this server so existing single-process wiring needs no changes.
         self.assistant_lock_holder = assistant_lock_holder if assistant_lock_holder is not None else self
-        self._clients: set = set()
+        # ws -> asyncio.Lock serializing writes to that connection: a JSON+WAV frame
+        # pair must never be split by a concurrent proactive push (or vice versa).
+        self._clients: dict = {}
         self._loop = None  # captured in serve_forever(); lets worker threads push safely
         self._reminder_task = None
+        self._ws_server = None  # set while serve_forever() is running (tests read the bound port)
 
     async def serve_forever(self):
         self._loop = asyncio.get_running_loop()
@@ -64,15 +67,23 @@ class JarvisServer:
         if self.reminder_store is not None and self.notifier is not None:
             self._reminder_task = asyncio.create_task(self._reminder_tick())
         try:
-            async with websockets.serve(self.handle, self.host, self.port, max_size=MAX_MESSAGE_BYTES):
+            async with websockets.serve(
+                self.handle, self.host, self.port, max_size=MAX_MESSAGE_BYTES
+            ) as ws_server:
+                self._ws_server = ws_server
                 log.info("jarvisd listening on ws://%s:%d", self.host, self.port)
                 await asyncio.Future()
         finally:
+            self._ws_server = None
             if self._reminder_task is not None:
                 self._reminder_task.cancel()
+                try:
+                    await self._reminder_task
+                except asyncio.CancelledError:
+                    pass
 
     async def handle(self, ws):
-        self._clients.add(ws)
+        self._clients[ws] = asyncio.Lock()
         try:
             async for message in ws:
                 try:
@@ -84,7 +95,7 @@ class JarvisServer:
                     log.exception("request failed")
                     await ws.send(json.dumps({"type": "error", "error": str(e)}))
         finally:
-            self._clients.discard(ws)
+            self._clients.pop(ws, None)
 
     async def _process(self, text: str) -> str:
         async with self._lock:
@@ -143,34 +154,47 @@ class JarvisServer:
         wav = None
         if speak and self.tts is not None and reply:
             wav = await asyncio.to_thread(self.tts.synthesize, reply)
-        await ws.send(json.dumps(
-            {"type": "reply", "text": reply, "heard": heard, "audio_follows": wav is not None}
-        ))
-        if wav is not None:
-            await ws.send(wav)
+        # Hold this connection's write lock across the JSON+WAV pair: ws.send()
+        # can suspend on flow-control drain mid-pair, and a concurrent
+        # push_proactive() to the same socket must not interleave its frames here
+        # (the client would attribute the wrong WAV to audio_follows).
+        async with self._client_write_lock(ws):
+            await ws.send(json.dumps(
+                {"type": "reply", "text": reply, "heard": heard, "audio_follows": wav is not None}
+            ))
+            if wav is not None:
+                await ws.send(wav)
+
+    def _client_write_lock(self, ws) -> asyncio.Lock:
+        """Per-connection write lock; a throwaway lock for unregistered sockets."""
+        lock = self._clients.get(ws)
+        return lock if lock is not None else asyncio.Lock()
 
     async def push_proactive(self, text: str) -> int:
         """Send an unsolicited proactive_say message to every connected client.
 
-        Returns the number of clients successfully reached. Iterates a snapshot of
-        the client set (list(self._clients)) so the registry can shrink mid-loop
-        without disturbing iteration; any client whose send fails is dropped from
-        the registry and does not prevent delivery to the rest.
+        Returns the number of clients successfully reached. Iterates a snapshot
+        (list of the registry) so it can shrink mid-loop without disturbing
+        iteration; any client whose send fails is dropped from the registry and
+        does not prevent delivery to the rest. Each connection's JSON+WAV pair is
+        sent under that connection's write lock so it cannot interleave with a
+        concurrent reply pair on the same socket.
         """
         wav = None
         if self.tts is not None:
             wav = await asyncio.to_thread(self.tts.synthesize, text)
         payload = json.dumps({"type": "proactive_say", "text": text, "audio_follows": wav is not None})
         reached = 0
-        for ws in list(self._clients):
+        for ws, lock in list(self._clients.items()):
             try:
-                await ws.send(payload)
-                if wav is not None:
-                    await ws.send(wav)
+                async with lock:
+                    await ws.send(payload)
+                    if wav is not None:
+                        await ws.send(wav)
                 reached += 1
             except Exception:
                 log.warning("proactive push failed for a client; dropping it", exc_info=True)
-                self._clients.discard(ws)
+                self._clients.pop(ws, None)
         return reached
 
     def _push_from_thread(self, text: str) -> int:
