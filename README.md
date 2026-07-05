@@ -21,6 +21,20 @@ The daemon binds `127.0.0.1:8765` (override with `JARVIS_HOST`/`JARVIS_PORT`).
 Warning: the WebSocket has no authentication — do not set `JARVIS_HOST` to a
 non-loopback address; that would expose full HA/PC/TV control to your network.
 
+## Memory
+
+JARVIS remembers you and your preferences:
+
+- **Profile** (`data/profile.md`): a curated file of facts the assistant always knows. Edit it
+  directly; changes take effect immediately on the next request (no restart needed).
+  Use "Remember that ..." to have JARVIS add a fact.
+- **Recall**: ask "what did we talk about volume?" to search past conversations.
+- **History**: conversation history is persisted in SQLite and restored on daemon restart,
+  so JARVIS knows the context of recent interactions even after it restarts.
+
+Note: The design spec calls for `memory/profile.md`, but we use `data/` because it is
+already gitignored and holds all personal state.
+
 ## Always-on
 
     scripts\install_autostart.bat     # registers a logon task (does NOT start it)

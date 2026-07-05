@@ -6,7 +6,10 @@ import sys
 from dotenv import load_dotenv
 
 from ha_client import HomeAssistantClient
+from jarvisd import db
 from jarvisd.core import Assistant
+from jarvisd.memory_store import MemoryStore
+from jarvisd.profile_store import ProfileStore
 from spotify_client import SpotifyClient
 from tv_client import AndroidTVClient
 
@@ -57,12 +60,24 @@ def create_assistant() -> tuple[Assistant, list[str]]:
     budget = float(os.getenv("MONTHLY_BUDGET", "20"))
     ollama_model = os.getenv("OLLAMA_MODEL", "qwen2.5:3b-instruct-q4_K_M")
 
+    # Wire up memory stores
+    memory_store = None
+    profile_store = None
+    try:
+        conn = db.connect(os.getenv("JARVIS_DB", "data/jarvis.db"))
+        memory_store = MemoryStore(conn)
+        profile_store = ProfileStore()
+    except Exception as e:
+        print(f"Memory unavailable: {e}")
+
     ai = Assistant(
         ha, anthropic_key,
         spotify_client=spotify,
         tv_client=tv,
         monthly_budget=budget,
         ollama_model=ollama_model,
+        profile_store=profile_store,
+        memory_store=memory_store,
     )
 
     features = ["Home Assistant", "PC Control"]
@@ -70,5 +85,7 @@ def create_assistant() -> tuple[Assistant, list[str]]:
         features.append("Spotify")
     if tv:
         features.append("Android TV")
+    if memory_store and profile_store:
+        features.append("Memory")
 
     return ai, features
