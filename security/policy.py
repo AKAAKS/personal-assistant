@@ -39,6 +39,13 @@ TOOL_PERMISSIONS = {
     # Memory
     "remember": "write",
     "recall": "read_only",
+    # Proactivity
+    "set_reminder": "write",
+    "list_reminders": "read_only",
+    "cancel_reminder": "write",
+    "add_trigger_rule": "write",
+    "list_trigger_rules": "read_only",
+    "delete_trigger_rule": "write",
 }
 
 DEFAULT_PERMISSION = "write"

@@ -149,3 +149,117 @@ def test_registry_memory_tools_after_tv():
     if tv_tools:
         last_tv_idx = max(tool_names.index(n) for n in tv_tools)
         assert memory_idx > last_tv_idx
+
+
+def test_registry_reminder_tools_without_store():
+    """Test registry without reminder_store doesn't include reminder tools."""
+    tools, handlers = build_registry(FakeHA(), FakeSystem())
+    tool_names = [t["name"] for t in tools]
+
+    assert "set_reminder" not in tool_names
+    assert "list_reminders" not in tool_names
+    assert "cancel_reminder" not in tool_names
+
+
+def test_registry_with_reminder_store():
+    """Test registry with reminder_store includes reminder tools."""
+    from jarvisd.reminder_store import ReminderStore
+    from jarvisd.db import connect
+
+    conn = connect(":memory:")
+    reminder_store = ReminderStore(conn)
+
+    tools, handlers = build_registry(
+        FakeHA(), FakeSystem(),
+        reminder_store=reminder_store
+    )
+
+    tool_names = [t["name"] for t in tools]
+    assert "set_reminder" in tool_names
+    assert "list_reminders" in tool_names
+    assert "cancel_reminder" in tool_names
+    assert all(callable(handlers[name]) for name in ["set_reminder", "list_reminders", "cancel_reminder"])
+
+
+def test_registry_rule_tools_without_store():
+    """Test registry without rules_store doesn't include rule tools."""
+    tools, handlers = build_registry(FakeHA(), FakeSystem())
+    tool_names = [t["name"] for t in tools]
+
+    assert "add_trigger_rule" not in tool_names
+    assert "list_trigger_rules" not in tool_names
+    assert "delete_trigger_rule" not in tool_names
+
+
+def test_registry_with_rules_store():
+    """Test registry with rules_store includes rule tools."""
+    from jarvisd.rules_store import RulesStore
+    from jarvisd.db import connect
+
+    conn = connect(":memory:")
+    rules_store = RulesStore(conn)
+
+    tools, handlers = build_registry(
+        FakeHA(), FakeSystem(),
+        rules_store=rules_store
+    )
+
+    tool_names = [t["name"] for t in tools]
+    assert "add_trigger_rule" in tool_names
+    assert "list_trigger_rules" in tool_names
+    assert "delete_trigger_rule" in tool_names
+    assert all(callable(handlers[name]) for name in ["add_trigger_rule", "list_trigger_rules", "delete_trigger_rule"])
+
+
+def test_registry_with_both_reminder_and_rule_stores():
+    """Test registry with both stores includes all proactive tools in order."""
+    from jarvisd.reminder_store import ReminderStore
+    from jarvisd.rules_store import RulesStore
+    from jarvisd.db import connect
+
+    conn = connect(":memory:")
+    reminder_store = ReminderStore(conn)
+    rules_store = RulesStore(conn)
+
+    tools, handlers = build_registry(
+        FakeHA(), FakeSystem(),
+        reminder_store=reminder_store,
+        rules_store=rules_store
+    )
+
+    tool_names = [t["name"] for t in tools]
+    # Reminder tools should come before rule tools
+    reminder_indices = [tool_names.index(n) for n in ["set_reminder", "list_reminders", "cancel_reminder"]]
+    rule_indices = [tool_names.index(n) for n in ["add_trigger_rule", "list_trigger_rules", "delete_trigger_rule"]]
+
+    assert max(reminder_indices) < min(rule_indices), "Reminder tools should come before rule tools"
+
+
+def test_registry_proactive_tools_after_memory():
+    """Test proactive tools come after memory tools."""
+    from jarvisd.profile_store import ProfileStore
+    from jarvisd.memory_store import MemoryStore
+    from jarvisd.reminder_store import ReminderStore
+    from jarvisd.rules_store import RulesStore
+    from jarvisd.db import connect
+
+    conn = connect(":memory:")
+    profile_store = ProfileStore()
+    memory_store = MemoryStore(conn)
+    reminder_store = ReminderStore(conn)
+    rules_store = RulesStore(conn)
+
+    tools, handlers = build_registry(
+        FakeHA(), FakeSystem(),
+        profile_store=profile_store,
+        memory_store=memory_store,
+        reminder_store=reminder_store,
+        rules_store=rules_store
+    )
+
+    tool_names = [t["name"] for t in tools]
+    memory_idx = tool_names.index("remember")
+    reminder_idx = tool_names.index("set_reminder")
+    rule_idx = tool_names.index("add_trigger_rule")
+
+    assert memory_idx < reminder_idx < rule_idx, "Tools should be ordered: memory, reminder, rule"
