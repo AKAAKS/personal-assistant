@@ -69,6 +69,8 @@ def create_assistant() -> tuple[Assistant, list[str]]:
         profile_store = ProfileStore()
     except Exception as e:
         print(f"Memory unavailable: {e}")
+        memory_store = None
+        profile_store = None
 
     ai = Assistant(
         ha, anthropic_key,
