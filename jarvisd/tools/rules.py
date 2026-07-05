@@ -6,7 +6,7 @@ TOOLS = [
         "description": """Add an automation rule triggered by Home Assistant events.
 
 Two kinds of rules:
-1. **Direct rules** execute a single tool call directly. Action is a JSON string with {"tool": "<tool_name>", "input": {...}}, e.g.:
+1. **Direct rules** execute a single tool call directly. Action is a JSON string with exactly two keys, {"tool": "<tool_name>", "input": {...}} — no other keys allowed. E.g.:
    {"tool": "control_light", "input": {"entity_id": "light.hall", "action": "turn_on"}}
    These run immediately when the event matches, bypassing the AI.
 
