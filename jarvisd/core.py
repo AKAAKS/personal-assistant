@@ -51,6 +51,8 @@ class Assistant:
         system_client=None,
         monthly_budget: float = 20.0,
         ollama_model: str = "qwen2.5:3b-instruct-q4_K_M",
+        profile_store=None,
+        memory_store=None,
     ):
         spotify = None
         if spotify_client is not None and getattr(spotify_client, "is_authenticated", lambda: True)():
@@ -63,19 +65,48 @@ class Assistant:
         self.classifier = IntentClassifier()
         self.cost_tracker = CostTracker(monthly_budget=monthly_budget)
         self.ollama = OllamaBackend(model=ollama_model)
+        self.profile_store = profile_store
+        self.memory_store = memory_store
 
         self.tools, self._handlers = build_registry(
             ha_client,
             system_client if system_client is not None else SystemClient(),
             spotify_client=spotify,
             tv_client=tv_client,
+            profile_store=profile_store,
+            memory_store=memory_store,
         )
         if self.tools:
             self.tools[-1] = {**self.tools[-1], "cache_control": {"type": "ephemeral"}}
 
-        self._system_prompt = [
+        if self.memory_store is not None:
+            self.conversation = self.memory_store.load_history(max_turns=10)
+            if self.conversation:
+                log.info("Restored %d turns of conversation history", len(self.conversation))
+
+    def _build_system(self) -> list[dict]:
+        """Assemble the cached system-prompt blocks: SYSTEM_PROMPT, then profile (if any)."""
+        blocks = [
             {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}
         ]
+        if self.profile_store is not None:
+            profile = self.profile_store.load()
+            if profile.strip():
+                blocks.append({
+                    "type": "text",
+                    "text": f"# What you know about the user\n\n{profile}",
+                    "cache_control": {"type": "ephemeral"},
+                })
+        return blocks
+
+    def _record_turn(self, role: str, text: str) -> None:
+        """Persist a turn to episodic memory; never let a persistence failure break the reply."""
+        if self.memory_store is None:
+            return
+        try:
+            self.memory_store.record(role, text)
+        except Exception as e:
+            log.warning("memory_store.record failed: %s", e)
 
     def _execute_tool(self, tool_name: str, tool_input: dict) -> str:
         handler = self._handlers.get(tool_name)
@@ -89,6 +120,7 @@ class Assistant:
     def process(self, user_message: str) -> str:
         """Classify intent, route to cheapest capable tier, return response."""
         tier = self.classifier.classify(user_message)
+        self._record_turn("user", user_message)
 
         if self.cost_tracker.should_force_downgrade() and tier == Tier.SONNET:
             log.warning("Budget near limit — downgrading Sonnet to Haiku")
@@ -99,12 +131,15 @@ class Assistant:
             if resp is not None:
                 self.conversation.append({"role": "user", "content": user_message})
                 self.conversation.append({"role": "assistant", "content": resp})
+                self._record_turn("assistant", resp)
                 return resp
             tier = Tier.HAIKU
 
         model = HAIKU_MODEL if tier == Tier.HAIKU else SONNET_MODEL
         log.info("Routing to %s", model)
-        return self._claude_loop(user_message, model)
+        reply = self._claude_loop(user_message, model)
+        self._record_turn("assistant", reply)
+        return reply
 
     def _handle_local(self, text: str) -> str | None:
         """Handle simple messages without an API call."""
@@ -140,7 +175,7 @@ class Assistant:
             response = self.client.messages.create(
                 model=model,
                 max_tokens=1024,
-                system=self._system_prompt,
+                system=self._build_system(),
                 tools=self.tools,
                 messages=self.conversation,
             )
