@@ -1,5 +1,8 @@
+import sqlite3
 from types import SimpleNamespace
 from jarvisd.tools import build_registry
+from jarvisd.profile_store import ProfileStore
+from jarvisd.memory_store import MemoryStore
 
 
 class FakeHA:
@@ -59,3 +62,90 @@ def test_every_tool_def_is_well_formed():
     for t in tools:
         assert t["name"] and t["description"], t
         assert t["input_schema"]["type"] == "object", t["name"]
+
+
+def test_registry_backward_compat_without_stores():
+    """Test that registry without stores is backward compatible."""
+    # Existing code should still work without stores
+    tools, handlers = build_registry(FakeHA(), FakeSystem())
+    tool_names = [t["name"] for t in tools]
+
+    # Should not have memory tools
+    assert "remember" not in tool_names
+    assert "recall" not in tool_names
+
+    # Should have ha and system tools
+    assert "list_devices" in tool_names
+    assert "launch_app" in tool_names
+
+    # All handlers should be callable
+    assert callable(handlers["list_devices"])
+    assert callable(handlers["launch_app"])
+
+
+def test_registry_with_both_stores():
+    """Test registry includes memory tools when both stores provided."""
+    profile_store = ProfileStore()
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    memory_store = MemoryStore(conn)
+
+    tools, handlers = build_registry(
+        FakeHA(), FakeSystem(),
+        profile_store=profile_store,
+        memory_store=memory_store
+    )
+
+    tool_names = [t["name"] for t in tools]
+
+    # Should have memory tools
+    assert "remember" in tool_names
+    assert "recall" in tool_names
+
+    # Should be last
+    assert tool_names[-2:] == ["remember", "recall"]
+
+    # All handlers should be callable
+    assert callable(handlers["remember"])
+    assert callable(handlers["recall"])
+
+
+def test_registry_with_one_store_only():
+    """Test registry without both stores doesn't include memory tools."""
+    profile_store = ProfileStore()
+
+    tools, handlers = build_registry(
+        FakeHA(), FakeSystem(),
+        profile_store=profile_store
+    )
+
+    tool_names = [t["name"] for t in tools]
+    assert "remember" not in tool_names
+    assert "recall" not in tool_names
+
+
+def test_registry_memory_tools_after_tv():
+    """Test memory tools come after tv tools."""
+    profile_store = ProfileStore()
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    memory_store = MemoryStore(conn)
+    tv = SimpleNamespace()
+
+    tools, handlers = build_registry(
+        FakeHA(), FakeSystem(),
+        tv_client=tv,
+        profile_store=profile_store,
+        memory_store=memory_store
+    )
+
+    tool_names = [t["name"] for t in tools]
+
+    # Find positions
+    tv_tools = [n for n in tool_names if n.startswith("tv_")]
+    memory_idx = tool_names.index("remember")
+
+    # Memory tools should come after all TV tools
+    if tv_tools:
+        last_tv_idx = max(tool_names.index(n) for n in tv_tools)
+        assert memory_idx > last_tv_idx

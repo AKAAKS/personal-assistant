@@ -36,6 +36,9 @@ TOOL_PERMISSIONS = {
     "list_processes": "read_only",
     "open_url_browser": "write",
     "system_info": "read_only",
+    # Memory
+    "remember": "write",
+    "recall": "read_only",
 }
 
 DEFAULT_PERMISSION = "write"
