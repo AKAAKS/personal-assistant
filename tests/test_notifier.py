@@ -298,3 +298,17 @@ def test_drain_never_raises_when_conn_broken(tmp_path):
     )
     conn.close()
     assert n.drain() == []
+
+
+# --- same-day quiet window + degenerate window (review follow-ups) ---
+
+
+def test_same_day_quiet_window_boundaries(tmp_path):
+    n, _ = make_notifier(tmp_path, quiet_hours="09:00-17:00")
+    for hour, minute, expect_quiet in [(9, 0, True), (16, 59, True), (17, 0, False), (8, 59, False)]:
+        assert n._is_quiet(datetime(2026, 7, 5, hour, minute)) is expect_quiet, f"{hour:02d}:{minute:02d}"
+
+
+def test_start_equals_end_means_never_quiet(tmp_path):
+    n, _ = make_notifier(tmp_path, quiet_hours="12:00-12:00")
+    assert n._is_quiet(datetime(2026, 7, 5, 12, 0)) is False
