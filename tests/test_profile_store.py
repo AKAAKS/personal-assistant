@@ -25,7 +25,7 @@ class TestProfileStoreAppend:
         result = store.append("I like coffee")
 
         assert profile_path.exists()
-        content = profile_path.read_text()
+        content = profile_path.read_text(encoding="utf-8")
         assert content.startswith("# JARVIS profile — facts the assistant always knows\n\n")
         assert "- I like coffee\n" in content
 
@@ -44,7 +44,7 @@ class TestProfileStoreAppend:
         fact = "I like\ncoffee\nand\ntea"
         result = store.append(fact)
 
-        content = profile_path.read_text()
+        content = profile_path.read_text(encoding="utf-8")
         assert "- I like coffee and tea\n" in content
         assert result == "Remembered: I like coffee and tea"
 
@@ -54,7 +54,7 @@ class TestProfileStoreAppend:
         store = ProfileStore(str(profile_path))
         result = store.append("  I like coffee  ")
 
-        content = profile_path.read_text()
+        content = profile_path.read_text(encoding="utf-8")
         assert "- I like coffee\n" in content
         assert result == "Remembered: I like coffee"
 
@@ -65,7 +65,7 @@ class TestProfileStoreAppend:
         result = store.append("I like coffee")
 
         assert profile_path.exists()
-        assert "- I like coffee\n" in profile_path.read_text()
+        assert "- I like coffee\n" in profile_path.read_text(encoding="utf-8")
 
     def test_append_multiple_facts(self, tmp_path):
         """append() adds multiple facts to the same file."""
@@ -75,7 +75,7 @@ class TestProfileStoreAppend:
         store.append("I like coffee")
         store.append("I prefer mornings")
 
-        content = profile_path.read_text()
+        content = profile_path.read_text(encoding="utf-8")
         assert "- I like coffee\n" in content
         assert "- I prefer mornings\n" in content
 
@@ -94,7 +94,7 @@ class TestProfileStoreMtimeCaching:
         assert "First fact" in first_load
 
         # Write directly to file (simulating external edit)
-        with open(profile_path, "a") as f:
+        with open(profile_path, "a", encoding="utf-8") as f:
             f.write("- Second fact\n")
 
         # Force mtime change by setting it explicitly
@@ -133,6 +133,53 @@ class TestProfileStoreMtimeCaching:
         content = store.load()
         assert "New fact" in content
         assert "# JARVIS profile" in content
+
+
+class TestProfileStoreEncoding:
+    """Test UTF-8 handling regardless of platform default encoding."""
+
+    def test_append_and_load_roundtrip_non_cp1252_chars(self, tmp_path):
+        """append() + load() round-trip a fact with chars outside cp1252."""
+        profile_path = tmp_path / "profile.md"
+        store = ProfileStore(str(profile_path))
+
+        result = store.append("User likes emoji 😀 and café")
+
+        assert result == "Remembered: User likes emoji 😀 and café"
+        content = store.load()
+        assert "- User likes emoji 😀 and café\n" in content
+
+    def test_load_externally_written_utf8_file(self, tmp_path):
+        """load() reads an externally-written UTF-8 file with non-cp1252 chars."""
+        profile_path = tmp_path / "profile.md"
+        profile_path.write_text(
+            "# JARVIS profile — facts the assistant always knows\n\n- likes 😀 café\n",
+            encoding="utf-8",
+        )
+        store = ProfileStore(str(profile_path))
+
+        content = store.load()
+        assert "- likes 😀 café\n" in content
+
+
+class TestProfileStoreSizeCacheKey:
+    """Test that the cache key includes file size, not mtime alone."""
+
+    def test_same_mtime_different_size_is_picked_up(self, tmp_path):
+        """An external edit sharing the cached mtime but changing size is re-read."""
+        profile_path = tmp_path / "profile.md"
+        profile_path.write_text("old content\n", encoding="utf-8")
+        stat = os.stat(profile_path)
+        original_times = (stat.st_atime, stat.st_mtime)
+
+        store = ProfileStore(str(profile_path))
+        assert store.load() == "old content\n"
+
+        # External edit with different size, then force the SAME mtime as before
+        profile_path.write_text("brand new longer content\n", encoding="utf-8")
+        os.utime(profile_path, original_times)
+
+        assert store.load() == "brand new longer content\n"
 
 
 class TestProfileStoreTokenEstimation:
@@ -186,7 +233,10 @@ class TestProfileStoreOverCapWarning:
         # Create a file that will be over capacity after append
         # 1500 tokens ≈ 6000 characters needed; header is ~61 chars, so need ~5950+ chars of content
         long_fact = "x" * 6000
-        profile_path.write_text(f"# JARVIS profile — facts the assistant always knows\n\n- {long_fact}\n")
+        profile_path.write_text(
+            f"# JARVIS profile — facts the assistant always knows\n\n- {long_fact}\n",
+            encoding="utf-8",
+        )
 
         result = store.append("Another fact that pushes over capacity")
 
@@ -200,7 +250,10 @@ class TestProfileStoreOverCapWarning:
 
         # Create file that will be over capacity
         long_fact = "x" * 6000
-        profile_path.write_text(f"# JARVIS profile — facts the assistant always knows\n\n- {long_fact}\n")
+        profile_path.write_text(
+            f"# JARVIS profile — facts the assistant always knows\n\n- {long_fact}\n",
+            encoding="utf-8",
+        )
 
         result = store.append("trigger warning")
 

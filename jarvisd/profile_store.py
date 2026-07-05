@@ -11,29 +11,29 @@ class ProfileStore:
 
     def __init__(self, path: str = "data/profile.md"):
         self._path = path
-        self._cache_mtime = None
+        self._cache_key = None
         self._cache_content = None
 
     def load(self) -> str:
-        """Load profile file contents; "" if missing. Cached by mtime."""
+        """Load profile file contents; "" if missing. Cached by (mtime, size)."""
         try:
             stat = os.stat(self._path)
-            mtime = stat.st_mtime
+            key = (stat.st_mtime, stat.st_size)
         except FileNotFoundError:
-            self._cache_mtime = None
+            self._cache_key = None
             self._cache_content = None
             return ""
 
-        if self._cache_mtime == mtime and self._cache_content is not None:
+        if self._cache_key == key and self._cache_content is not None:
             return self._cache_content
 
         try:
-            content = Path(self._path).read_text()
-            self._cache_mtime = mtime
+            content = Path(self._path).read_text(encoding="utf-8")
+            self._cache_key = key
             self._cache_content = content
             return content
         except FileNotFoundError:
-            self._cache_mtime = None
+            self._cache_key = None
             self._cache_content = None
             return ""
 
@@ -47,14 +47,14 @@ class ProfileStore:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         if not path.exists():
-            path.write_text(self.HEADER)
-            self._cache_mtime = None
+            path.write_text(self.HEADER, encoding="utf-8")
+            self._cache_key = None
             self._cache_content = None
 
-        with open(self._path, "a") as f:
+        with open(self._path, "a", encoding="utf-8") as f:
             f.write(f"- {fact}\n")
 
-        self._cache_mtime = None
+        self._cache_key = None
         self._cache_content = None
 
         result = f"Remembered: {fact}"
