@@ -50,9 +50,11 @@ class SystemClient:
             "explorer": "explorer",
             "calculator": "calc",
             "settings": "ms-settings:",
-            "spotify": "spotify",
-            "discord": "discord",
-            "steam": "steam",
+            "spotify": "spotify:",
+            "discord": "discord:",
+            "steam": "steam:",
+            "epic games": "com.epicgames.launcher:",
+            "epic": "com.epicgames.launcher:",
             "vscode": "code",
             "vs code": "code",
             "terminal": "wt",
@@ -64,11 +66,20 @@ class SystemClient:
         target_lower = target.lower().strip()
         cmd = app_map.get(target_lower, target)
 
-        if cmd.endswith(":") or os.path.exists(cmd):
-            os.startfile(cmd)
-        else:
-            subprocess.Popen(cmd, shell=True)
-        return f"Launched {target}."
+        # os.startfile -> ShellExecute, which resolves protocols, paths, PATH,
+        # and the App Paths registry (how the Run dialog finds browsers).
+        # Popen(shell=True) only searched PATH and reported success even when
+        # cmd.exe couldn't find the app.
+        candidates = [cmd]
+        if not cmd.endswith(":") and "." not in os.path.basename(cmd):
+            candidates.append(cmd + ".exe")
+        for candidate in candidates:
+            try:
+                os.startfile(candidate)
+                return f"Launched {target}."
+            except OSError:
+                continue
+        return f"Could not find '{target}' on this PC — it may not be installed or go by a different name."
 
     def list_processes(self) -> str:
         result = subprocess.run(
