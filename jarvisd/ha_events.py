@@ -89,14 +89,25 @@ class HAEventListener:
             except json.JSONDecodeError as e:
                 log.error("Rule '%s': malformed action JSON, skipping: %s", name, e)
                 return
-            result = await self.run_direct(action)
+            try:
+                result = await self.run_direct(action)
+            except Exception:
+                # A failing handler must NOT tear down the socket (which would drop
+                # every other rule's events during reconnect) -- log and skip just
+                # this rule, mirroring the malformed-JSON handling above.
+                log.exception("Rule '%s': direct action failed, skipping", name)
+                return
             self.notifier.notify(f"Rule '{name}': {result}", "low")
         elif kind == "smart":
             prompt = (
                 f"[Automation rule '{name}' triggered by {entity_id} -> {to_state}] "
                 f"{rule['action']}"
             )
-            result = await self.run_smart(prompt)
+            try:
+                result = await self.run_smart(prompt)
+            except Exception:
+                log.exception("Rule '%s': smart action failed, skipping", name)
+                return
             self.notifier.notify(result, "high")
         else:
             log.error("Rule '%s': unknown kind %r, skipping", name, kind)
@@ -124,11 +135,13 @@ class HAEventListener:
         """
         backoff = MIN_BACKOFF_SEC
         url = _ws_url(self.ha_url)
+        connect_failure_logged = False  # keeps a wrong-token loop from spamming the log
         while True:
             try:
                 async with websockets.connect(url) as ws:
                     await self._handshake(ws)
                     self._connected = True
+                    connect_failure_logged = False
                     backoff = MIN_BACKOFF_SEC
                     log.info("Connected to Home Assistant WebSocket at %s", url)
                     async for raw in ws:
@@ -143,9 +156,13 @@ class HAEventListener:
                 raise
             except Exception as e:
                 if self._connected:
+                    # We were up and lost the connection: a real transition, log it.
                     log.info("Disconnected from Home Assistant WebSocket: %s", e)
-                else:
-                    log.info("Could not connect to Home Assistant WebSocket (retrying): %s", e)
+                elif not connect_failure_logged:
+                    # First failure of a never-succeeded connect (e.g. HA down or a
+                    # bad token): log once, then stay quiet across the retry loop.
+                    log.info("Could not connect to Home Assistant WebSocket (will keep retrying): %s", e)
+                    connect_failure_logged = True
             self._connected = False
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, MAX_BACKOFF_SEC)

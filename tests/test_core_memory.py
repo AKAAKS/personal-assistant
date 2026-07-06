@@ -243,6 +243,31 @@ def test_execute_guarded_block_short_circuits_handler_and_audits_blocked():
     assert logged_result is None
 
 
+def test_execute_guarded_confirm_required_does_not_execute_and_audits():
+    """THE safety property: a destructive tool the guard flags CONFIRM_REQUIRED
+    must never auto-execute -- execute_guarded returns the confirmation prompt,
+    the handler is not called, and the audit records 'confirm_required'."""
+    from security.guard import SecurityResult, Verdict
+
+    ai = make_assistant()
+    handler_calls = []
+    ai._handlers["control_switch"] = lambda inp: handler_calls.append(inp) or "toggled"
+    ai.guard = SimpleNamespace(
+        check=lambda name, inp: SecurityResult(Verdict.CONFIRM_REQUIRED, "needs confirmation")
+    )
+    spy_audit = SpyAudit()
+    ai.audit = spy_audit
+
+    result = ai.execute_guarded("control_switch", {"entity_id": "switch.heater"})
+
+    assert result == "CONFIRMATION REQUIRED: needs confirmation"
+    assert handler_calls == []  # destructive action did NOT auto-execute
+    assert len(spy_audit.calls) == 1
+    tool_name, tool_input, verdict, reason, logged_result = spy_audit.calls[0]
+    assert (tool_name, tool_input, verdict) == ("control_switch", {"entity_id": "switch.heater"}, "confirm_required")
+    assert logged_result is None
+
+
 def test_execute_guarded_allowed_calls_handler_and_audits_allowed():
     ai = make_assistant()
     spy_audit = SpyAudit()

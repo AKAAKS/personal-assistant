@@ -202,3 +202,41 @@ def test_malformed_direct_action_json_is_skipped_not_crashed(rules, caplog):
 
     assert run_direct.calls == []
     assert any("Broken rule" in r.message for r in caplog.records)
+
+
+# --- a failing handler must not tear down the listener / block other rules ---
+
+
+def test_run_direct_exception_does_not_block_other_matched_rules(rules, caplog):
+    """One rule's handler raising must skip only that rule -- the listener survives
+    (returns normally, no exception out of _process_event) and other matched rules
+    still fire. Otherwise the exception would propagate to run() and drop the whole
+    socket during a reconnect, starving every other rule of events."""
+    boom_action = json.dumps({"tool": "boom", "input": {}})
+    ok_action = json.dumps({"tool": "control_light", "input": {"entity_id": "light.hall"}})
+    # matches() orders by created_ts DESC; both fire regardless of order.
+    rules.add("Boom rule", "state_changed", "direct", boom_action, entity_id="motion.hall")
+    rules.add("Good rule", "state_changed", "direct", ok_action, entity_id="motion.hall")
+
+    class ExplodingOnBoom:
+        def __init__(self):
+            self.calls = []
+
+        async def __call__(self, action):
+            self.calls.append(action)
+            if action["tool"] == "boom":
+                raise RuntimeError("handler blew up")
+            return "Light on"
+
+    run_direct = ExplodingOnBoom()
+    notifier = SpyNotifier()
+    listener = make_listener(rules, notifier=notifier, run_direct=run_direct)
+
+    with caplog.at_level(logging.ERROR):
+        # Must not raise despite the boom rule's handler exploding.
+        asyncio.run(listener._process_event(state_event("motion.hall", "on")))
+
+    # Both rules were attempted; the good one still notified; the bad one was logged.
+    assert len(run_direct.calls) == 2
+    assert notifier.calls == [("Rule 'Good rule': Light on", "low")]
+    assert any("Boom rule" in r.message for r in caplog.records)
