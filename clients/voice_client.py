@@ -4,7 +4,6 @@ Run: python -m clients.voice_client
 """
 
 import asyncio
-import json
 import logging
 import os
 import winsound
@@ -13,6 +12,7 @@ import numpy as np
 import websockets
 import websockets.exceptions
 
+from clients.protocol import ReceiveLoop
 from voice.audio_io import MicrophoneStream, VoiceActivityDetector
 from voice.wake_word import WakeWordDetector
 
@@ -38,6 +38,9 @@ class VoiceClient:
             print(f"Wake-word model unavailable: {e}")
             raise SystemExit(1)
         self._wake_buf = np.array([], dtype=np.int16)
+        # Serializes winsound.PlaySound calls: a proactive WAV must never
+        # interleave with a reply WAV (winsound.PlaySound is blocking).
+        self._play_lock = asyncio.Lock()
 
     def _capture_utterance(self) -> bytes | None:
         """Block until wake word, then record until silence. PCM bytes or None."""
@@ -80,34 +83,60 @@ class VoiceClient:
         except Exception:
             pass
 
+    async def _play(self, wav: bytes):
+        """Play a WAV under the shared lock so a proactive and a reply WAV
+        can never sound simultaneously (winsound.PlaySound is blocking)."""
+        async with self._play_lock:
+            await asyncio.to_thread(winsound.PlaySound, bytes(wav), winsound.SND_MEMORY)
+
+    @staticmethod
+    def _on_proactive_text(text: str):
+        print(f"JARVIS (proactive): {text}")
+
     async def run(self):
         self.mic.start()
         print("Voice client active. Listening for wake word... Ctrl+C to exit.\n")
         try:
             async with websockets.connect(self.url, max_size=32 * 1024 * 1024) as ws:
-                while True:
-                    pcm = await asyncio.to_thread(self._capture_utterance)
-                    if pcm is None:
-                        continue
-                    await ws.send(pcm)
-                    reply = json.loads(await ws.recv())
-                    if reply.get("type") == "error":
-                        print(f"  [error] {reply.get('error')}\n")
-                        self._failure_beep()
-                        continue
-                    if not reply.get("heard") and not reply.get("text"):
-                        print("  (didn't catch that)\n")
-                        self._failure_beep()
-                        continue
-                    if reply.get("heard"):
-                        print(f"  You: {reply['heard']}")
-                    if reply.get("text"):
-                        print(f"  JARVIS: {reply['text']}\n")
-                    if reply.get("audio_follows"):
-                        wav = await ws.recv()
-                        await asyncio.to_thread(
-                            winsound.PlaySound, bytes(wav), winsound.SND_MEMORY
-                        )
+                # One background receiver owns the socket read so a proactive
+                # push can be spoken at any time -- including while the wake-word
+                # capture loop below is blocked waiting for the next utterance.
+                receiver = ReceiveLoop(
+                    ws,
+                    on_proactive_text=self._on_proactive_text,
+                    on_proactive_audio=self._play,
+                )
+                recv_task = asyncio.create_task(receiver.run())
+                try:
+                    while True:
+                        pcm = await asyncio.to_thread(self._capture_utterance)
+                        if pcm is None:
+                            continue
+                        await ws.send(pcm)
+                        item = await receiver.get_reply(recv_task)
+                        reply = item["data"]
+                        if reply.get("type") == "error":
+                            print(f"  [error] {reply.get('error')}\n")
+                            self._failure_beep()
+                            continue
+                        if not reply.get("heard") and not reply.get("text"):
+                            print("  (didn't catch that)\n")
+                            self._failure_beep()
+                            continue
+                        if reply.get("heard"):
+                            print(f"  You: {reply['heard']}")
+                        if reply.get("text"):
+                            print(f"  JARVIS: {reply['text']}\n")
+                        if reply.get("audio_follows"):
+                            wav = await item["wav_future"]
+                            if wav is not None:
+                                await self._play(wav)
+                finally:
+                    recv_task.cancel()
+                    try:
+                        await recv_task
+                    except (asyncio.CancelledError, websockets.exceptions.ConnectionClosed):
+                        pass
         finally:
             self.mic.stop()
 
