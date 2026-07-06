@@ -211,3 +211,76 @@ def test_restored_history_valid_alternation(tmp_path):
     assert roles[-1] == "assistant"
     for i in range(len(roles) - 1):
         assert roles[i] != roles[i + 1]
+
+
+# ---------------------------------------------------------------------------
+# execute_guarded: shared guard/audit/execute choke point (Task 6)
+# ---------------------------------------------------------------------------
+
+
+class SpyAudit:
+    def __init__(self):
+        self.calls = []
+
+    def log(self, tool_name, tool_input, verdict, reason, result=None):
+        self.calls.append((tool_name, tool_input, verdict, reason, result))
+
+
+def test_execute_guarded_block_short_circuits_handler_and_audits_blocked():
+    ai = make_assistant()
+    handler_calls = []
+    ai._handlers["send_notification"] = lambda inp: handler_calls.append(inp) or "sent"
+    spy_audit = SpyAudit()
+    ai.audit = spy_audit
+
+    result = ai.execute_guarded("send_notification", {"message": "my ssn is 123"})
+
+    assert result.startswith("SECURITY BLOCK:")
+    assert handler_calls == []  # guard short-circuited before the handler ran
+    assert len(spy_audit.calls) == 1
+    tool_name, tool_input, verdict, reason, logged_result = spy_audit.calls[0]
+    assert (tool_name, tool_input, verdict) == ("send_notification", {"message": "my ssn is 123"}, "blocked")
+    assert logged_result is None
+
+
+def test_execute_guarded_allowed_calls_handler_and_audits_allowed():
+    ai = make_assistant()
+    spy_audit = SpyAudit()
+    ai.audit = spy_audit
+
+    result = ai.execute_guarded("list_devices", {})
+
+    assert "Desk" in result
+    assert len(spy_audit.calls) == 1
+    tool_name, tool_input, verdict, reason, logged_result = spy_audit.calls[0]
+    assert (tool_name, tool_input, verdict) == ("list_devices", {}, "allowed")
+    assert logged_result == result
+
+
+def test_claude_loop_still_enforces_guard_via_execute_guarded():
+    """_claude_loop must route every tool call through execute_guarded -- not a
+    parallel, hand-inlined copy of the guard/audit/execute sequence."""
+    ai = make_assistant()
+    calls = []
+    original = ai.execute_guarded
+
+    def spy(tool_name, tool_input):
+        calls.append((tool_name, tool_input))
+        return original(tool_name, tool_input)
+
+    ai.execute_guarded = spy
+
+    tool_use = SimpleNamespace(type="tool_use", id="tu_1", name="list_devices", input={})
+    first_response = SimpleNamespace(
+        content=[tool_use],
+        usage=SimpleNamespace(
+            input_tokens=10, output_tokens=5,
+            cache_read_input_tokens=0, cache_creation_input_tokens=0,
+        ),
+    )
+    ai.client = FakeAnthropicClient([first_response, fake_response("Here's your devices.")])
+
+    reply = ai._claude_loop("what's on?", "claude-sonnet-5")
+
+    assert reply == "Here's your devices."
+    assert calls == [("list_devices", {})]

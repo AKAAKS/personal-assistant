@@ -117,6 +117,28 @@ class Assistant:
         except Exception as e:
             return f"Error executing {tool_name}: {e}"
 
+    def execute_guarded(self, tool_name: str, tool_input: dict) -> str:
+        """Run one tool call through the security guard + audit choke point.
+
+        This is the ONLY path any caller should use to execute a tool call —
+        the Claude tool-use loop (`_claude_loop`) and the HA event listener's
+        direct rules both funnel through here so guard enforcement and audit
+        logging can never be bypassed or duplicated.
+        """
+        check = self.guard.check(tool_name, tool_input)
+
+        if check.verdict == Verdict.BLOCK:
+            result = f"SECURITY BLOCK: {check.reason}"
+            self.audit.log(tool_name, tool_input, "blocked", check.reason)
+        elif check.verdict == Verdict.CONFIRM_REQUIRED:
+            result = f"CONFIRMATION REQUIRED: {check.reason}"
+            self.audit.log(tool_name, tool_input, "confirm_required", check.reason)
+        else:
+            result = self._execute_tool(tool_name, tool_input)
+            self.audit.log(tool_name, tool_input, "allowed", check.reason, result)
+
+        return result
+
     def process(self, user_message: str) -> str:
         """Classify intent, route to cheapest capable tier, return response."""
         tier = self.classifier.classify(user_message)
@@ -198,17 +220,7 @@ class Assistant:
 
             tool_results = []
             for tool_block in tool_use_blocks:
-                check = self.guard.check(tool_block.name, tool_block.input)
-
-                if check.verdict == Verdict.BLOCK:
-                    result = f"SECURITY BLOCK: {check.reason}"
-                    self.audit.log(tool_block.name, tool_block.input, "blocked", check.reason)
-                elif check.verdict == Verdict.CONFIRM_REQUIRED:
-                    result = f"CONFIRMATION REQUIRED: {check.reason}"
-                    self.audit.log(tool_block.name, tool_block.input, "confirm_required", check.reason)
-                else:
-                    result = self._execute_tool(tool_block.name, tool_block.input)
-                    self.audit.log(tool_block.name, tool_block.input, "allowed", check.reason, result)
+                result = self.execute_guarded(tool_block.name, tool_block.input)
 
                 tool_results.append({
                     "type": "tool_result",
