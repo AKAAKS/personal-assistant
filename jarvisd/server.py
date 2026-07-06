@@ -57,9 +57,10 @@ class JarvisServer:
         self.ha_listener = ha_listener
         self._ha_listener_task = None
         self._lock = asyncio.Lock()  # one conversation; serialize agent access
-        # Who owns the "one conversation at a time" guard for guarded tool execution
-        # (the HA event listener runs rule actions under this same lock). Defaults to
-        # this server so existing single-process wiring needs no changes.
+        # Reserved hook for a future multi-server topology that would share one
+        # assistant/lock. Currently unused by the wiring: __main__'s HA-rule
+        # callables serialize on `server._lock` directly to match _process (see
+        # __main__.py). Defaults to this server; kept for API stability.
         self.assistant_lock_holder = assistant_lock_holder if assistant_lock_holder is not None else self
         # ws -> asyncio.Lock serializing writes to that connection: a JSON+WAV frame
         # pair must never be split by a concurrent proactive push (or vice versa).

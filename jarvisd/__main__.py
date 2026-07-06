@@ -81,12 +81,14 @@ def run(args, log):
     ha_token = os.getenv("HA_TOKEN")
     if notifier is not None and ha_token:
         # Guarded callables the HA event listener uses to fire rule actions. Both
-        # take the SAME lock the server uses to serialize user turns (server._lock)
-        # so a rule firing mid-conversation can't race the assistant's single
-        # conversation state -- the assistant is single-conversation, exactly like
-        # a connected client's turn. Built here (not inside JarvisServer or
-        # HAEventListener) because they close over both `ai` and `server._lock`,
-        # and the listener itself must stay unit-testable without a real assistant.
+        # take `server._lock` -- the exact lock JarvisServer._process holds around
+        # every user turn -- so a rule firing mid-conversation serializes with user
+        # turns and can't race the assistant's single conversation state. It must be
+        # server._lock specifically (not assistant_lock_holder._lock) to match what
+        # _process uses; they are the same object under the default holder. Built
+        # here (not inside JarvisServer or HAEventListener) because they close over
+        # both `ai` and `server._lock`, and the listener itself must stay
+        # unit-testable without a real assistant.
         async def run_direct(action):
             async with server._lock:
                 return await asyncio.to_thread(ai.execute_guarded, action["tool"], action["input"])
