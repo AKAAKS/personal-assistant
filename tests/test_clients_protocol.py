@@ -221,3 +221,43 @@ def test_get_reply_reraises_connection_closed_when_server_disappears():
             await ws_server.wait_closed()
 
     asyncio.run(_run())
+
+
+def test_pending_wav_future_resolves_to_none_when_connection_closes_mid_pair():
+    """Regression: reply promises audio_follows=true, then the connection closes
+    BEFORE the WAV arrives (blip / jarvisd restart / crash mid-TTS). The caller
+    already owns the item and is awaiting its wav_future; run()'s finally must
+    resolve that exact future to None so `await item['wav_future']` cannot hang
+    forever (voice_client would otherwise deadlock, never reaching its reconnect
+    handler). asyncio.wait_for makes a regression re-hang THIS test, not the suite."""
+
+    async def server_handler(ws):
+        await ws.recv()
+        await ws.send(json.dumps({"type": "reply", "text": "audio coming", "heard": None, "audio_follows": True}))
+        # Close without ever sending the promised WAV frame.
+        await ws.close()
+
+    async def _run():
+        ws_server, port = await _serve(server_handler)
+        try:
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                receiver = ReceiveLoop(ws)
+                recv_task = asyncio.create_task(receiver.run())
+
+                await ws.send(json.dumps({"type": "text_in", "text": "hi"}))
+                item = await receiver.get_reply(recv_task)
+                assert item["data"]["audio_follows"] is True
+                wav = await asyncio.wait_for(item["wav_future"], timeout=2)
+
+                recv_task.cancel()
+                try:
+                    await recv_task
+                except (asyncio.CancelledError, websockets.exceptions.ConnectionClosed):
+                    pass
+                return wav
+        finally:
+            ws_server.close()
+            await ws_server.wait_closed()
+
+    wav = asyncio.run(_run())
+    assert wav is None

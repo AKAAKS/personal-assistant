@@ -57,6 +57,16 @@ class ReceiveLoop:
                 else:
                     await self._handle_text(message)
         finally:
+            # If a reply promised audio_follows=true but the connection closed
+            # before the WAV frame arrived, the caller already owns that item and
+            # is awaiting its wav_future. Resolve the exact pending future to None
+            # so `await item["wav_future"]` cannot hang forever -- the caller's
+            # None guard then continues and its next send() raises ConnectionClosed
+            # into the existing reconnect handler. (_pending_item is set before the
+            # item is enqueued and cleared once its WAV lands, so this is always the
+            # same future object the caller holds, and never a stale one.)
+            if self._pending_item is not None and not self._pending_item["wav_future"].done():
+                self._pending_item["wav_future"].set_result(None)
             await self.queue.put(None)
 
     async def get_reply(self, recv_task):
@@ -69,6 +79,9 @@ class ReceiveLoop:
         item = await self.queue.get()
         if item is None:
             await recv_task  # re-raises the receive loop's exception, if any
+            # Defensive only: run()'s `while True` loop exits solely via an
+            # exception out of ws.recv(), so `await recv_task` above always
+            # raises and this return is effectively unreachable.
             return None
         return item
 
