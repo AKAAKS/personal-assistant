@@ -93,7 +93,7 @@ class JarvisServer:
                         await self._handle_json(ws, message)
                 except Exception as e:
                     log.exception("request failed")
-                    await ws.send(json.dumps({"type": "error", "error": str(e)}))
+                    await self._safe_send(ws, json.dumps({"type": "error", "error": str(e)}))
         finally:
             self._clients.pop(ws, None)
 
@@ -118,7 +118,7 @@ class JarvisServer:
         try:
             msg = json.loads(raw)
         except json.JSONDecodeError:
-            await ws.send(json.dumps({"type": "error", "error": "invalid JSON"}))
+            await self._safe_send(ws, json.dumps({"type": "error", "error": "invalid JSON"}))
             return
         mtype = msg.get("type")
         if mtype == "text_in":
@@ -127,15 +127,19 @@ class JarvisServer:
             await self._send_reply(ws, reply, heard=None, speak=bool(msg.get("speak")))
         elif mtype == "reset":
             self.assistant.reset_conversation()
-            await ws.send(json.dumps(
+            await self._safe_send(ws, json.dumps(
                 {"type": "reply", "text": "Conversation cleared.", "heard": None, "audio_follows": False}
             ))
         else:
-            await ws.send(json.dumps({"type": "error", "error": f"unknown message type: {mtype!r}"}))
+            await self._safe_send(
+                ws, json.dumps({"type": "error", "error": f"unknown message type: {mtype!r}"})
+            )
 
     async def _handle_audio(self, ws, pcm: bytes):
         if self.stt is None:
-            await ws.send(json.dumps({"type": "error", "error": "speech not enabled on this server"}))
+            await self._safe_send(
+                ws, json.dumps({"type": "error", "error": "speech not enabled on this server"})
+            )
             return
         import numpy as np
         audio = np.frombuffer(pcm, dtype=np.int16)
@@ -143,7 +147,9 @@ class JarvisServer:
         heard = await asyncio.to_thread(self.stt.transcribe, audio)
         if not heard.strip():
             log.info("Transcription empty — no reply generated")
-            await ws.send(json.dumps({"type": "reply", "text": "", "heard": "", "audio_follows": False}))
+            await self._safe_send(
+                ws, json.dumps({"type": "reply", "text": "", "heard": "", "audio_follows": False})
+            )
             return
         log.info("Heard: %s", heard)
         reply = await self._process(heard)
@@ -154,21 +160,34 @@ class JarvisServer:
         wav = None
         if speak and self.tts is not None and reply:
             wav = await asyncio.to_thread(self.tts.synthesize, reply)
-        # Hold this connection's write lock across the JSON+WAV pair: ws.send()
-        # can suspend on flow-control drain mid-pair, and a concurrent
+        # _safe_send holds this connection's write lock across the JSON+WAV pair:
+        # ws.send() can suspend on flow-control drain mid-pair, and a concurrent
         # push_proactive() to the same socket must not interleave its frames here
         # (the client would attribute the wrong WAV to audio_follows).
-        async with self._client_write_lock(ws):
-            await ws.send(json.dumps(
-                {"type": "reply", "text": reply, "heard": heard, "audio_follows": wav is not None}
-            ))
-            if wav is not None:
-                await ws.send(wav)
+        frame = json.dumps(
+            {"type": "reply", "text": reply, "heard": heard, "audio_follows": wav is not None}
+        )
+        if wav is not None:
+            await self._safe_send(ws, frame, wav)
+        else:
+            await self._safe_send(ws, frame)
 
     def _client_write_lock(self, ws) -> asyncio.Lock:
         """Per-connection write lock; a throwaway lock for unregistered sockets."""
         lock = self._clients.get(ws)
         return lock if lock is not None else asyncio.Lock()
+
+    async def _safe_send(self, ws, *frames):
+        """Send one or more frames to a socket atomically w.r.t. that connection.
+
+        Every write to a client goes through here so no frame -- not a bare error
+        or reply, not either half of a JSON+WAV pair -- can ever reach the wire
+        outside the connection's write lock and interpose into another exchange's
+        frames (which would corrupt audio_follows attribution on the client).
+        """
+        async with self._client_write_lock(ws):
+            for f in frames:
+                await ws.send(f)
 
     async def push_proactive(self, text: str) -> int:
         """Send an unsolicited proactive_say message to every connected client.
@@ -185,12 +204,12 @@ class JarvisServer:
             wav = await asyncio.to_thread(self.tts.synthesize, text)
         payload = json.dumps({"type": "proactive_say", "text": text, "audio_follows": wav is not None})
         reached = 0
-        for ws, lock in list(self._clients.items()):
+        for ws in list(self._clients):
             try:
-                async with lock:
-                    await ws.send(payload)
-                    if wav is not None:
-                        await ws.send(wav)
+                if wav is not None:
+                    await self._safe_send(ws, payload, wav)
+                else:
+                    await self._safe_send(ws, payload)
                 reached += 1
             except Exception:
                 log.warning("proactive push failed for a client; dropping it", exc_info=True)

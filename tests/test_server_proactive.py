@@ -332,15 +332,19 @@ def test_no_notifier_does_not_touch_reply():
 
 
 class GatedWS:
-    """Records frames; blocks (before recording) on one specific payload until gated."""
+    """Records frames; blocks (before recording) on one specific payload until gated.
 
-    def __init__(self, gate: asyncio.Event, block_on: bytes):
+    block_on may be str or bytes; a payload matches when it equals block_on after
+    normalizing bytes/bytearray to bytes (str frames compare as-is)."""
+
+    def __init__(self, gate: asyncio.Event, block_on):
         self.frames = []
         self.gate = gate
         self.block_on = block_on
 
     async def send(self, payload):
-        if isinstance(payload, (bytes, bytearray)) and bytes(payload) == self.block_on:
+        candidate = bytes(payload) if isinstance(payload, (bytes, bytearray)) else payload
+        if candidate == self.block_on:
             await self.gate.wait()
         self.frames.append(payload)
 
@@ -372,6 +376,39 @@ def test_concurrent_reply_and_push_never_split_json_wav_pairs():
         for f in frames
     ]
     assert labels == ["json:reply", "wav:the reply", "json:proactive_say", "wav:surprise"]
+
+
+def test_bare_frame_cannot_split_a_concurrent_proactive_pair():
+    """A bare single-frame send (here a reset reply) from the handle() task must not
+    slip between a concurrent proactive_say JSON and its WAV on the same socket."""
+
+    async def _run():
+        server = JarvisServer(FakeAssistant(), tts=FakeTTS())
+        gate = asyncio.Event()
+        # Block push_proactive ON its WAV frame: the proactive_say JSON is already
+        # recorded, so an unserialized bare frame would land between JSON and WAV.
+        ws = GatedWS(gate, block_on=b"RIFF-fake-wav:surprise")
+        server._clients[ws] = asyncio.Lock()
+
+        push_task = asyncio.create_task(server.push_proactive("surprise"))
+        await asyncio.sleep(0.05)  # push has emitted proactive JSON, blocked before WAV
+        # A bare reset frame on the SAME connection must wait for the pair to finish.
+        bare_task = asyncio.create_task(
+            server._safe_send(ws, json.dumps({"type": "reply", "text": "Conversation cleared."}))
+        )
+        await asyncio.sleep(0.05)
+        gate.set()
+        await asyncio.gather(push_task, bare_task)
+        return ws.frames
+
+    frames = asyncio.run(_run())
+    labels = [
+        "wav" if isinstance(f, (bytes, bytearray)) else "json:" + json.loads(f)["type"]
+        for f in frames
+    ]
+    # The proactive pair (proactive_say json, then wav) must be contiguous.
+    i = labels.index("json:proactive_say")
+    assert labels[i + 1] == "wav", f"proactive pair split by a bare frame: {labels}"
 
 
 # --- end-to-end: due reminder -> notify -> thread bridge -> live client ---
