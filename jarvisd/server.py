@@ -40,6 +40,7 @@ class JarvisServer:
         notifier=None,
         reminder_store=None,
         assistant_lock_holder=None,
+        ha_listener=None,
     ):
         self.assistant = assistant
         self.stt = stt
@@ -48,6 +49,13 @@ class JarvisServer:
         self.port = port
         self.notifier = notifier
         self.reminder_store = reminder_store
+        # Optional HAEventListener; may also be set as an attribute after construction
+        # (the wiring in jarvisd/__main__.py needs `server._lock` to build its
+        # run_direct/run_smart callables, so the listener is often created after the
+        # server -- see __main__.py for why). started/cancelled in serve_forever()
+        # exactly like _reminder_task.
+        self.ha_listener = ha_listener
+        self._ha_listener_task = None
         self._lock = asyncio.Lock()  # one conversation; serialize agent access
         # Who owns the "one conversation at a time" guard for guarded tool execution
         # (the HA event listener runs rule actions under this same lock). Defaults to
@@ -66,6 +74,8 @@ class JarvisServer:
             self.notifier.push_to_clients = self._push_from_thread
         if self.reminder_store is not None and self.notifier is not None:
             self._reminder_task = asyncio.create_task(self._reminder_tick())
+        if self.ha_listener is not None:
+            self._ha_listener_task = asyncio.create_task(self.ha_listener.run())
         try:
             async with websockets.serve(
                 self.handle, self.host, self.port, max_size=MAX_MESSAGE_BYTES
@@ -79,6 +89,12 @@ class JarvisServer:
                 self._reminder_task.cancel()
                 try:
                     await self._reminder_task
+                except asyncio.CancelledError:
+                    pass
+            if self._ha_listener_task is not None:
+                self._ha_listener_task.cancel()
+                try:
+                    await self._ha_listener_task
                 except asyncio.CancelledError:
                     pass
 

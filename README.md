@@ -35,6 +35,46 @@ JARVIS remembers you and your preferences:
 Note: The design spec calls for `memory/profile.md`, but we use `data/` because it is
 already gitignored and holds all personal state.
 
+## Proactivity
+
+JARVIS can act without being spoken to first: reminders that survive restarts, and
+Home Assistant event triggers ("rules") that fire automations directly or hand them
+to the AI.
+
+**Reminders** — just ask, in plain language:
+
+- "Remind me in 20 minutes to take the laundry out."
+- "Remind me every day at 8am to take my meds." (daily/weekly recurrence)
+- "What are my reminders?"
+- "Cancel reminder 2."
+
+A reminder fires by speaking through a connected voice/CLI client if one is open;
+otherwise it falls back to a Home Assistant phone push, and if that also fails (or
+HA is down) it's queued and delivered as "While you were away: ..." the next time
+you chat.
+
+**Trigger rules** — ask JARVIS to create an automation from an HA event. Two kinds:
+
+- *Direct* (runs a tool call immediately, no AI involved, $0 cost):
+  "If the hall motion sensor turns on after 11pm, turn on the hall light at 20%
+  brightness."
+- *Smart* (the instruction is handed to the AI to reason about when the event
+  fires; cooldown-limited to avoid spam):
+  "If the front door opens and nobody is home, check the camera and notify me if
+  it's not one of us."
+
+Rules require Home Assistant's WebSocket API (same `HA_URL`/`HA_TOKEN` as
+everything else) and only take effect once HA is reachable. The daemon tolerates
+HA being down or restarting at any time: the event listener reconnects with
+backoff in the background, and reminders/the notifier keep working with or
+without it (a phone push just fails over to the queue).
+
+Env vars:
+
+- `QUIET_HOURS` (default `23:00-08:00`) — during this window, proactive messages
+  are always queued instead of spoken/pushed immediately (handles overnight
+  wraparound; set to an empty string to disable quiet hours entirely).
+
 ## Always-on
 
     scripts\install_autostart.bat     # registers a logon task (does NOT start it)

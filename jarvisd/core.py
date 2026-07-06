@@ -53,6 +53,8 @@ class Assistant:
         ollama_model: str = "qwen2.5:3b-instruct-q4_K_M",
         profile_store=None,
         memory_store=None,
+        reminder_store=None,
+        rules_store=None,
     ):
         spotify = None
         if spotify_client is not None and getattr(spotify_client, "is_authenticated", lambda: True)():
@@ -75,6 +77,8 @@ class Assistant:
             tv_client=tv_client,
             profile_store=profile_store,
             memory_store=memory_store,
+            reminder_store=reminder_store,
+            rules_store=rules_store,
         )
         if self.tools:
             self.tools[-1] = {**self.tools[-1], "cache_control": {"type": "ephemeral"}}

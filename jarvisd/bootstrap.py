@@ -10,12 +10,22 @@ from jarvisd import db
 from jarvisd.core import Assistant
 from jarvisd.memory_store import MemoryStore
 from jarvisd.profile_store import ProfileStore
+from jarvisd.reminder_store import ReminderStore
+from jarvisd.rules_store import RulesStore
 from spotify_client import SpotifyClient
 from tv_client import AndroidTVClient
 
 
-def create_assistant() -> tuple[Assistant, list[str]]:
-    """Initialize clients and create assistant. Returns (assistant, active_features)."""
+def create_assistant():
+    """Initialize clients and create assistant.
+
+    Returns (assistant, active_features, conn, reminder_store, rules_store, ha_client).
+    conn/reminder_store/rules_store are None together if the DB/memory layer failed to
+    initialize (all-or-nothing, same as the Phase 2 memory wiring). ha_client is always
+    the same HomeAssistantClient instance already wired into the assistant -- returned
+    so __main__ can reuse it for the Notifier and HA event listener without opening a
+    second connection.
+    """
     load_dotenv()
 
     anthropic_key = os.getenv("ANTHROPIC_API_KEY")
@@ -60,17 +70,25 @@ def create_assistant() -> tuple[Assistant, list[str]]:
     budget = float(os.getenv("MONTHLY_BUDGET", "20"))
     ollama_model = os.getenv("OLLAMA_MODEL", "qwen2.5:3b-instruct-q4_K_M")
 
-    # Wire up memory stores
+    # Wire up memory + proactivity stores (all on the same conn; all-or-nothing)
+    conn = None
     memory_store = None
     profile_store = None
+    reminder_store = None
+    rules_store = None
     try:
         conn = db.connect(os.getenv("JARVIS_DB", "data/jarvis.db"))
         memory_store = MemoryStore(conn)
         profile_store = ProfileStore()
+        reminder_store = ReminderStore(conn)
+        rules_store = RulesStore(conn)
     except Exception as e:
         print(f"Memory unavailable: {e}")
+        conn = None
         memory_store = None
         profile_store = None
+        reminder_store = None
+        rules_store = None
 
     ai = Assistant(
         ha, anthropic_key,
@@ -80,6 +98,8 @@ def create_assistant() -> tuple[Assistant, list[str]]:
         ollama_model=ollama_model,
         profile_store=profile_store,
         memory_store=memory_store,
+        reminder_store=reminder_store,
+        rules_store=rules_store,
     )
 
     features = ["Home Assistant", "PC Control"]
@@ -89,5 +109,7 @@ def create_assistant() -> tuple[Assistant, list[str]]:
         features.append("Android TV")
     if memory_store and profile_store:
         features.append("Memory")
+    if reminder_store and rules_store:
+        features.append("Proactivity")
 
-    return ai, features
+    return ai, features, conn, reminder_store, rules_store, ha
