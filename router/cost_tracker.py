@@ -17,14 +17,21 @@ MODEL_PRICING = {
 CACHE_READ_MULT = 0.1    # cache reads bill at ~0.1x input price
 CACHE_WRITE_MULT = 1.25  # 5-minute-TTL cache writes bill at 1.25x input price
 
+# Pinned 2026-07: Anthropic server-side web_search bills $10 per 1,000 searches
+# on top of tokens. Metered here; hard monthly cap enforced by core dropping
+# the tool from requests (the guard cannot intercept server-side tools).
+WEB_SEARCH_PRICE_PER_CALL = 10.00 / 1000
+
 
 class CostTracker:
 
-    def __init__(self, log_path: str = "logs/cost.jsonl", monthly_budget: float = 20.0):
+    def __init__(self, log_path: str = "logs/cost.jsonl", monthly_budget: float = 20.0, search_monthly_cap: int = 100):
         self.log_path = Path(log_path)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.monthly_budget = monthly_budget
+        self.search_monthly_cap = search_monthly_cap
         self._month_cache: tuple[str, float] | None = None
+        self._search_month_cache: tuple[str, int] | None = None
 
     def record(
         self,
@@ -34,6 +41,7 @@ class CostTracker:
         cache_read_tokens: int = 0,
         cache_creation_tokens: int = 0,
         source: str = "interactive",
+        web_search_requests: int = 0,
     ) -> float:
         pricing = MODEL_PRICING.get(model, {"input": 3.0, "output": 15.0})
         cost = (
@@ -41,7 +49,7 @@ class CostTracker:
             + cache_read_tokens * pricing["input"] * CACHE_READ_MULT
             + cache_creation_tokens * pricing["input"] * CACHE_WRITE_MULT
             + output_tokens * pricing["output"]
-        ) / 1_000_000
+        ) / 1_000_000 + web_search_requests * WEB_SEARCH_PRICE_PER_CALL
 
         entry = {
             "ts": datetime.now().isoformat(),
@@ -51,6 +59,7 @@ class CostTracker:
             "cache_read": cache_read_tokens,
             "cache_write": cache_creation_tokens,
             "source": source,
+            "search": web_search_requests,
             "cost": round(cost, 6),
         }
 
@@ -58,6 +67,7 @@ class CostTracker:
             f.write(json.dumps(entry) + "\n")
 
         self._month_cache = None
+        self._search_month_cache = None
 
         over, spend, msg = self.check_budget()
         if msg:
@@ -97,6 +107,30 @@ class CostTracker:
 
     def should_force_downgrade(self) -> bool:
         return self.get_monthly_spend() >= self.monthly_budget * 0.95
+
+    def search_requests_this_month(self) -> int:
+        month_key = datetime.now().strftime("%Y-%m")
+        if self._search_month_cache and self._search_month_cache[0] == month_key:
+            return self._search_month_cache[1]
+
+        if not self.log_path.exists():
+            return 0
+
+        total = 0
+        with open(self.log_path) as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                    if entry["ts"].startswith(month_key):
+                        total += entry.get("search", 0)
+                except (json.JSONDecodeError, KeyError):
+                    continue
+
+        self._search_month_cache = (month_key, total)
+        return total
+
+    def web_search_allowed(self) -> bool:
+        return self.search_requests_this_month() < self.search_monthly_cap
 
     def summary(self) -> str:
         spend = self.get_monthly_spend()

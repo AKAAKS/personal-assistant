@@ -43,3 +43,28 @@ def test_monthly_spend_tolerates_old_format_lines(tmp_path):
     p.write_text('{"ts": "2099-01-01T00:00:00", "model": "x", "in": 1, "out": 1, "cost": 0.5}\n')
     t = CostTracker(log_path=str(p), monthly_budget=20.0)
     assert t.get_monthly_spend() >= 0.0  # must not raise
+
+
+def test_web_search_requests_priced_and_logged(tmp_path):
+    t = CostTracker(log_path=str(tmp_path / "cost.jsonl"), monthly_budget=20.0)
+    cost = t.record("claude-haiku-4-5", 1000, 100, web_search_requests=3)
+    # 3 searches at $0.01 each on top of token cost
+    token_only = t.record("claude-haiku-4-5", 1000, 100)
+    assert cost == pytest.approx(token_only + 0.03)
+    entry = json.loads((tmp_path / "cost.jsonl").read_text().splitlines()[0])
+    assert entry["search"] == 3
+
+
+def test_search_requests_this_month_counts_entries(tmp_path):
+    t = CostTracker(log_path=str(tmp_path / "cost.jsonl"))
+    t.record("claude-haiku-4-5", 10, 10, web_search_requests=2)
+    t.record("claude-haiku-4-5", 10, 10)  # no searches
+    t.record("claude-haiku-4-5", 10, 10, web_search_requests=1)
+    assert t.search_requests_this_month() == 3
+
+
+def test_web_search_allowed_respects_cap(tmp_path):
+    t = CostTracker(log_path=str(tmp_path / "cost.jsonl"), search_monthly_cap=2)
+    assert t.web_search_allowed() is True
+    t.record("claude-haiku-4-5", 10, 10, web_search_requests=2)
+    assert t.web_search_allowed() is False
