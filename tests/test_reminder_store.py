@@ -17,8 +17,7 @@ def test_migration_reaches_v3_and_is_idempotent(tmp_path):
     db.connect(path).close()
     conn = db.connect(path)  # must not re-run migrations / raise
     row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
-    assert row["v"] == 3
-    assert db.SCHEMA_VERSION == 3
+    assert row["v"] == db.SCHEMA_VERSION
     conn.close()
 
 
@@ -41,7 +40,7 @@ def test_v2_db_upgrades_to_v3_preserving_data(tmp_path):
 
     conn = db.connect(path)
     row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
-    assert row["v"] == 3
+    assert row["v"] == db.SCHEMA_VERSION
 
     msg = conn.execute("SELECT content FROM messages").fetchone()
     assert msg["content"] == "hello before upgrade"

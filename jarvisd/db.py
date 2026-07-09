@@ -3,7 +3,7 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # version -> SQL script. Later phases append entries and bump SCHEMA_VERSION.
 MIGRATIONS = {
@@ -51,6 +51,21 @@ MIGRATIONS = {
           enabled INTEGER NOT NULL DEFAULT 1,
           created_ts TEXT NOT NULL
         );
+    """,
+    4: """
+        CREATE TABLE meals (
+          id INTEGER PRIMARY KEY,
+          ts TEXT NOT NULL,
+          description TEXT NOT NULL,
+          quantity TEXT NOT NULL DEFAULT '',
+          calories INTEGER NOT NULL,
+          protein_g REAL NOT NULL,
+          carbs_g REAL NOT NULL,
+          fat_g REAL NOT NULL,
+          confidence TEXT NOT NULL DEFAULT 'medium',
+          assumptions TEXT NOT NULL DEFAULT ''
+        );
+        ALTER TABLE reminders ADD COLUMN condition TEXT;
     """,
 }
 
