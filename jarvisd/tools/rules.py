@@ -46,7 +46,7 @@ Both rule types can filter on entity_id and new state (to_state).
                 },
                 "cooldown_sec": {
                     "type": "integer",
-                    "description": "Minimum seconds between fires (default 300). Prevents repeated triggers.",
+                    "description": "Minimum seconds between fires (default 300). Prevents repeated triggers. Smart rules are clamped to at least 60s because each fire costs an AI call.",
                 },
             },
             "required": ["name", "event_type", "kind", "action"],
@@ -54,7 +54,7 @@ Both rule types can filter on entity_id and new state (to_state).
     },
     {
         "name": "list_trigger_rules",
-        "description": "List all trigger rules.",
+        "description": "List all trigger rules with their IDs (use the ID with delete_trigger_rule).",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -129,7 +129,8 @@ def handlers(rules_store):
             return "No trigger rules configured."
 
         lines = []
-        for i, rule in enumerate(rules, start=1):
+        # Real DB id, not row position -- see list_reminders for why.
+        for rule in rules:
             name = rule["name"]
             event_type = rule["event_type"]
             kind = rule["kind"]
@@ -140,7 +141,7 @@ def handlers(rules_store):
             if rule["to_state"]:
                 filters.append(f"to_state:{rule['to_state']}")
             filters_str = f" [{', '.join(filters)}]" if filters else ""
-            lines.append(f"{i}. {name} ({kind}, {event_type}){filters_str} — {enabled_str}")
+            lines.append(f"{rule['id']}. {name} ({kind}, {event_type}){filters_str} — {enabled_str}")
 
         return "\n".join(lines)
 

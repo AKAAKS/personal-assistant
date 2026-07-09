@@ -10,6 +10,8 @@ would create (which take the assistant lock and call
 import asyncio
 import json
 import logging
+import sqlite3
+import threading
 
 import pytest
 
@@ -240,3 +242,79 @@ def test_run_direct_exception_does_not_block_other_matched_rules(rules, caplog):
     assert len(run_direct.calls) == 2
     assert notifier.calls == [("Rule 'Good rule': Light on", "low")]
     assert any("Boom rule" in r.message for r in caplog.records)
+
+
+# --- notify() must run off the event-loop thread ---
+
+
+def test_notify_runs_off_the_event_loop_thread(rules):
+    """notifier.notify() does sqlite I/O, possibly a blocking HA HTTP call, and --
+    critically -- its push_to_clients bridge blocks on
+    run_coroutine_threadsafe(...).result(), which DEADLOCKS the whole daemon if
+    invoked on the loop thread. _fire_rule must therefore hop to a worker thread
+    (asyncio.to_thread) for every notify, for both direct and smart rules."""
+    direct_action = json.dumps({"tool": "control_light", "input": {}})
+    rules.add("Direct rule", "state_changed", "direct", direct_action, entity_id="motion.hall")
+    rules.add("Smart rule", "state_changed", "smart", "say something", entity_id="motion.hall")
+
+    class ThreadRecordingNotifier:
+        def __init__(self):
+            self.calls = []
+
+        def notify(self, text, priority="low"):
+            self.calls.append(threading.get_ident())
+
+    notifier = ThreadRecordingNotifier()
+    listener = make_listener(rules, notifier=notifier)
+
+    async def scenario():
+        await listener._process_event(state_event("motion.hall", "on"))
+        return threading.get_ident()
+
+    loop_thread = asyncio.run(scenario())
+
+    assert len(notifier.calls) == 2  # one per rule kind
+    assert all(t != loop_thread for t in notifier.calls)
+
+
+# --- store failures during matching must not kill the listener ---
+
+
+def test_rules_store_failure_during_matching_is_contained(caplog):
+    """A sqlite hiccup in matches() must be logged and skipped -- if it raised out
+    of _process_event, run() would drop the HA socket and reconnect, starving
+    every rule of events over a transient DB error."""
+
+    class ExplodingRulesStore:
+        def matches(self, event):
+            raise sqlite3.OperationalError("database is locked")
+
+    listener = HAEventListener(
+        "http://homeassistant.local:8123", "fake-token",
+        ExplodingRulesStore(), SpyNotifier(), SpyCallable(), SpyCallable(),
+    )
+
+    with caplog.at_level(logging.ERROR):
+        # Must not raise.
+        asyncio.run(listener._process_event(state_event("motion.hall", "on")))
+
+    assert any("match" in r.message.lower() for r in caplog.records)
+
+
+def test_cooldown_check_failure_skips_rule_not_listener(rules, caplog):
+    action = json.dumps({"tool": "control_light", "input": {}})
+    rules.add("Rule", "state_changed", "direct", action, entity_id="motion.hall")
+    run_direct = SpyCallable()
+    listener = make_listener(rules, run_direct=run_direct)
+
+    def boom(rule_id, now):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    rules.check_and_stamp_cooldown = boom
+
+    with caplog.at_level(logging.ERROR):
+        # Must not raise; the rule is skipped, not fired.
+        asyncio.run(listener._process_event(state_event("motion.hall", "on")))
+
+    assert run_direct.calls == []
+    assert any("Rule" in r.message for r in caplog.records)

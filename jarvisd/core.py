@@ -121,15 +121,19 @@ class Assistant:
         except Exception as e:
             return f"Error executing {tool_name}: {e}"
 
-    def execute_guarded(self, tool_name: str, tool_input: dict) -> str:
+    def execute_guarded(self, tool_name: str, tool_input: dict, autonomous: bool = False) -> str:
         """Run one tool call through the security guard + audit choke point.
 
         This is the ONLY path any caller should use to execute a tool call —
         the Claude tool-use loop (`_claude_loop`) and the HA event listener's
         direct rules both funnel through here so guard enforcement and audit
         logging can never be bypassed or duplicated.
+
+        autonomous=True means no user initiated this call (HA trigger rules):
+        the guard then treats destructive tools as terminally unconfirmable
+        instead of playing the retry-confirm dance (see SecurityGuard.check).
         """
-        check = self.guard.check(tool_name, tool_input)
+        check = self.guard.check(tool_name, tool_input, autonomous=autonomous)
 
         if check.verdict == Verdict.BLOCK:
             result = f"SECURITY BLOCK: {check.reason}"
@@ -143,8 +147,13 @@ class Assistant:
 
         return result
 
-    def process(self, user_message: str) -> str:
-        """Classify intent, route to cheapest capable tier, return response."""
+    def process(self, user_message: str, autonomous: bool = False) -> str:
+        """Classify intent, route to cheapest capable tier, return response.
+
+        autonomous=True flags a machine-initiated turn (smart trigger rules):
+        it flows down to execute_guarded so destructive tools can never be
+        confirmed-by-retry without a user present.
+        """
         tier = self.classifier.classify(user_message)
         self._record_turn("user", user_message)
 
@@ -163,7 +172,7 @@ class Assistant:
 
         model = HAIKU_MODEL if tier == Tier.HAIKU else SONNET_MODEL
         log.info("Routing to %s", model)
-        reply = self._claude_loop(user_message, model)
+        reply = self._claude_loop(user_message, model, autonomous=autonomous)
         self._record_turn("assistant", reply)
         return reply
 
@@ -192,7 +201,7 @@ class Assistant:
 
         return None
 
-    def _claude_loop(self, user_message: str, model: str) -> str:
+    def _claude_loop(self, user_message: str, model: str, autonomous: bool = False) -> str:
         """Agentic tool-use loop with Claude."""
         self.conversation.append({"role": "user", "content": user_message})
         self._compact_history()
@@ -224,7 +233,7 @@ class Assistant:
 
             tool_results = []
             for tool_block in tool_use_blocks:
-                result = self.execute_guarded(tool_block.name, tool_block.input)
+                result = self.execute_guarded(tool_block.name, tool_block.input, autonomous=autonomous)
 
                 tool_results.append({
                     "type": "tool_result",

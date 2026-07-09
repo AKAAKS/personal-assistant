@@ -135,6 +135,21 @@ class TestReminderTools:
         result = reminder_handlers["cancel_reminder"]({"reminder_id": 999})
         assert "not found" in result.lower() or "no reminder" in result.lower()
 
+    def test_list_reminders_shows_real_db_ids(self, reminder_handlers, reminder_store):
+        """The listing must show the DB id (what cancel_reminder takes), not the
+        row's position -- after a cancellation those diverge and 'cancel reminder 1'
+        would hit the wrong reminder."""
+        due = (datetime.now() + timedelta(hours=1)).isoformat()
+        id1 = reminder_store.add("First task", due, "none")
+        id2 = reminder_store.add("Second task", due, "none")
+        reminder_store.cancel(id1)
+
+        result = reminder_handlers["list_reminders"]({})
+        lines = result.splitlines()
+        assert len(lines) == 1
+        assert lines[0].startswith(f"{id2}.")
+        assert "Second task" in lines[0]
+
 
 class TestRuleTools:
     """Tests for rule tool definitions and handlers."""
@@ -245,6 +260,20 @@ class TestRuleTools:
         """Test delete_trigger_rule with nonexistent ID."""
         result = rule_handlers["delete_trigger_rule"]({"rule_id": 999})
         assert "not found" in result.lower() or "no rule" in result.lower()
+
+    def test_list_trigger_rules_shows_real_db_ids(self, rule_handlers, rules_store):
+        """Same as reminders: the listing must show the DB id delete_trigger_rule
+        takes, not the enumerate() position."""
+        action = json.dumps({"tool": "test", "input": {}})
+        id1 = rules_store.add("Rule 1", "state_changed", "direct", action)
+        id2 = rules_store.add("Rule 2", "state_changed", "direct", action)
+        rules_store.delete(id1)
+
+        result = rule_handlers["list_trigger_rules"]({})
+        lines = result.splitlines()
+        assert len(lines) == 1
+        assert lines[0].startswith(f"{id2}.")
+        assert "Rule 2" in lines[0]
 
 
 class TestToolSecurity:

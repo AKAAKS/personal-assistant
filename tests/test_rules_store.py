@@ -132,6 +132,20 @@ class TestRulesStoreAdd:
                 "some action",
             )
 
+    def test_smart_rule_cooldown_clamped_to_minimum(self, store):
+        """Smart rules cost an AI call per fire; a tiny cooldown on a chatty
+        entity would burn budget continuously. Floor it at 60s."""
+        rule_id = store.add("Spammy", "state_changed", "smart", "do stuff", cooldown_sec=5)
+        rule = [r for r in store.list_all() if r["id"] == rule_id][0]
+        assert rule["cooldown_sec"] == 60
+
+    def test_direct_rule_cooldown_not_clamped(self, store):
+        """Direct rules are $0 tool calls; sub-minute cooldowns are legitimate."""
+        action = json.dumps({"tool": "test", "input": {}})
+        rule_id = store.add("Fast direct", "state_changed", "direct", action, cooldown_sec=5)
+        rule = [r for r in store.list_all() if r["id"] == rule_id][0]
+        assert rule["cooldown_sec"] == 5
+
     def test_add_rule_defaults(self, store):
         """Rule added with defaults."""
         action = json.dumps({"tool": "test", "input": {}})

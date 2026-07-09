@@ -89,13 +89,18 @@ def run(args, log):
         # here (not inside JarvisServer or HAEventListener) because they close over
         # both `ai` and `server._lock`, and the listener itself must stay
         # unit-testable without a real assistant.
+        # autonomous=True: no user is present when a rule fires, so the guard
+        # must treat destructive tools as terminally unconfirmable here (the
+        # retry-confirm dance only makes sense on user-initiated turns).
         async def run_direct(action):
             async with server._lock:
-                return await asyncio.to_thread(ai.execute_guarded, action["tool"], action["input"])
+                return await asyncio.to_thread(
+                    ai.execute_guarded, action["tool"], action["input"], autonomous=True
+                )
 
         async def run_smart(prompt):
             async with server._lock:
-                return await asyncio.to_thread(ai.process, prompt)
+                return await asyncio.to_thread(ai.process, prompt, autonomous=True)
 
         ha_url = os.getenv("HA_URL", "http://localhost:8123")
         # Assigned post-construction (rather than passed into JarvisServer(...)

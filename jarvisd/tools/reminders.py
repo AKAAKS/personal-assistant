@@ -26,7 +26,7 @@ TOOLS = [
     },
     {
         "name": "list_reminders",
-        "description": "List all active reminders.",
+        "description": "List all active reminders with their IDs (use the ID with cancel_reminder).",
         "input_schema": {
             "type": "object",
             "properties": {},
@@ -85,12 +85,15 @@ def handlers(reminder_store):
             return "No active reminders."
 
         lines = []
-        for i, reminder in enumerate(reminders, start=1):
+        # Show the real DB id (what cancel_reminder takes), never the row
+        # position -- after any cancellation they diverge and "cancel reminder
+        # 1" would hit the wrong reminder.
+        for reminder in reminders:
             text = reminder["text"]
             due = reminder["due_ts"]
             recurrence = reminder["recurrence"]
             recurrence_str = "" if recurrence == "none" else f" (repeats {recurrence})"
-            lines.append(f"{i}. {text} — due {due}{recurrence_str}")
+            lines.append(f"{reminder['id']}. {text} — due {due}{recurrence_str}")
 
         return "\n".join(lines)
 

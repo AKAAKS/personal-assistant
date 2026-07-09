@@ -30,7 +30,14 @@ class SecurityGuard:
     def __init__(self):
         self._pending_confirmations: set[str] = set()
 
-    def check(self, tool_name: str, tool_input: dict) -> SecurityResult:
+    def check(self, tool_name: str, tool_input: dict, autonomous: bool = False) -> SecurityResult:
+        """Validate one tool call.
+
+        autonomous=True marks calls with no user present (trigger rules,
+        reminders): the retry-based confirm dance below is meaningless there,
+        so destructive verdicts become terminal CONFIRM_REQUIRED and never
+        touch the pending-confirmation state.
+        """
         blocked_kw = self._check_blocked_keywords(tool_input)
         if blocked_kw:
             return SecurityResult(
@@ -56,6 +63,16 @@ class SecurityGuard:
             )
 
         if permission == "destructive":
+            if autonomous:
+                # No user is present to confirm. Do NOT arm _pending_confirmations
+                # (an autonomous retry with identical input would auto-confirm) and
+                # do NOT consume a confirmation a real user may have pending for
+                # the same action.
+                return SecurityResult(
+                    Verdict.CONFIRM_REQUIRED,
+                    f"Tool '{tool_name}' is destructive and cannot run autonomously; "
+                    "the user must initiate and confirm this action themselves.",
+                )
             key = self._action_key(tool_name, tool_input)
             if key in self._pending_confirmations:
                 self._pending_confirmations.discard(key)

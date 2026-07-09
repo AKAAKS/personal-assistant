@@ -74,8 +74,22 @@ class HAEventListener:
 
         reduced = {"event_type": event_type, "entity_id": entity_id, "to_state": to_state}
 
-        for rule in self.rules_store.matches(reduced):
-            if not self.rules_store.check_and_stamp_cooldown(rule["id"], self.now()):
+        # A store hiccup (locked DB, disk error) must be contained here: raising
+        # out of _process_event would drop the HA socket in run() and starve
+        # every rule of events over a transient sqlite failure.
+        try:
+            matched = self.rules_store.matches(reduced)
+        except Exception:
+            log.exception("Rule matching failed for event %r; skipping event", event_type)
+            return
+
+        for rule in matched:
+            try:
+                allowed = self.rules_store.check_and_stamp_cooldown(rule["id"], self.now())
+            except Exception:
+                log.exception("Cooldown check failed for rule '%s'; skipping", rule["name"])
+                continue
+            if not allowed:
                 continue
             await self._fire_rule(rule, entity_id, to_state)
 
@@ -97,7 +111,11 @@ class HAEventListener:
                 # this rule, mirroring the malformed-JSON handling above.
                 log.exception("Rule '%s': direct action failed, skipping", name)
                 return
-            self.notifier.notify(f"Rule '{name}': {result}", "low")
+            # notify() blocks (sqlite, HA HTTP) and its push_to_clients bridge
+            # blocks on run_coroutine_threadsafe(...).result() -- calling it on
+            # the loop thread would deadlock the daemon. Always hop to a worker
+            # thread (see JarvisServer._push_from_thread for the full story).
+            await asyncio.to_thread(self.notifier.notify, f"Rule '{name}': {result}", "low")
         elif kind == "smart":
             prompt = (
                 f"[Automation rule '{name}' triggered by {entity_id} -> {to_state}] "
@@ -108,7 +126,8 @@ class HAEventListener:
             except Exception:
                 log.exception("Rule '%s': smart action failed, skipping", name)
                 return
-            self.notifier.notify(result, "high")
+            # Same loop-thread deadlock hazard as the direct branch above.
+            await asyncio.to_thread(self.notifier.notify, result, "high")
         else:
             log.error("Rule '%s': unknown kind %r, skipping", name, kind)
 

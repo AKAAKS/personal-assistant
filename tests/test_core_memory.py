@@ -253,7 +253,9 @@ def test_execute_guarded_confirm_required_does_not_execute_and_audits():
     handler_calls = []
     ai._handlers["control_switch"] = lambda inp: handler_calls.append(inp) or "toggled"
     ai.guard = SimpleNamespace(
-        check=lambda name, inp: SecurityResult(Verdict.CONFIRM_REQUIRED, "needs confirmation")
+        check=lambda name, inp, autonomous=False: SecurityResult(
+            Verdict.CONFIRM_REQUIRED, "needs confirmation"
+        )
     )
     spy_audit = SpyAudit()
     ai.audit = spy_audit
@@ -289,9 +291,9 @@ def test_claude_loop_still_enforces_guard_via_execute_guarded():
     calls = []
     original = ai.execute_guarded
 
-    def spy(tool_name, tool_input):
+    def spy(tool_name, tool_input, autonomous=False):
         calls.append((tool_name, tool_input))
-        return original(tool_name, tool_input)
+        return original(tool_name, tool_input, autonomous=autonomous)
 
     ai.execute_guarded = spy
 

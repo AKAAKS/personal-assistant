@@ -32,6 +32,7 @@ class RulesStore:
             entity_id: Optional entity_id filter.
             to_state: Optional new state filter.
             cooldown_sec: Minimum seconds between fires (default 300).
+                   Smart rules are clamped to at least 60.
 
         Returns:
             int: new rule id
@@ -45,6 +46,12 @@ class RulesStore:
         # Validate direct rule action at add time
         if kind == "direct":
             self._validate_direct_action(action)
+
+        # Smart rules cost an AI call per fire; floor the cooldown so a chatty
+        # entity (or an over-eager model picking cooldown_sec=1) can't burn the
+        # monthly budget continuously. Direct rules are $0 and stay unclamped.
+        if kind == "smart":
+            cooldown_sec = max(cooldown_sec, 60)
 
         created_ts = datetime.now().isoformat(timespec="seconds")
         cur = self._conn.execute(
