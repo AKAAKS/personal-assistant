@@ -263,3 +263,61 @@ def test_registry_proactive_tools_after_memory():
     rule_idx = tool_names.index("add_trigger_rule")
 
     assert memory_idx < reminder_idx < rule_idx, "Tools should be ordered: memory, reminder, rule"
+
+
+def test_registry_meal_tools_without_store():
+    """Test registry without meal_store doesn't include meal tools."""
+    tools, handlers = build_registry(FakeHA(), FakeSystem())
+    tool_names = [t["name"] for t in tools]
+
+    assert "log_meal" not in tool_names
+    assert "meal_summary" not in tool_names
+    assert "export_meals" not in tool_names
+
+
+def test_registry_with_meal_store():
+    """Test registry with meal_store includes meal tools."""
+    from jarvisd.meal_store import MealStore
+    from jarvisd.db import connect
+
+    conn = connect(":memory:")
+    meal_store = MealStore(conn)
+
+    tools, handlers = build_registry(
+        FakeHA(), FakeSystem(),
+        meal_store=meal_store
+    )
+
+    tool_names = [t["name"] for t in tools]
+    assert "log_meal" in tool_names
+    assert "meal_summary" in tool_names
+    assert "export_meals" in tool_names
+    assert all(callable(handlers[name]) for name in ["log_meal", "meal_summary", "export_meals"])
+
+
+def test_registry_meal_tools_after_rules():
+    """Test meal tools come after rule tools."""
+    from jarvisd.rules_store import RulesStore
+    from jarvisd.meal_store import MealStore
+    from jarvisd.db import connect
+
+    conn = connect(":memory:")
+    rules_store = RulesStore(conn)
+    meal_store = MealStore(conn)
+
+    tools, handlers = build_registry(
+        FakeHA(), FakeSystem(),
+        rules_store=rules_store,
+        meal_store=meal_store
+    )
+
+    tool_names = [t["name"] for t in tools]
+
+    # Find positions
+    rule_tools = [n for n in tool_names if n.startswith("add_trigger_rule") or n.startswith("list_trigger_rules") or n.startswith("delete_trigger_rule")]
+    meal_tools = [n for n in tool_names if n.startswith("log_meal") or n.startswith("meal_summary") or n.startswith("export_meals")]
+
+    if rule_tools and meal_tools:
+        last_rule_idx = max(tool_names.index(n) for n in rule_tools)
+        first_meal_idx = min(tool_names.index(n) for n in meal_tools)
+        assert first_meal_idx > last_rule_idx, "Meal tools should come after rule tools"

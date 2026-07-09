@@ -46,6 +46,10 @@ TOOL_PERMISSIONS = {
     "add_trigger_rule": "write",
     "list_trigger_rules": "read_only",
     "delete_trigger_rule": "write",
+    # Meals
+    "log_meal": "write",
+    "meal_summary": "read_only",
+    "export_meals": "write",
 }
 
 DEFAULT_PERMISSION = "write"
