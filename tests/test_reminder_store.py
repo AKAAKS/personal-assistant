@@ -12,7 +12,7 @@ def make_store(tmp_path):
     return ReminderStore(conn), conn
 
 
-def test_migration_reaches_v3_and_is_idempotent(tmp_path):
+def test_migration_reaches_current_version_and_is_idempotent(tmp_path):
     path = str(tmp_path / "jarvis.db")
     db.connect(path).close()
     conn = db.connect(path)  # must not re-run migrations / raise
