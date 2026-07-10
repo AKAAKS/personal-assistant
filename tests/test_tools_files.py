@@ -361,6 +361,22 @@ class TestRunScript:
 
         assert result.startswith("Error")
 
+    def test_drive_relative_name_rejected_by_containment_layer(self, scripts_dir):
+        # "D:evil.py" contains none of the tokens the substring pre-filter
+        # rejects ("/", "\\", ".."), so it sails past layer 1 -- pathlib treats
+        # it as drive-relative and (scripts_dir / "D:evil.py") does NOT join
+        # under scripts_dir. Only the is_relative_to(resolved_dir) check catches
+        # it, so this test regresses that load-bearing second layer independently
+        # of the pre-filter (delete is_relative_to and this test goes red).
+        name = "D:evil.py"
+        assert "/" not in name and "\\" not in name and ".." not in name
+        handlers = files.handlers()
+
+        result = handlers["run_script"]({"name": name})
+
+        assert result.startswith("Error")
+        assert "invalid script name" in result.lower()
+
     def test_unsupported_extension_rejected(self, scripts_dir):
         script = scripts_dir / "run.sh"
         script.write_text("echo hi", encoding="utf-8")
