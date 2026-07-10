@@ -40,14 +40,16 @@ def text_block(text):
     return SimpleNamespace(type="text", text=text)
 
 
-def fake_response(text, input_tokens=10, output_tokens=5):
+def fake_response(text, input_tokens=10, output_tokens=5, stop_reason="end_turn", server_tool_use=None):
     return SimpleNamespace(
         content=[text_block(text)],
+        stop_reason=stop_reason,
         usage=SimpleNamespace(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cache_read_input_tokens=0,
             cache_creation_input_tokens=0,
+            server_tool_use=server_tool_use,
         ),
     )
 
@@ -300,6 +302,7 @@ def test_claude_loop_still_enforces_guard_via_execute_guarded():
     tool_use = SimpleNamespace(type="tool_use", id="tu_1", name="list_devices", input={})
     first_response = SimpleNamespace(
         content=[tool_use],
+        stop_reason="tool_use",
         usage=SimpleNamespace(
             input_tokens=10, output_tokens=5,
             cache_read_input_tokens=0, cache_creation_input_tokens=0,
@@ -311,3 +314,106 @@ def test_claude_loop_still_enforces_guard_via_execute_guarded():
 
     assert reply == "Here's your devices."
     assert calls == [("list_devices", {})]
+
+
+# ---------------------------------------------------------------------------
+# Task 5: server-side web search
+# ---------------------------------------------------------------------------
+
+
+class SpyCostTracker:
+    """Minimal cost_tracker stand-in for web-search tests: tunable allow/deny, spies on record()."""
+
+    def __init__(self, allowed=True):
+        self._allowed = allowed
+        self.record_calls = []
+
+    def web_search_allowed(self):
+        return self._allowed
+
+    def record(self, *args, **kwargs):
+        self.record_calls.append((args, kwargs))
+        return 0.0
+
+    def should_force_downgrade(self):
+        return False
+
+
+def test_web_search_tool_variant_per_model():
+    from jarvisd.core import (
+        HAIKU_MODEL,
+        SONNET_MODEL,
+        WEB_SEARCH_MAX_USES_PER_REQUEST,
+        web_search_tool,
+    )
+
+    sonnet_tool = web_search_tool(SONNET_MODEL)
+    assert sonnet_tool["type"] == "web_search_20260209"
+    assert sonnet_tool["name"] == "web_search"
+    assert sonnet_tool["max_uses"] == WEB_SEARCH_MAX_USES_PER_REQUEST
+
+    haiku_tool = web_search_tool(HAIKU_MODEL)
+    assert haiku_tool["type"] == "web_search_20250305"
+    assert haiku_tool["name"] == "web_search"
+    assert haiku_tool["max_uses"] == WEB_SEARCH_MAX_USES_PER_REQUEST
+
+
+def test_web_search_appended_after_cached_local_tools():
+    from jarvisd.core import SONNET_MODEL
+
+    ai = make_assistant()
+    ai.enable_web_search = True
+    ai.cost_tracker = SpyCostTracker(allowed=True)
+    fake_client = FakeAnthropicClient([fake_response("done")])
+    ai.client = fake_client
+
+    ai._claude_loop("what's the weather", SONNET_MODEL)
+
+    captured_tools = fake_client.messages.calls[0]["tools"]
+    assert captured_tools[-1]["name"] == "web_search"
+    assert captured_tools[-2].get("cache_control") == {"type": "ephemeral"}
+
+
+def test_web_search_dropped_when_cap_hit():
+    from jarvisd.core import SONNET_MODEL
+
+    ai = make_assistant()
+    ai.enable_web_search = True
+    ai.cost_tracker = SpyCostTracker(allowed=False)
+    fake_client = FakeAnthropicClient([fake_response("done")])
+    ai.client = fake_client
+
+    ai._claude_loop("what's the weather", SONNET_MODEL)
+
+    captured_tools = fake_client.messages.calls[0]["tools"]
+    assert all(t.get("name") != "web_search" for t in captured_tools)
+
+
+def test_server_tool_usage_recorded():
+    from jarvisd.core import SONNET_MODEL
+
+    ai = make_assistant()
+    spy = SpyCostTracker(allowed=True)
+    ai.cost_tracker = spy
+    ai.client = FakeAnthropicClient([
+        fake_response("done", server_tool_use=SimpleNamespace(web_search_requests=2))
+    ])
+
+    ai._claude_loop("what's the weather", SONNET_MODEL)
+
+    assert spy.record_calls[-1][1]["web_search_requests"] == 2
+
+
+def test_pause_turn_continues_loop():
+    from jarvisd.core import SONNET_MODEL
+
+    ai = make_assistant()
+    first = fake_response("partial", stop_reason="pause_turn")
+    second = fake_response("final answer")
+    fake_client = FakeAnthropicClient([first, second])
+    ai.client = fake_client
+
+    reply = ai._claude_loop("search something current", SONNET_MODEL)
+
+    assert reply == "final answer"
+    assert len(fake_client.messages.calls) == 2

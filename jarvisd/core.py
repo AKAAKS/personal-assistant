@@ -17,6 +17,9 @@ log = logging.getLogger(__name__)
 HAIKU_MODEL = "claude-haiku-4-5"
 SONNET_MODEL = "claude-sonnet-5"
 
+WEB_SEARCH_MAX_USES_PER_REQUEST = 3
+PAUSE_TURN_MAX_CONTINUATIONS = 5
+
 SYSTEM_PROMPT = """You are JARVIS, a personal AI assistant. You control the user's smart home, Spotify, Android TV, and PC.
 
 Capabilities:
@@ -24,6 +27,7 @@ Capabilities:
 - **Spotify**: search, play on any device, control playback
 - **Android TV**: launch/navigate apps, type in search fields, remote control
 - **PC control**: launch/close apps, list processes, open URLs, system info
+- **Web search**: current information from the web, with citations. Each search costs money — search only when the answer needs current information.
 
 Security policy (strictly enforced):
 - NO access to bank accounts, cards, financial services, or sensitive IDs
@@ -35,7 +39,18 @@ Guidelines:
 - Chain multiple actions when appropriate (e.g. "movie night" = dim lights + open Netflix).
 - Spotify: search first for URIs, then play. Target specific devices if asked.
 - TV: launch app first, then navigate to search, then type query.
+- "Give me my briefing" = weather + top headlines (web search) + today's reminders (list_reminders) + today's meals (meal_summary).
 """
+
+
+def web_search_tool(model: str) -> dict:
+    """Newest server-side web_search variant the model supports (spec §4).
+
+    claude-sonnet-5 supports web_search_20260209 (dynamic filtering);
+    claude-haiku-4-5 only supports the basic web_search_20250305.
+    """
+    variant = "web_search_20260209" if model == SONNET_MODEL else "web_search_20250305"
+    return {"type": variant, "name": "web_search", "max_uses": WEB_SEARCH_MAX_USES_PER_REQUEST}
 
 
 class Assistant:
@@ -55,6 +70,8 @@ class Assistant:
         memory_store=None,
         reminder_store=None,
         rules_store=None,
+        enable_web_search: bool = False,
+        search_monthly_cap: int = 100,
     ):
         spotify = None
         if spotify_client is not None and getattr(spotify_client, "is_authenticated", lambda: True)():
@@ -65,7 +82,8 @@ class Assistant:
         self.guard = SecurityGuard()
         self.audit = AuditLogger()
         self.classifier = IntentClassifier()
-        self.cost_tracker = CostTracker(monthly_budget=monthly_budget)
+        self.cost_tracker = CostTracker(monthly_budget=monthly_budget, search_monthly_cap=search_monthly_cap)
+        self.enable_web_search = enable_web_search
         self.ollama = OllamaBackend(model=ollama_model)
         self.profile_store = profile_store
         self.memory_store = memory_store
@@ -206,24 +224,45 @@ class Assistant:
         self.conversation.append({"role": "user", "content": user_message})
         self._compact_history()
 
+        pause_continuations = 0
+
         while True:
+            tools = self.tools
+            if self.enable_web_search and self.cost_tracker.web_search_allowed():
+                # Appended AFTER self.tools[-1] (the cached breakpoint) and never
+                # carries cache_control itself, so dropping it at the cap never
+                # invalidates the cached tools prefix.
+                tools = self.tools + [web_search_tool(model)]
+
             response = self.client.messages.create(
                 model=model,
                 max_tokens=1024,
                 system=self._build_system(),
-                tools=self.tools,
+                tools=tools,
                 messages=self.conversation,
             )
 
             u = response.usage
+            srv = getattr(u, "server_tool_use", None)
+            searches = (getattr(srv, "web_search_requests", 0) or 0) if srv else 0
             self.cost_tracker.record(
                 model, u.input_tokens, u.output_tokens,
                 cache_read_tokens=getattr(u, "cache_read_input_tokens", 0) or 0,
                 cache_creation_tokens=getattr(u, "cache_creation_input_tokens", 0) or 0,
+                web_search_requests=searches,
             )
 
             assistant_content = response.content
             self.conversation.append({"role": "assistant", "content": assistant_content})
+
+            if response.stop_reason == "pause_turn":
+                # Server-side tool (web_search) loop paused mid-turn; re-request
+                # WITHOUT adding a user message and the API resumes automatically.
+                pause_continuations += 1
+                if pause_continuations > PAUSE_TURN_MAX_CONTINUATIONS:
+                    text_parts = [b.text for b in assistant_content if b.type == "text"]
+                    return "\n".join(text_parts) if text_parts else "(web search did not complete)"
+                continue
 
             tool_use_blocks = [b for b in assistant_content if b.type == "tool_use"]
 
