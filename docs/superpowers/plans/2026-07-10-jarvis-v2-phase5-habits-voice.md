@@ -31,9 +31,9 @@ Final phase. Spec: `docs/superpowers/specs/2026-07-02-jarvis-v2-design.md` §2.3
   - `list_pending() -> list[Row]` (ordered by id).
   - `get(pid) -> Row | None`.
   - `mark_accepted(pid) -> bool`, `mark_dismissed(pid) -> bool` (guard: only transition from `pending`; return False otherwise).
-  - `has_open(signature) -> bool` — True if a row with that signature exists in status pending OR accepted (so an accepted habit isn't re-mined; a dismissed one MAY be re-proposed later — decision: dismissed does NOT block, so a genuinely recurring habit the user dismissed once can resurface after it keeps happening. Document this).
+  - `already_proposed(signature) -> bool` — True if a row with that signature exists in ANY status (pending, accepted, OR dismissed). REVISED DECISION (found during Task 3 integration): the `signature` column is UNIQUE, so a habit can be proposed at most once ever; a dismissed habit therefore stays suppressed (JARVIS does not re-nag or re-spend a Haiku call on a suggestion the user already declined). The earlier "dismissed resurfaces" idea both contradicted the UNIQUE constraint (add would silently drop the re-insert) and would have nagged nightly — dropped. Time-delayed resurfacing, if ever wanted, is a future feature.
 
-- [ ] Step 1: Failing tests — v4→v5 upgrade preserves existing data + adds table (hand-built v4 DB via raw sqlite3 + MIGRATIONS through 4, seed a reminder+meal, reconnect, assert intact + habit_proposals exists + version 5); add/list_pending/get/mark_* transitions; duplicate signature returns None; has_open semantics (pending & accepted block, dismissed does not).
+- [ ] Step 1: Failing tests — v4→v5 upgrade preserves existing data + adds table (hand-built v4 DB via raw sqlite3 + MIGRATIONS through 4, seed a reminder+meal, reconnect, assert intact + habit_proposals exists + version 5); add/list_pending/get/mark_* transitions; duplicate signature returns None; already_proposed semantics (any status — pending, accepted, AND dismissed all return True).
 - [ ] Step 2: RED. Step 3: implement. Step 4: GREEN + full suite.
 - [ ] Step 5: Commit `feat: schema v5 habit_proposals + ProposalStore`
 
@@ -65,11 +65,11 @@ Final phase. Spec: `docs/superpowers/specs/2026-07-02-jarvis-v2-design.md` §2.3
 **Files:** Create `jarvisd/habit_pipeline.py` (or a function in `habit_miner.py`). Test `tests/test_habit_pipeline.py` (new).
 
 **Interfaces:**
-- `run_habit_scan(audit_path, proposal_store, phraser, now=None, **mine_kwargs) -> int` — orchestrates: `mine_candidates(...)` → for each candidate, skip if `proposal_store.has_open(signature)`; else call `phraser(candidate)` (ONE Haiku call, returns natural-language proposal text) and `proposal_store.add(signature, kind, payload, text, now)`. Returns count of NEW proposals stored. Never raises: a phraser exception on one candidate is logged and skipped (others still processed).
-- `phraser` is injected (bootstrap supplies a closure that calls Haiku via the Assistant and records `source="habit"`). In tests, a spy phraser returns canned text and counts calls — proving: (a) at most one call per NEW candidate, (b) ZERO calls when `has_open` already blocks, (c) zero calls when there are no candidates.
+- `run_habit_scan(audit_path, proposal_store, phraser, now=None, **mine_kwargs) -> int` — orchestrates: `mine_candidates(...)` → for each candidate, skip if `proposal_store.already_proposed(signature)`; else call `phraser(candidate)` (ONE Haiku call, returns natural-language proposal text) and `proposal_store.add(signature, kind, payload, text, now)`. Returns count of NEW proposals stored. Never raises: a phraser exception on one candidate is logged and skipped (others still processed).
+- `phraser` is injected (bootstrap supplies a closure that calls Haiku via the Assistant and records `source="habit"`). In tests, a spy phraser returns canned text and counts calls — proving: (a) at most one call per NEW candidate, (b) ZERO calls when `already_proposed` already blocks, (c) zero calls when there are no candidates.
 - Cost/prompt: phraser prompt is small ("Given this recurring pattern <evidence>, write a one-sentence suggestion I can accept or dismiss, e.g. 'You often dim the living room around 7pm — want me to remember that?'"). `max_tokens` ~120.
 
-- [ ] Step 1: Failing tests — full scan with a spy store + spy phraser: N candidates → N adds + N phraser calls; re-run with same audit (has_open now True) → 0 adds + 0 phraser calls (idempotent, no wasted API); phraser raising on one candidate doesn't abort the rest.
+- [ ] Step 1: Failing tests — full scan with a spy store + spy phraser: N candidates → N adds + N phraser calls; re-run with same audit (already_proposed now True) → 0 adds + 0 phraser calls (idempotent, no wasted API); phraser raising on one candidate doesn't abort the rest.
 - [ ] Step 2: RED. Step 3: implement. Step 4: GREEN + full suite.
 - [ ] Step 5: Commit `feat: habit scan pipeline (mine -> phrase once -> queue)`
 

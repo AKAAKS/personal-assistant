@@ -1,7 +1,7 @@
 """Tests for the habit scan pipeline — mine -> phrase once -> queue.
 
 Uses a REAL ProposalStore backed by an in-memory SQLite DB so the
-has_open/add integration is genuinely exercised, plus a synthetic
+already_proposed/add integration is genuinely exercised, plus a synthetic
 audit.jsonl with two distinct habits (two candidates).
 """
 
@@ -138,16 +138,10 @@ class TestRunHabitScan:
         assert count == 0
         assert len(phraser.calls) == 0
 
-    def test_dismissed_proposal_is_still_mined_as_a_candidate(self, tmp_path, store):
-        """has_open() is False for a dismissed signature (dismissal doesn't block
-
-        re-mining at the pipeline level), so the pipeline still attempts to
-        phrase+add it. NOTE: ProposalStore.add() enforces UNIQUE(signature) at
-        the DB layer regardless of status, so a dismissed row's signature
-        cannot be re-inserted; add() returns None and the pipeline correctly
-        counts it as not-new (per brief: "If add() returns None ... count it
-        as not-new"). Full re-surfacing of dismissed habits would need a
-        store-level change (out of scope for Task 3 — see task-3-report.md).
+    def test_dismissed_proposal_is_not_re_proposed_and_costs_no_phraser_call(self, tmp_path, store):
+        """A dismissed habit stays suppressed: already_proposed() is True for
+        any existing signature (the column is UNIQUE), so a re-scan skips the
+        dismissed candidate BEFORE phrasing — no re-nag, no wasted Haiku call.
         """
         audit_path = tmp_path / "audit.jsonl"
         _write_audit(audit_path, _two_habit_entries())
@@ -159,14 +153,12 @@ class TestRunHabitScan:
         assert len(pending) == 2
         dismissed_sig = pending[0]["signature"]
         store.mark_dismissed(pending[0]["id"])
-        assert store.has_open(dismissed_sig) is False
+        assert store.already_proposed(dismissed_sig) is True
 
         second_phraser = SpyPhraser()
         count = run_habit_scan(str(audit_path), store, second_phraser, now=NOW)
 
-        # the still-pending one is skipped (has_open True); the dismissed one
-        # IS attempted (has_open False) but add() rejects the duplicate
-        # signature, so it does not count as new.
+        # Both signatures already exist (one pending, one dismissed): the scan
+        # skips both before phrasing -> zero new, zero phraser calls.
         assert count == 0
-        assert len(second_phraser.calls) == 1
-        assert second_phraser.calls[0].signature == dismissed_sig
+        assert len(second_phraser.calls) == 0

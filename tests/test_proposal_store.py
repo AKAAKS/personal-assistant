@@ -1,4 +1,4 @@
-"""Tests for ProposalStore — habit-proposal queue (add/list/get/accept/dismiss/has_open)."""
+"""Tests for ProposalStore — habit-proposal queue (add/list/get/accept/dismiss/already_proposed)."""
 
 import json
 
@@ -124,20 +124,22 @@ class TestProposalStoreMarkTransitions:
         assert store.mark_accepted(pid) is False
 
 
-class TestProposalStoreHasOpen:
-    def test_has_open_false_when_no_row(self, store):
-        assert store.has_open("nope") is False
+class TestProposalStoreAlreadyProposed:
+    def test_already_proposed_false_when_no_row(self, store):
+        assert store.already_proposed("nope") is False
 
-    def test_has_open_true_when_pending(self, store):
+    def test_already_proposed_true_when_pending(self, store):
         store.add("sig-1", "profile", {"fact": "a"}, "text")
-        assert store.has_open("sig-1") is True
+        assert store.already_proposed("sig-1") is True
 
-    def test_has_open_true_when_accepted(self, store):
+    def test_already_proposed_true_when_accepted(self, store):
         pid = store.add("sig-1", "profile", {"fact": "a"}, "text")
         store.mark_accepted(pid)
-        assert store.has_open("sig-1") is True
+        assert store.already_proposed("sig-1") is True
 
-    def test_has_open_false_when_dismissed(self, store):
+    def test_already_proposed_true_when_dismissed(self, store):
+        # A dismissed habit stays suppressed (signature is UNIQUE + the user
+        # declined) — do not re-nag or re-spend a phrasing call on it.
         pid = store.add("sig-1", "profile", {"fact": "a"}, "text")
         store.mark_dismissed(pid)
-        assert store.has_open("sig-1") is False
+        assert store.already_proposed("sig-1") is True

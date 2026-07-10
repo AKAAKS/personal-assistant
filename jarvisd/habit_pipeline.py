@@ -18,17 +18,17 @@ def run_habit_scan(audit_path, proposal_store, phraser, now=None, **mine_kwargs)
     """Mine `audit_path` for habits and queue new proposals.
 
     For each mined candidate: skip (no phraser call) if a proposal with the
-    same signature is already open (pending or accepted). Otherwise, call
-    `phraser(candidate)` exactly once to get natural-language proposal text,
-    then store it via `proposal_store.add(...)`.
+    same signature was already proposed in any status (pending/accepted/
+    dismissed). Otherwise, call `phraser(candidate)` exactly once to get
+    natural-language proposal text, then store it via `proposal_store.add(...)`.
 
     Never raises: any exception while phrasing or storing a single candidate
     is logged and that candidate is skipped; the rest of the scan continues.
 
     Args:
         audit_path: Path to the audit.jsonl file to mine.
-        proposal_store: A ProposalStore instance (or compatible: has_open,
-            add).
+        proposal_store: A ProposalStore instance (or compatible:
+            already_proposed, add).
         phraser: callable(candidate) -> str. Injected so this module never
             makes the LLM call itself.
         now: Optional reference "current time", forwarded to
@@ -38,8 +38,9 @@ def run_habit_scan(audit_path, proposal_store, phraser, now=None, **mine_kwargs)
 
     Returns:
         int: count of NEW proposals actually stored (add() returned a real
-            id). Candidates skipped by has_open, that failed to phrase/add,
-            or that hit a duplicate signature at add() time do not count.
+            id). Candidates skipped by already_proposed, that failed to
+            phrase/add, or that hit a duplicate signature at add() time do
+            not count.
     """
     try:
         candidates = mine_candidates(audit_path, now=now, **mine_kwargs)
@@ -50,7 +51,7 @@ def run_habit_scan(audit_path, proposal_store, phraser, now=None, **mine_kwargs)
     stored = 0
     for candidate in candidates:
         try:
-            if proposal_store.has_open(candidate.signature):
+            if proposal_store.already_proposed(candidate.signature):
                 continue
             text = phraser(candidate)
             new_id = proposal_store.add(
