@@ -50,9 +50,23 @@ TOOL_PERMISSIONS = {
     "log_meal": "write",
     "meal_summary": "read_only",
     "export_meals": "write",
+    # Files
+    "search_files": "read_only",
+    "read_document": "read_only",
+    "run_script": "destructive",
 }
 
 DEFAULT_PERMISSION = "write"
+
+# Tools whose tool_input holds user-supplied filesystem paths that must be
+# validated against the allowlist. Maps tool name -> list of input keys to
+# check. run_script's path is whitelist-constrained by the tool itself (not
+# user-supplied), so it is listed with no keys to check here.
+PATH_CHECKED_TOOLS = {
+    "search_files": ["directory"],
+    "read_document": ["path"],
+    "run_script": [],
+}
 
 # URL patterns that are always blocked (case-insensitive substring match on URLs)
 BLOCKED_URL_PATTERNS = [

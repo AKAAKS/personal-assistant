@@ -2,15 +2,21 @@
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
+from security.paths import is_allowed_path, is_secret_path
 from security.policy import (
     BLOCKED_KEYWORDS,
     BLOCKED_URL_PATTERNS,
     DEFAULT_PERMISSION,
+    PATH_CHECKED_TOOLS,
     TOOL_PERMISSIONS,
 )
+
+_PATH_SEP_RE = re.compile(r"[\\/]")
 
 
 class Verdict(Enum):
@@ -53,6 +59,10 @@ class SecurityGuard:
                 f"Blocked: URL matches restricted pattern '{blocked_url}'. "
                 "Access to banking and financial sites is not permitted.",
             )
+
+        path_verdict = self._check_paths(tool_name, tool_input)
+        if path_verdict:
+            return path_verdict
 
         permission = TOOL_PERMISSIONS.get(tool_name, DEFAULT_PERMISSION)
 
@@ -124,4 +134,38 @@ class SecurityGuard:
                 for pattern in BLOCKED_URL_PATTERNS:
                     if pattern in val_lower:
                         return pattern
+        return None
+
+    @staticmethod
+    def _check_paths(tool_name: str, tool_input: dict) -> "SecurityResult | None":
+        # Tool-specific: validate the configured path-bearing keys for this tool.
+        for key in PATH_CHECKED_TOOLS.get(tool_name, []):
+            value = tool_input.get(key)
+            if not isinstance(value, str) or not value:
+                continue
+            try:
+                Path(value).expanduser().resolve()
+            except (OSError, ValueError):
+                return SecurityResult(
+                    Verdict.BLOCK, "Blocked: path could not be validated."
+                )
+            if is_secret_path(value):
+                return SecurityResult(
+                    Verdict.BLOCK,
+                    "Blocked: access to secret-shaped files is not permitted.",
+                )
+            if not is_allowed_path(value):
+                return SecurityResult(
+                    Verdict.BLOCK,
+                    "Blocked: path is outside the allowed folders (Documents, Projects, Downloads).",
+                )
+
+        # Everywhere: hard block on secret-shaped files in ANY tool's input,
+        # regardless of whether that tool is in PATH_CHECKED_TOOLS.
+        for s in SecurityGuard._extract_strings(tool_input):
+            if _PATH_SEP_RE.search(s) and is_secret_path(s):
+                return SecurityResult(
+                    Verdict.BLOCK,
+                    "Blocked: access to secret-shaped files is not permitted.",
+                )
         return None
