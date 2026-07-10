@@ -18,7 +18,8 @@ Protocol:
 import asyncio
 import json
 import logging
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
 
 import websockets
 
@@ -42,6 +43,8 @@ class JarvisServer:
         assistant_lock_holder=None,
         ha_listener=None,
         meal_store=None,
+        habit_scan=None,
+        proposal_store=None,
     ):
         self.assistant = assistant
         self.stt = stt
@@ -61,6 +64,17 @@ class JarvisServer:
         # exactly like _reminder_task.
         self.ha_listener = ha_listener
         self._ha_listener_task = None
+        # Optional zero-arg callable (bootstrap closure around run_habit_scan) that
+        # runs the nightly habit-mining pipeline and returns the count of newly
+        # queued proposals. None disables the nightly job entirely (_habit_task is
+        # then never started -- see serve_forever()).
+        self.habit_scan = habit_scan
+        self._habit_task = None
+        # Optional ProposalStore; used only to surface a one-line "you have N
+        # pending suggestions" trailer on replies (see _append_habit_trailer). May
+        # be None (nightly scan not wired up yet), in which case no trailer is ever
+        # appended.
+        self.proposal_store = proposal_store
         self._lock = asyncio.Lock()  # one conversation; serialize agent access
         # Reserved hook for a future multi-server topology that would share one
         # assistant/lock. Currently unused by the wiring: __main__'s HA-rule
@@ -82,6 +96,8 @@ class JarvisServer:
             self._reminder_task = asyncio.create_task(self._reminder_tick())
         if self.ha_listener is not None:
             self._ha_listener_task = asyncio.create_task(self.ha_listener.run())
+        if self.habit_scan is not None:
+            self._habit_task = asyncio.create_task(self._habit_tick())
         try:
             async with websockets.serve(
                 self.handle, self.host, self.port, max_size=MAX_MESSAGE_BYTES
@@ -101,6 +117,12 @@ class JarvisServer:
                 self._ha_listener_task.cancel()
                 try:
                     await self._ha_listener_task
+                except asyncio.CancelledError:
+                    pass
+            if self._habit_task is not None:
+                self._habit_task.cancel()
+                try:
+                    await self._habit_task
                 except asyncio.CancelledError:
                     pass
 
@@ -146,6 +168,7 @@ class JarvisServer:
         if mtype == "text_in":
             reply = await self._process(msg.get("text", ""))
             reply = await self._append_drained_notices(reply)
+            reply = await self._append_habit_trailer(reply)
             await self._send_reply(ws, reply, heard=None, speak=bool(msg.get("speak")))
         elif mtype == "reset":
             self.assistant.reset_conversation()
@@ -176,6 +199,7 @@ class JarvisServer:
         log.info("Heard: %s", heard)
         reply = await self._process(heard)
         reply = await self._append_drained_notices(reply)
+        reply = await self._append_habit_trailer(reply)
         await self._send_reply(ws, reply, heard=heard, speak=True)
 
     async def _send_reply(self, ws, reply: str, heard, speak: bool):
@@ -302,3 +326,48 @@ class JarvisServer:
             except Exception:
                 log.exception("reminder tick failed")
             await asyncio.sleep(REMINDER_TICK_SEC)
+
+    def _seconds_until_next_scan(self, now: datetime) -> float:
+        """Seconds from `now` until the next HABIT_SCAN_HOUR (env, default 3am local).
+
+        Factored out of _habit_tick so it's independently testable without
+        waiting for a real multi-hour sleep: pass a fixed `now` and assert the
+        computed delay directly.
+        """
+        hour = int(os.environ.get("HABIT_SCAN_HOUR", "3"))
+        target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        return (target - now).total_seconds()
+
+    async def _habit_tick(self):
+        """Background scheduler: run the nightly habit scan once a day.
+
+        Mirrors _reminder_tick's shape exactly: do the work, then sleep. A bad
+        scan (sqlite hiccup, phraser error, etc.) must not kill the loop --
+        it's logged and the daemon carries on to try again next cycle.
+        """
+        while True:
+            try:
+                count = await asyncio.to_thread(self.habit_scan)
+                log.info("habit scan complete: %d new proposal(s)", count)
+            except Exception:
+                log.exception("habit scan failed")
+            await asyncio.sleep(self._seconds_until_next_scan(datetime.now()))
+
+    async def _append_habit_trailer(self, reply: str) -> str:
+        """Append a one-line nudge when there are pending habit proposals.
+
+        Never dumps proposal text (the user pulls details via list_proposals /
+        "show suggestions") and never fires when proposal_store is unset or has
+        nothing pending. Composes with _append_drained_notices -- both trailers
+        can appear on the same reply; neither clobbers the other.
+        """
+        if self.proposal_store is None:
+            return reply
+        pending = await asyncio.to_thread(self.proposal_store.list_pending)
+        if pending:
+            n = len(pending)
+            suggestion = "suggestion" if n == 1 else "suggestions"
+            reply = reply + f"\n\n\U0001F4A1 You have {n} habit {suggestion} — say 'show suggestions' to review."
+        return reply
