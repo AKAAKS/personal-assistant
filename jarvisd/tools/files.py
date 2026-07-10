@@ -11,6 +11,7 @@ ever returned to the model.
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from security.paths import allowed_roots, is_allowed_path, is_secret_path
@@ -20,6 +21,13 @@ MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 RAW_RETURN_THRESHOLD = 6000
 SUMMARIZER_INPUT_CAP = 30000
 SKIP_DIR_NAMES = {".git", "node_modules", "__pycache__", ".venv"}
+
+# run_script: whitelist-folder tool (Task 8). Scripts must live inside this
+# directory (env override JARVIS_SCRIPTS_DIR, read per-call like
+# security/paths.py does with FILE_ROOTS) -- nothing outside it can ever run.
+SCRIPT_TIMEOUT_SEC = 60
+OUTPUT_TAIL_CHARS = 2000
+DEFAULT_SCRIPTS_DIR = Path(__file__).resolve().parent.parent.parent / "scripts" / "jarvis_approved"
 
 TOOLS = [
     {
@@ -63,6 +71,30 @@ TOOLS = [
                 },
             },
             "required": ["path"],
+        },
+    },
+    {
+        "name": "run_script",
+        "description": (
+            "Run a script from the user's approved scripts folder (destructive -- "
+            "requires confirmation). Supports .py, .bat, .cmd, and .ps1 files. "
+            "If no name is given, or the name isn't found, lists the scripts "
+            "available to run."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Filename of the script to run, e.g. 'backup.py'.",
+                },
+                "args": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional command-line arguments to pass to the script.",
+                },
+            },
+            "required": [],
         },
     },
 ]
@@ -172,10 +204,102 @@ def handlers(summarizer=None):
 
         return text[:RAW_RETURN_THRESHOLD] + "\n...[truncated]"
 
+    def run_script(ti):
+        """Run a whitelisted script (name resolved against the approved
+        scripts folder) and return its exit code + truncated stdout/stderr."""
+        name = ti.get("name")
+        raw_args = ti.get("args")
+
+        if raw_args is None:
+            args = []
+        elif not isinstance(raw_args, list) or not all(isinstance(a, str) for a in raw_args):
+            return "Error: args must be an array of strings."
+        else:
+            args = raw_args
+
+        scripts_dir = _scripts_dir()
+
+        if not isinstance(name, str) or not name.strip():
+            return _list_available_scripts(scripts_dir)
+        name = name.strip()
+
+        # Reject path separators/traversal BEFORE any resolution -- defense
+        # in depth on top of the is_relative_to check below.
+        if "/" in name or "\\" in name or ".." in name:
+            return "Error: invalid script name."
+
+        try:
+            resolved_dir = scripts_dir.resolve()
+        except (OSError, ValueError):
+            return _list_available_scripts(scripts_dir)
+
+        try:
+            resolved = (scripts_dir / name).resolve()
+        except (OSError, ValueError):
+            return "Error: invalid script name."
+
+        if not resolved.is_relative_to(resolved_dir):
+            return "Error: invalid script name."
+
+        if not resolved.exists() or not resolved.is_file():
+            return _list_available_scripts(scripts_dir)
+
+        ext = resolved.suffix.lower()
+        if ext == ".py":
+            cmd = [sys.executable, str(resolved), *args]
+        elif ext in (".bat", ".cmd"):
+            cmd = ["cmd", "/c", str(resolved), *args]
+        elif ext == ".ps1":
+            cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(resolved), *args]
+        else:
+            return "Error: unsupported script type"
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=SCRIPT_TIMEOUT_SEC,
+            )
+        except subprocess.TimeoutExpired:
+            return f"Error: script timed out after {SCRIPT_TIMEOUT_SEC}s"
+        except OSError as exc:
+            return f"Error: {exc}"
+
+        stdout_tail = (result.stdout or "")[-OUTPUT_TAIL_CHARS:]
+        stderr_tail = (result.stderr or "")[-OUTPUT_TAIL_CHARS:]
+        return (
+            f"Exit code: {result.returncode}\n"
+            f"--- stdout (last {OUTPUT_TAIL_CHARS} chars) ---\n{stdout_tail}\n"
+            f"--- stderr (last {OUTPUT_TAIL_CHARS} chars) ---\n{stderr_tail}"
+        )
+
     return {
         "search_files": search_files,
         "read_document": read_document,
+        "run_script": run_script,
     }
+
+
+def _scripts_dir() -> Path:
+    """Whitelist directory for run_script. Read the env override on every
+    call (no caching -- tests monkeypatch it and expect the change to take
+    effect), same pattern as security/paths.py's allowed_roots()."""
+    raw = os.environ.get("JARVIS_SCRIPTS_DIR")
+    if raw:
+        return Path(raw).expanduser()
+    return DEFAULT_SCRIPTS_DIR
+
+
+def _list_available_scripts(scripts_dir: Path) -> str:
+    if not scripts_dir.exists() or not scripts_dir.is_dir():
+        return "No scripts are available."
+    names = sorted(p.name for p in scripts_dir.iterdir() if p.is_file())
+    if not names:
+        return "No scripts are available."
+    return "Available scripts: " + ", ".join(names)
 
 
 def _search_es(query: str, directory: "str | None") -> list[str]:

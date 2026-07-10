@@ -259,3 +259,133 @@ class TestReadDocument:
         result = handlers["read_document"]({"path": str(docx_path)})
 
         assert result == "Error: python-docx not installed"
+
+
+class TestRunScript:
+    """run_script: whitelist-folder dispatch. These tests exercise real
+    subprocess execution (not the es.exe-style monkeypatched subprocess.run
+    used above) -- the autouse force_fallback_search fixture only patches
+    files.shutil.which, which run_script never calls."""
+
+    @pytest.fixture
+    def scripts_dir(self, tmp_path, monkeypatch):
+        d = tmp_path / "scripts"
+        d.mkdir()
+        monkeypatch.setenv("JARVIS_SCRIPTS_DIR", str(d))
+        return d
+
+    def test_runs_py_script_returns_marker_and_exit_code(self, scripts_dir):
+        script = scripts_dir / "hello.py"
+        script.write_text("print('MARKER_OK')\n", encoding="utf-8")
+        handlers = files.handlers()
+
+        result = handlers["run_script"]({"name": "hello.py"})
+
+        assert "MARKER_OK" in result
+        assert "Exit code: 0" in result
+
+    def test_nonzero_exit_code_reported(self, scripts_dir):
+        script = scripts_dir / "fail.py"
+        script.write_text("import sys\nsys.exit(3)\n", encoding="utf-8")
+        handlers = files.handlers()
+
+        result = handlers["run_script"]({"name": "fail.py"})
+
+        assert "Exit code: 3" in result
+
+    def test_args_passed_to_script(self, scripts_dir):
+        script = scripts_dir / "echo_args.py"
+        script.write_text("import sys\nprint(sys.argv[1:])\n", encoding="utf-8")
+        handlers = files.handlers()
+
+        result = handlers["run_script"]({"name": "echo_args.py", "args": ["foo", "bar"]})
+
+        assert "foo" in result and "bar" in result
+
+    def test_unknown_name_lists_available_scripts(self, scripts_dir):
+        (scripts_dir / "a.py").write_text("print('a')", encoding="utf-8")
+        (scripts_dir / "b.ps1").write_text("Write-Output 'b'", encoding="utf-8")
+        handlers = files.handlers()
+
+        result = handlers["run_script"]({"name": "nope.py"})
+
+        assert result.startswith("Available scripts:")
+        assert "a.py" in result
+        assert "b.ps1" in result
+
+    def test_missing_name_lists_available_scripts(self, scripts_dir):
+        (scripts_dir / "a.py").write_text("print('a')", encoding="utf-8")
+        handlers = files.handlers()
+
+        result = handlers["run_script"]({})
+
+        assert result.startswith("Available scripts:")
+        assert "a.py" in result
+
+    def test_empty_scripts_dir_friendly_message(self, scripts_dir):
+        handlers = files.handlers()
+
+        result = handlers["run_script"]({"name": "anything.py"})
+
+        assert "no scripts are available" in result.lower()
+        assert not result.startswith("Error")
+
+    def test_missing_scripts_dir_friendly_message(self, tmp_path, monkeypatch):
+        missing = tmp_path / "does_not_exist"
+        monkeypatch.setenv("JARVIS_SCRIPTS_DIR", str(missing))
+        handlers = files.handlers()
+
+        result = handlers["run_script"]({"name": "anything.py"})
+
+        assert "no scripts are available" in result.lower()
+        assert not result.startswith("Error")
+
+    def test_dotdot_name_rejected(self, scripts_dir):
+        handlers = files.handlers()
+
+        result = handlers["run_script"]({"name": "../evil.py"})
+
+        assert result.startswith("Error")
+
+    def test_forward_slash_in_name_rejected(self, scripts_dir):
+        handlers = files.handlers()
+
+        result = handlers["run_script"]({"name": "sub/evil.py"})
+
+        assert result.startswith("Error")
+
+    def test_backslash_in_name_rejected(self, scripts_dir):
+        handlers = files.handlers()
+
+        result = handlers["run_script"]({"name": "sub\\evil.py"})
+
+        assert result.startswith("Error")
+
+    def test_unsupported_extension_rejected(self, scripts_dir):
+        script = scripts_dir / "run.sh"
+        script.write_text("echo hi", encoding="utf-8")
+        handlers = files.handlers()
+
+        result = handlers["run_script"]({"name": "run.sh"})
+
+        assert result == "Error: unsupported script type"
+
+    def test_non_string_args_rejected(self, scripts_dir):
+        script = scripts_dir / "hello.py"
+        script.write_text("print('hi')", encoding="utf-8")
+        handlers = files.handlers()
+
+        result = handlers["run_script"]({"name": "hello.py", "args": [1, 2]})
+
+        assert result.startswith("Error")
+
+    def test_timeout_returns_error(self, scripts_dir, monkeypatch):
+        monkeypatch.setattr(files, "SCRIPT_TIMEOUT_SEC", 1)
+        script = scripts_dir / "slow.py"
+        script.write_text("import time\ntime.sleep(5)\n", encoding="utf-8")
+        handlers = files.handlers()
+
+        result = handlers["run_script"]({"name": "slow.py"})
+
+        assert result.startswith("Error")
+        assert "timed out" in result.lower()

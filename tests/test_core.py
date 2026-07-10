@@ -51,3 +51,41 @@ def test_execute_guarded_autonomous_destructive_never_executes():
         assert executed == []
     finally:
         del policy.TOOL_PERMISSIONS["fake_destructive"]
+
+
+def test_execute_guarded_run_script_confirm_then_executes():
+    """run_script is a real policy entry (permission "destructive", Task 6) --
+    this exercises the full execute_guarded path end-to-end: guard verdict ->
+    handler executed or not -> audit, with no monkeypatched fake permission."""
+    from types import SimpleNamespace
+
+    ai = make_assistant()
+    ai.audit = SimpleNamespace(log=lambda *a, **k: None)  # no logs/ writes from tests
+    executed = []
+    ai._handlers["run_script"] = lambda ti: executed.append(ti) or "ran it"
+
+    first = ai.execute_guarded("run_script", {"name": "x.py"})
+    assert first.startswith("CONFIRMATION REQUIRED")
+    assert executed == []
+
+    second = ai.execute_guarded("run_script", {"name": "x.py"})
+    assert second == "ran it"
+    assert executed == [{"name": "x.py"}]
+
+
+def test_execute_guarded_run_script_autonomous_never_executes():
+    """Autonomous callers (trigger rules) must never get run_script executed
+    via the retry-confirm dance -- it must stay terminally CONFIRM_REQUIRED."""
+    from types import SimpleNamespace
+
+    ai = make_assistant()
+    ai.audit = SimpleNamespace(log=lambda *a, **k: None)  # no logs/ writes from tests
+    executed = []
+    ai._handlers["run_script"] = lambda ti: executed.append(ti) or "ran it"
+
+    first = ai.execute_guarded("run_script", {"name": "x.py"}, autonomous=True)
+    second = ai.execute_guarded("run_script", {"name": "x.py"}, autonomous=True)
+
+    assert first.startswith("CONFIRMATION REQUIRED")
+    assert second.startswith("CONFIRMATION REQUIRED")
+    assert executed == []
