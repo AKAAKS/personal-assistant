@@ -75,6 +75,57 @@ Env vars:
   are always queued instead of spoken/pushed immediately (handles overnight
   wraparound; set to an empty string to disable quiet hours entirely).
 
+## Web search & briefing
+
+JARVIS can search the web (server-side, with citations) for anything that needs
+current information — weather, news, sports scores, prices. Ask directly ("What's
+the weather in Seattle right now?") or ask for everything at once:
+
+- "Give me my briefing" — weather + top headlines (web search) + today's reminders
+  + today's meals, in one reply.
+
+Each search costs money (~$0.01/search, billed per-call on top of tokens), so it's
+only used when the answer needs current information — not for things Claude already
+knows. A hard monthly cap (`SEARCH_MONTHLY_CAP`, default 100) stops search from being
+offered to the model at all once hit; the rest of JARVIS keeps working as normal.
+Spend is tracked in `logs/cost.jsonl` alongside token costs.
+
+## Files
+
+JARVIS can search and read your files, and run scripts you've explicitly approved.
+Three tools:
+
+- **search_files** — find files by filename within allowed folders.
+- **read_document** — read a document's text (.txt/.md/.pdf/.docx and other text
+  files); long documents are summarized instead of dumped in full.
+- **run_script** — run a script from a whitelisted folder.
+
+All file access is restricted to allowed folders — by default `~/Documents`,
+`~/Projects`, `~/Downloads` (override with `FILE_ROOTS`, semicolon-separated). Files
+that look like secrets (`.env`, `*.key`, `*credential*`, etc.) are always blocked,
+even inside an allowed folder.
+
+`run_script` only runs scripts that already live in a whitelist folder (default
+`scripts/jarvis_approved/`, override with `JARVIS_SCRIPTS_DIR`) — nothing outside it
+can ever execute. Running a script is destructive, so it always asks for confirmation
+first; say "yes, run it" and JARVIS retries the same call to actually run it. A
+trigger rule (HA automation) can never get past this confirmation on its own — running
+scripts autonomously, without a person present to confirm, is not allowed.
+
+## Meal tracking
+
+Log meals by voice or text and JARVIS estimates macros for trend tracking:
+
+- "Log a meal: two eggs and toast with butter" — logs with estimated calories/
+  protein/carbs/fat, a stated confidence, and any portion assumptions made.
+- "How am I doing today?" — today's totals across everything logged.
+- "Export my meal log" — writes a CSV or JSON file to `data/exports/`.
+
+Important: these are **LLM estimates, not a food database lookup**. JARVIS states
+its confidence (low/medium/high) and assumptions honestly with every log, but treat
+the numbers as directionally useful for spotting trends — not as precise nutrition
+facts.
+
 ## Always-on
 
     scripts\install_autostart.bat     # registers a logon task (does NOT start it)

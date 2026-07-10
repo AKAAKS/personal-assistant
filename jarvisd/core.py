@@ -72,6 +72,8 @@ class Assistant:
         rules_store=None,
         enable_web_search: bool = False,
         search_monthly_cap: int = 100,
+        meal_store=None,
+        file_tools: bool = False,
     ):
         spotify = None
         if spotify_client is not None and getattr(spotify_client, "is_authenticated", lambda: True)():
@@ -97,6 +99,9 @@ class Assistant:
             memory_store=memory_store,
             reminder_store=reminder_store,
             rules_store=rules_store,
+            meal_store=meal_store,
+            file_tools=file_tools,
+            file_summarizer=self._summarize if file_tools else None,
         )
         if self.tools:
             self.tools[-1] = {**self.tools[-1], "cache_control": {"type": "ephemeral"}}
@@ -105,6 +110,34 @@ class Assistant:
             self.conversation = self.memory_store.load_history(max_turns=10)
             if self.conversation:
                 log.info("Restored %d turns of conversation history", len(self.conversation))
+
+    def _summarize(self, text: str) -> str:
+        """Condense a long document: free local Ollama when up, else one Haiku call.
+
+        Used as the file tools' summarizer (jarvisd/tools/files.py, via
+        build_registry's file_summarizer param) to shrink documents too long to
+        return in full. Implemented as an Assistant METHOD rather than a
+        bootstrap closure over a fully-built `ai` object: build_registry runs
+        here inside __init__, before an `ai` instance exists to close over, so
+        a closure captured in bootstrap.create_assistant() would either be
+        unusable at build_registry time or reference a not-yet-existing name.
+        A bound method has no such ordering problem -- self.ollama/self.client/
+        self.cost_tracker only need to exist by the time this is *called*, not
+        by the time it is *referenced* when passed into build_registry.
+        """
+        prompt = "Summarize the key points of this document in <=300 words:\n\n" + text
+        if self.ollama.is_available():
+            try:
+                return self.ollama.generate(prompt)
+            except Exception:
+                pass
+        resp = self.client.messages.create(
+            model=HAIKU_MODEL, max_tokens=600,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        u = resp.usage
+        self.cost_tracker.record(HAIKU_MODEL, u.input_tokens, u.output_tokens, source="summarize")
+        return "".join(b.text for b in resp.content if b.type == "text")
 
     def _build_system(self) -> list[dict]:
         """Assemble the cached system-prompt blocks: SYSTEM_PROMPT, then profile (if any)."""
