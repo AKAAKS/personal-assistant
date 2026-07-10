@@ -88,7 +88,10 @@ def handlers(proposal_store=None, rules_store=None, profile_store=None):
         if row is None or row["status"] != "pending":
             return f"Error: no pending suggestion with id {pid}."
 
-        payload = json.loads(row["payload"])
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            return "Error: proposal payload is corrupted."
         kind = row["kind"]
 
         if kind == "profile":

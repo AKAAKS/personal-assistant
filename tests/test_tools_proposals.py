@@ -130,6 +130,20 @@ class TestAcceptProposal:
         row = proposal_store.get(pid)
         assert row["status"] == "accepted"
 
+    def test_accept_corrupt_payload_returns_error_not_raise(self, proposal_store, profile_spy, conn):
+        # A malformed payload column must not propagate a JSONDecodeError out of
+        # the handler (handlers never raise); it stays pending so nothing partial.
+        pid = proposal_store.add("sig1", "profile", {"fact": "x"}, "Suggestion")
+        conn.execute("UPDATE habit_proposals SET payload = ? WHERE id = ?", ("not-json{{", pid))
+        conn.commit()
+        handlers = proposals.handlers(proposal_store=proposal_store, profile_store=profile_spy)
+
+        result = handlers["accept_proposal"]({"id": pid})
+
+        assert result == "Error: proposal payload is corrupted."
+        assert profile_spy.calls == []
+        assert proposal_store.get(pid)["status"] == "pending"
+
     def test_second_accept_of_same_id_errors(self, proposal_store, profile_spy):
         pid = proposal_store.add("sig1", "profile", {"fact": "likes tea"}, "You seem to like tea.")
         handlers = proposals.handlers(proposal_store=proposal_store, profile_store=profile_spy)
