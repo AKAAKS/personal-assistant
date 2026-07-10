@@ -190,3 +190,83 @@ class TestMineCandidatesHabit:
         candidates = mine_candidates(str(audit_path), now=NOW, window_days=14)
 
         assert candidates == []
+
+
+class TestMineCandidatesEdgeCases:
+    """Pin the subtle, correct-but-previously-untested behaviors: timestamp
+    parsing robustness and multi-hour cluster merging."""
+
+    def test_naive_timestamps_are_treated_as_utc_and_mined(self, tmp_path):
+        # A ts with no tzinfo (naive ISO) must be accepted, not crash or dropped.
+        audit_path = tmp_path / "audit.jsonl"
+        entries = [
+            _entry(datetime(2026, 7, 1, 12, 0, 0)),  # naive
+            _entry(datetime(2026, 7, 2, 12, 0, 0)),
+            _entry(datetime(2026, 7, 3, 12, 0, 0)),
+            _entry(datetime(2026, 7, 4, 12, 0, 0)),
+        ]
+        _write_audit(audit_path, entries)
+
+        candidates = mine_candidates(str(audit_path), now=NOW)
+
+        assert len(candidates) == 1
+        assert candidates[0].evidence["count"] == 4
+
+    def test_unparseable_timestamp_is_skipped_not_raised(self, tmp_path):
+        # A JSON-valid line whose ts is garbage must be skipped; good lines survive.
+        audit_path = tmp_path / "audit.jsonl"
+        good = [
+            _entry(datetime(2026, 7, 1, 12, 0, 0, tzinfo=timezone.utc)),
+            _entry(datetime(2026, 7, 2, 12, 0, 0, tzinfo=timezone.utc)),
+            _entry(datetime(2026, 7, 3, 12, 0, 0, tzinfo=timezone.utc)),
+            _entry(datetime(2026, 7, 4, 12, 0, 0, tzinfo=timezone.utc)),
+        ]
+        bad = {
+            "ts": "banana",
+            "tool": "control_light",
+            "input": {"entity_id": "light.bedroom", "action": "turn_on"},
+            "verdict": "allowed",
+            "reason": "ok",
+        }
+        with open(audit_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(bad) + "\n")
+            for e in good:
+                f.write(json.dumps(e) + "\n")
+
+        candidates = mine_candidates(str(audit_path), now=NOW)
+
+        assert len(candidates) == 1
+        assert candidates[0].evidence["count"] == 4
+
+    def test_adjacent_hours_merge_into_one_cluster(self, tmp_path):
+        # Same action on 3 distinct days at consecutive LOCAL hours must merge
+        # (tolerance=1) into ONE candidate; without merging each hour bucket
+        # would be a singleton (count=1, days=1) and nothing would qualify.
+        audit_path = tmp_path / "audit.jsonl"
+        entries = [
+            _entry(datetime(2026, 7, 1, 10, 0, 0, tzinfo=timezone.utc)),
+            _entry(datetime(2026, 7, 2, 11, 0, 0, tzinfo=timezone.utc)),
+            _entry(datetime(2026, 7, 3, 12, 0, 0, tzinfo=timezone.utc)),
+        ]
+        _write_audit(audit_path, entries)
+
+        candidates = mine_candidates(str(audit_path), now=NOW, hour_tolerance=1)
+
+        assert len(candidates) == 1
+        assert candidates[0].evidence["count"] == 3
+        assert candidates[0].evidence["days"] == 3
+
+    def test_far_apart_hours_do_not_merge(self, tmp_path):
+        # Same action on 3 days but at widely separated LOCAL hours (6h apart)
+        # stays as separate singleton buckets -> nothing qualifies.
+        audit_path = tmp_path / "audit.jsonl"
+        entries = [
+            _entry(datetime(2026, 7, 1, 4, 0, 0, tzinfo=timezone.utc)),
+            _entry(datetime(2026, 7, 2, 10, 0, 0, tzinfo=timezone.utc)),
+            _entry(datetime(2026, 7, 3, 16, 0, 0, tzinfo=timezone.utc)),
+        ]
+        _write_audit(audit_path, entries)
+
+        candidates = mine_candidates(str(audit_path), now=NOW, hour_tolerance=1)
+
+        assert candidates == []
