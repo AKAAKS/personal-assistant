@@ -342,6 +342,57 @@ def test_registry_with_file_tools():
     assert all(callable(handlers[name]) for name in ["search_files", "read_document"])
 
 
+def test_registry_proposal_tools_without_store():
+    """Test registry without proposal_store doesn't include proposal tools."""
+    tools, handlers = build_registry(FakeHA(), FakeSystem())
+    tool_names = [t["name"] for t in tools]
+
+    assert "list_proposals" not in tool_names
+    assert "accept_proposal" not in tool_names
+    assert "dismiss_proposal" not in tool_names
+
+
+def test_registry_with_proposal_store():
+    """Test registry with proposal_store includes proposal tools."""
+    from jarvisd.proposal_store import ProposalStore
+    from jarvisd.db import connect
+
+    conn = connect(":memory:")
+    proposal_store = ProposalStore(conn)
+
+    tools, handlers = build_registry(
+        FakeHA(), FakeSystem(),
+        proposal_store=proposal_store
+    )
+
+    tool_names = [t["name"] for t in tools]
+    assert "list_proposals" in tool_names
+    assert "accept_proposal" in tool_names
+    assert "dismiss_proposal" in tool_names
+    assert all(callable(handlers[name]) for name in ["list_proposals", "accept_proposal", "dismiss_proposal"])
+
+
+def test_registry_proposal_tools_are_last():
+    """Test proposal tools are appended last, after file tools."""
+    from jarvisd.proposal_store import ProposalStore
+    from jarvisd.meal_store import MealStore
+    from jarvisd.db import connect
+
+    conn = connect(":memory:")
+    proposal_store = ProposalStore(conn)
+    meal_store = MealStore(conn)
+
+    tools, handlers = build_registry(
+        FakeHA(), FakeSystem(),
+        meal_store=meal_store,
+        proposal_store=proposal_store,
+        file_tools=True,
+    )
+    tool_names = [t["name"] for t in tools]
+
+    assert tool_names[-3:] == ["list_proposals", "accept_proposal", "dismiss_proposal"]
+
+
 def test_registry_file_tools_after_meals():
     """Test file tools come after meal tools."""
     from jarvisd.meal_store import MealStore

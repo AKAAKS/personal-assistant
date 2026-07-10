@@ -54,6 +54,10 @@ TOOL_PERMISSIONS = {
     "search_files": "read_only",
     "read_document": "read_only",
     "run_script": "destructive",
+    # Habit proposals
+    "list_proposals": "read_only",
+    "accept_proposal": "write",
+    "dismiss_proposal": "write",
 }
 
 DEFAULT_PERMISSION = "write"
