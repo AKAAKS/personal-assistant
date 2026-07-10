@@ -90,3 +90,22 @@ def test_dot_env_flagged_even_as_path_component():
 def test_case_insensitive_secret_match():
     assert paths.is_secret_path("SERVER.PEM") is True
     assert paths.is_secret_path("ID_RSA") is True
+
+
+# -- Windows-quirk bypasses: trailing dots/spaces and case in components --
+
+@pytest.mark.parametrize("name", [".env ", ".env.", ".env. .", "server.pem ", "server.pem."])
+def test_trailing_dots_and_spaces_stripped_before_match(name):
+    # Windows CreateFile strips trailing dots/spaces, so ".env " opens ".env".
+    assert paths.is_secret_path(name) is True
+    assert paths.is_secret_path(f"C:/Users/x/Documents/{name}") is True
+
+
+def test_dot_env_component_match_is_case_insensitive():
+    assert paths.is_secret_path("proj/.ENV/config") is True
+    assert paths.is_secret_path("proj/.Env/config") is True
+
+
+def test_dot_env_component_with_trailing_space_or_dot():
+    assert paths.is_secret_path("proj/.env /config") is True
+    assert paths.is_secret_path("proj/.env./config") is True

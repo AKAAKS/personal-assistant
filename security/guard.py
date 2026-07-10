@@ -144,17 +144,21 @@ class SecurityGuard:
             if not isinstance(value, str) or not value:
                 continue
             try:
-                Path(value).expanduser().resolve()
+                canonical = Path(value).expanduser().resolve()
             except (OSError, ValueError):
                 return SecurityResult(
                     Verdict.BLOCK, "Blocked: path could not be validated."
                 )
-            if is_secret_path(value):
+            # Check BOTH spellings: the canonical path (expands 8.3 short
+            # names like ENV~1 and strips Windows trailing dots/spaces) and
+            # the raw value (is_secret_path strips trailing dots/spaces per
+            # component itself, covering paths that don't exist on disk).
+            if is_secret_path(canonical) or is_secret_path(value):
                 return SecurityResult(
                     Verdict.BLOCK,
                     "Blocked: access to secret-shaped files is not permitted.",
                 )
-            if not is_allowed_path(value):
+            if not is_allowed_path(canonical):
                 return SecurityResult(
                     Verdict.BLOCK,
                     "Blocked: path is outside the allowed folders (Documents, Projects, Downloads).",

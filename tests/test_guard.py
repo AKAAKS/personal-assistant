@@ -154,3 +154,60 @@ def test_non_string_path_value_does_not_raise(file_root):
     g = SecurityGuard()
     r = g.check("read_document", {"path": 12345})
     assert r.verdict in (Verdict.ALLOW, Verdict.BLOCK)
+
+
+# -- Windows-quirk secret-file bypasses (canonicalize before checking) --
+
+@pytest.fixture
+def planted_env(file_root):
+    """A real .env file (fabricated contents) inside the allowed root."""
+    env_file = file_root / ".env"
+    env_file.write_text("FAKE_KEY=fabricated-value\n")
+    return env_file
+
+
+def test_read_document_env_with_trailing_space_is_blocked(planted_env):
+    # Windows CreateFile strips trailing spaces: ".env " opens ".env".
+    g = SecurityGuard()
+    r = g.check("read_document", {"path": str(planted_env) + " "})
+    assert r.verdict == Verdict.BLOCK
+
+
+def test_read_document_env_with_trailing_dot_is_blocked(planted_env):
+    # Windows CreateFile strips trailing dots: ".env." opens ".env".
+    g = SecurityGuard()
+    r = g.check("read_document", {"path": str(planted_env) + "."})
+    assert r.verdict == Verdict.BLOCK
+
+
+def test_read_document_env_via_short_name_is_blocked(planted_env):
+    # 8.3 short names ("ENV~1") alias the real file; resolve() expands them.
+    import ctypes
+    from pathlib import Path
+
+    from security.paths import is_secret_path
+
+    buf = ctypes.create_unicode_buffer(260)
+    rc = ctypes.windll.kernel32.GetShortPathNameW(str(planted_env), buf, 260)
+    if not rc:
+        pytest.skip("could not obtain a short path name")
+    short = buf.value
+    if short.lower() == str(planted_env).lower():
+        pytest.skip("8.3 short names disabled on this filesystem")
+    # Sanity: canonicalization of the short spelling must land on the secret.
+    assert is_secret_path(str(Path(short).resolve())) is True
+
+    g = SecurityGuard()
+    r = g.check("read_document", {"path": short})
+    assert r.verdict == Verdict.BLOCK
+
+
+def test_read_document_under_upper_case_env_dir_is_blocked(file_root):
+    # ".ENV" must not defeat a case-sensitive ".env" component check.
+    envdir = file_root / ".ENV"
+    envdir.mkdir()
+    inner = envdir / "config"
+    inner.write_text("x")
+    g = SecurityGuard()
+    r = g.check("read_document", {"path": str(inner)})
+    assert r.verdict == Verdict.BLOCK

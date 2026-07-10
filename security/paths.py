@@ -29,7 +29,9 @@ def allowed_roots() -> list[Path]:
     return roots
 
 
-def is_allowed_path(path: str) -> bool:
+def is_allowed_path(path: "str | Path") -> bool:
+    """Accepts a raw string or an already-resolved Path (resolve() is
+    idempotent, so callers that canonicalized once can pass it straight in)."""
     try:
         resolved = Path(path).expanduser().resolve()
     except (OSError, ValueError):
@@ -40,9 +42,13 @@ def is_allowed_path(path: str) -> bool:
     return False
 
 
-def is_secret_path(path: str) -> bool:
+def is_secret_path(path: "str | Path") -> bool:
+    # Windows CreateFile strips trailing dots and spaces from each component
+    # at open time (".env " / ".env." open ".env"), so strip them before
+    # matching or they become a bypass. The ".env" component compare must be
+    # case-insensitive: Windows filesystems are, so ".ENV" is the same dir.
     p = Path(path)
-    if any(part == ".env" for part in p.parts):
+    if any(part.rstrip(". ").lower() == ".env" for part in p.parts):
         return True
-    name = p.name.lower()
+    name = p.name.rstrip(". ").lower()
     return any(fnmatch(name, pat) for pat in SECRET_FILE_PATTERNS)
