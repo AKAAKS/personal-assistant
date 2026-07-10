@@ -138,6 +138,24 @@ class TestRunHabitScan:
         assert count == 0
         assert len(phraser.calls) == 0
 
+    def test_mine_candidates_raising_is_isolated_returns_zero(self, tmp_path, store, monkeypatch):
+        # If mining itself raises (e.g. an unexpected error mine_candidates does
+        # not catch), the pipeline must swallow it, return 0, and never phrase.
+        import jarvisd.habit_pipeline as pipeline
+
+        def boom(*a, **k):
+            raise RuntimeError("mine boom")
+
+        monkeypatch.setattr(pipeline, "mine_candidates", boom)
+        audit_path = tmp_path / "audit.jsonl"
+        _write_audit(audit_path, _two_habit_entries())
+        phraser = SpyPhraser()
+
+        count = run_habit_scan(str(audit_path), store, phraser, now=NOW)
+
+        assert count == 0
+        assert len(phraser.calls) == 0
+
     def test_dismissed_proposal_is_not_re_proposed_and_costs_no_phraser_call(self, tmp_path, store):
         """A dismissed habit stays suppressed: already_proposed() is True for
         any existing signature (the column is UNIQUE), so a re-scan skips the
