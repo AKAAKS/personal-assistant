@@ -32,10 +32,29 @@ def test_destructive_requires_confirm_then_allows():
     from security import policy
     policy.TOOL_PERMISSIONS["fake_destructive"] = "destructive"
     try:
+        g.begin_turn()
         first = g.check("fake_destructive", {"a": 1})
+        g.begin_turn()  # user's next turn confirms
         second = g.check("fake_destructive", {"a": 1})
         assert first.verdict == Verdict.CONFIRM_REQUIRED
         assert second.verdict == Verdict.ALLOW
+    finally:
+        del policy.TOOL_PERMISSIONS["fake_destructive"]
+
+
+def test_destructive_same_turn_retry_does_not_confirm():
+    """An identical retry WITHIN one turn (the model looping, no turn boundary)
+    must re-prompt, never auto-confirm — otherwise the model self-confirms its
+    own destructive action with no human involved."""
+    g = SecurityGuard()
+    from security import policy
+    policy.TOOL_PERMISSIONS["fake_destructive"] = "destructive"
+    try:
+        g.begin_turn()
+        first = g.check("fake_destructive", {"a": 1})
+        second = g.check("fake_destructive", {"a": 1})  # same turn, no begin_turn
+        assert first.verdict == Verdict.CONFIRM_REQUIRED
+        assert second.verdict == Verdict.CONFIRM_REQUIRED
     finally:
         del policy.TOOL_PERMISSIONS["fake_destructive"]
 
@@ -54,7 +73,7 @@ def test_autonomous_destructive_never_auto_confirms():
         second = g.check("fake_destructive", {"a": 1}, autonomous=True)
         assert first.verdict == Verdict.CONFIRM_REQUIRED
         assert second.verdict == Verdict.CONFIRM_REQUIRED
-        assert g._pending_confirmations == set()
+        assert not g._pending_confirmations  # autonomous path never arms
     finally:
         del policy.TOOL_PERMISSIONS["fake_destructive"]
 
@@ -66,8 +85,10 @@ def test_autonomous_check_does_not_consume_pending_user_confirmation():
     from security import policy
     policy.TOOL_PERMISSIONS["fake_destructive"] = "destructive"
     try:
+        g.begin_turn()
         assert g.check("fake_destructive", {"a": 1}).verdict == Verdict.CONFIRM_REQUIRED  # user arms
         assert g.check("fake_destructive", {"a": 1}, autonomous=True).verdict == Verdict.CONFIRM_REQUIRED
+        g.begin_turn()  # user's next turn confirms
         assert g.check("fake_destructive", {"a": 1}).verdict == Verdict.ALLOW  # user's confirm intact
     finally:
         del policy.TOOL_PERMISSIONS["fake_destructive"]
@@ -127,7 +148,9 @@ def test_search_files_missing_directory_key_is_not_path_checked():
 
 def test_run_script_is_destructive_requires_confirm_then_allows(file_root):
     g = SecurityGuard()
+    g.begin_turn()
     first = g.check("run_script", {"script": "echo hi"})
+    g.begin_turn()  # user's next turn confirms
     second = g.check("run_script", {"script": "echo hi"})
     assert first.verdict == Verdict.CONFIRM_REQUIRED
     assert second.verdict == Verdict.ALLOW
@@ -139,7 +162,7 @@ def test_run_script_autonomous_stays_terminal_confirm_required(file_root):
     second = g.check("run_script", {"script": "echo hi"}, autonomous=True)
     assert first.verdict == Verdict.CONFIRM_REQUIRED
     assert second.verdict == Verdict.CONFIRM_REQUIRED
-    assert g._pending_confirmations == set()
+    assert not g._pending_confirmations  # autonomous path never arms
 
 
 def test_malformed_path_is_blocked_not_raised(file_root):

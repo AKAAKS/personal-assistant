@@ -519,3 +519,57 @@ def test_pause_cap_returns_text_when_present():
 
     assert reply == "chunk 5"
     assert len(fake_client.messages.calls) == 6
+
+
+# ---------------------------------------------------------------------------
+# Final-review must-fix: destructive tools cannot be self-confirmed within one turn
+# ---------------------------------------------------------------------------
+
+
+def test_model_cannot_self_confirm_run_script_within_one_turn():
+    """The destructive confirm flow arms on the first call and consumes on an
+    identical retry -- but the retry must come from a *later* user turn, not from
+    the model looping within the same process() turn. A single _claude_loop
+    (one turn) that emits run_script twice must leave it CONFIRMATION REQUIRED
+    both times and never execute the handler (otherwise a prompt-injected
+    document could get a whitelisted destructive script run with no human)."""
+    from jarvisd.core import SONNET_MODEL
+
+    ai = make_assistant()
+    ai.audit = SimpleNamespace(log=lambda *a, **k: None)
+    executed = []
+    ai._handlers["run_script"] = lambda ti: executed.append(ti) or "ran it"
+
+    def run_script_block(uid):
+        return SimpleNamespace(type="tool_use", id=uid, name="run_script", input={"name": "wipe.py"})
+
+    fake_client = FakeAnthropicClient([
+        blocks_response([run_script_block("tu_1")], stop_reason="tool_use"),
+        blocks_response([run_script_block("tu_2")], stop_reason="tool_use"),
+        fake_response("ok, I need you to confirm that."),
+    ])
+    ai.client = fake_client
+
+    ai._claude_loop("run wipe.py", SONNET_MODEL)
+
+    assert executed == []
+
+
+def test_run_script_executes_after_a_real_turn_boundary():
+    """The legitimate path still works: arm in one turn, confirm in the next.
+    begin_turn() (called at the top of process()) is the turn boundary that makes
+    a prior-turn confirmation consumable."""
+    ai = make_assistant()
+    ai.audit = SimpleNamespace(log=lambda *a, **k: None)
+    executed = []
+    ai._handlers["run_script"] = lambda ti: executed.append(ti) or "ran it"
+
+    ai.guard.begin_turn()
+    first = ai.execute_guarded("run_script", {"name": "x.py"})
+    assert first.startswith("CONFIRMATION REQUIRED")
+    assert executed == []
+
+    ai.guard.begin_turn()  # user's next turn ("yes, run it")
+    second = ai.execute_guarded("run_script", {"name": "x.py"})
+    assert second == "ran it"
+    assert executed == [{"name": "x.py"}]

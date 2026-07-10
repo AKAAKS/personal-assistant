@@ -64,10 +64,17 @@ def test_execute_guarded_run_script_confirm_then_executes():
     executed = []
     ai._handlers["run_script"] = lambda ti: executed.append(ti) or "ran it"
 
+    ai.guard.begin_turn()
     first = ai.execute_guarded("run_script", {"name": "x.py"})
     assert first.startswith("CONFIRMATION REQUIRED")
     assert executed == []
 
+    # A same-turn retry (the model looping) must NOT auto-confirm.
+    same_turn = ai.execute_guarded("run_script", {"name": "x.py"})
+    assert same_turn.startswith("CONFIRMATION REQUIRED")
+    assert executed == []
+
+    ai.guard.begin_turn()  # user's next turn confirms
     second = ai.execute_guarded("run_script", {"name": "x.py"})
     assert second == "ran it"
     assert executed == [{"name": "x.py"}]

@@ -205,6 +205,11 @@ class Assistant:
         it flows down to execute_guarded so destructive tools can never be
         confirmed-by-retry without a user present.
         """
+        # Mark a fresh user-turn boundary so a destructive-tool confirmation
+        # armed on a previous turn becomes consumable, while the model retrying
+        # within THIS turn's agentic loop cannot self-confirm (see guard.check).
+        self.guard.begin_turn()
+
         tier = self.classifier.classify(user_message)
         self._record_turn("user", user_message)
 

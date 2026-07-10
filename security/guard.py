@@ -34,7 +34,24 @@ class SecurityResult:
 class SecurityGuard:
 
     def __init__(self):
-        self._pending_confirmations: set[str] = set()
+        # key -> turn number the key was armed in. A destructive tool is only
+        # confirmed when an identical call arrives in a *later* turn (see check).
+        self._pending_confirmations: dict[str, int] = {}
+        self._turn: int = 0
+
+    def begin_turn(self) -> None:
+        """Advance the turn counter — call once at the start of every
+        user-initiated turn (Assistant.process does this).
+
+        The destructive-tool confirm dance is retry-based: the first call arms a
+        key, an identical retry consumes it. That is only safe if the retry
+        crosses a real user-turn boundary — otherwise the *model* can satisfy its
+        own confirmation by simply emitting the same tool call twice inside one
+        agentic loop (no human in the loop at all). Bumping the counter per turn
+        lets check() require the confirming call to come from a strictly later
+        turn than the arming call.
+        """
+        self._turn += 1
 
     def check(self, tool_name: str, tool_input: dict, autonomous: bool = False) -> SecurityResult:
         """Validate one tool call.
@@ -84,10 +101,13 @@ class SecurityGuard:
                     "the user must initiate and confirm this action themselves.",
                 )
             key = self._action_key(tool_name, tool_input)
-            if key in self._pending_confirmations:
-                self._pending_confirmations.discard(key)
+            armed_turn = self._pending_confirmations.get(key)
+            # Consume only if armed in a strictly earlier turn: a retry within the
+            # SAME turn (the model looping) must re-prompt, never auto-confirm.
+            if armed_turn is not None and armed_turn < self._turn:
+                del self._pending_confirmations[key]
                 return SecurityResult(Verdict.ALLOW, "Confirmed by user.")
-            self._pending_confirmations.add(key)
+            self._pending_confirmations[key] = self._turn
             return SecurityResult(
                 Verdict.CONFIRM_REQUIRED,
                 f"Tool '{tool_name}' is destructive and requires user confirmation. "
