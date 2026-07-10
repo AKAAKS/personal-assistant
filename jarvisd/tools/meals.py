@@ -81,34 +81,40 @@ def handlers(meal_store):
         dict: tool name -> callable(tool_input: dict) -> str
     """
 
+    def _is_number(value):
+        """True for int/float but NOT bool (isinstance(True, int) is True in Python)."""
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
     def log_meal(ti):
         """Log a meal with macronutrient estimates."""
-        description = ti.get("description", "").strip()
+        description = ti.get("description")
         calories = ti.get("calories")
         protein_g = ti.get("protein_g")
         carbs_g = ti.get("carbs_g")
         fat_g = ti.get("fat_g")
-        confidence = ti.get("confidence", "").strip()
-        quantity = ti.get("quantity", "").strip()
-        assumptions = ti.get("assumptions", "").strip()
+        confidence = ti.get("confidence")
+        quantity = ti.get("quantity", "")
+        assumptions = ti.get("assumptions", "")
 
-        # Validate required fields
-        if not description:
-            return "Error: description is required."
-        if calories is None:
-            return "Error: calories is required."
-        if protein_g is None:
-            return "Error: protein_g is required."
-        if carbs_g is None:
-            return "Error: carbs_g is required."
-        if fat_g is None:
-            return "Error: fat_g is required."
-        if not confidence:
-            return "Error: confidence is required."
+        # Validate types before touching the store — bad values must never persist.
+        if not isinstance(description, str) or not description.strip():
+            return "Error: description is required and must be a non-empty string."
+        if not _is_number(calories):
+            return "Error: calories is required and must be a number."
+        if not _is_number(protein_g):
+            return "Error: protein_g is required and must be a number."
+        if not _is_number(carbs_g):
+            return "Error: carbs_g is required and must be a number."
+        if not _is_number(fat_g):
+            return "Error: fat_g is required and must be a number."
 
         # Validate confidence enum
         if confidence not in ("low", "medium", "high"):
             return f"Error: confidence must be 'low', 'medium', or 'high', got {confidence!r}."
+
+        description = description.strip()
+        quantity = quantity.strip() if isinstance(quantity, str) else ""
+        assumptions = assumptions.strip() if isinstance(assumptions, str) else ""
 
         try:
             meal_id = meal_store.add(
@@ -120,39 +126,45 @@ def handlers(meal_store):
 
     def meal_summary(ti):
         """Summarize today's meal log."""
-        summary = meal_store.today_summary()
-        meals = summary["meals"]
+        # The never-raise guarantee must hold even against bad rows already in
+        # the DB (SQLite's flexible typing lets TEXT into INTEGER columns).
+        try:
+            summary = meal_store.today_summary()
+            meals = summary["meals"]
 
-        if not meals:
-            return "No meals logged today."
+            if not meals:
+                return "No meals logged today."
 
-        lines = []
-        total_cals = summary["calories"]
-        total_protein = summary["protein_g"]
-        total_carbs = summary["carbs_g"]
-        total_fat = summary["fat_g"]
+            lines = []
+            total_cals = summary["calories"]
+            total_protein = summary["protein_g"]
+            total_carbs = summary["carbs_g"]
+            total_fat = summary["fat_g"]
 
-        lines.append(
-            f"Today: {len(meals)} meals, {total_cals} kcal, {total_protein:.1f}g protein, "
-            f"{total_carbs:.1f}g carbs, {total_fat:.1f}g fat"
-        )
+            lines.append(
+                f"Today: {len(meals)} meals, {total_cals} kcal, {total_protein:.1f} g protein, "
+                f"{total_carbs:.1f} g carbs, {total_fat:.1f} g fat"
+            )
 
-        # Show each meal with its real DB id (not enumerate position)
-        for meal in meals:
-            meal_id = meal["id"]
-            desc = meal["description"]
-            cal = meal["calories"]
-            lines.append(f"{meal_id}. {desc} — {cal} kcal")
+            # Show each meal with its real DB id (not enumerate position)
+            for meal in meals:
+                meal_id = meal["id"]
+                desc = meal["description"]
+                cal = meal["calories"]
+                lines.append(f"{meal_id}. {desc} — {cal} kcal")
 
-        return "\n".join(lines)
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Error reading meal log: {exc}"
 
     def export_meals(ti):
         """Export meal logs to file."""
-        fmt = ti.get("format", "csv").strip().lower()
+        fmt = ti.get("format", "csv")
+        if isinstance(fmt, str):
+            fmt = fmt.strip().lower()
 
-        if fmt not in ("csv", "json"):
-            return f"Error: format must be 'csv' or 'json', got {fmt!r}."
-
+        # Format validation lives in ONE place: MealStore.export raises
+        # ValueError for anything but csv/json.
         try:
             path = meal_store.export(fmt)
             return f"Exported meal log to {path}"

@@ -98,6 +98,85 @@ class TestMealTools:
         assert isinstance(result, str)
         assert "error" in result.lower() or "confidence" in result.lower()
 
+    def test_log_meal_rejects_non_numeric_calories(self, meal_handlers):
+        """log_meal with calories='a lot' must return an Error string and NOT persist."""
+        result = meal_handlers["log_meal"]({
+            "description": "Mystery meal",
+            "calories": "a lot",  # not a number
+            "protein_g": 10.0,
+            "carbs_g": 10.0,
+            "fat_g": 10.0,
+            "confidence": "low"
+        })
+        assert isinstance(result, str)
+        assert result.startswith("Error")
+        # Must not have been persisted — summary stays empty
+        summary = meal_handlers["meal_summary"]({})
+        assert "No meals logged" in summary
+
+    def test_log_meal_rejects_bool_calories(self, meal_handlers):
+        """log_meal must reject bool for calories (isinstance(True, int) is True in Python)."""
+        result = meal_handlers["log_meal"]({
+            "description": "Bool meal",
+            "calories": True,
+            "protein_g": 10.0,
+            "carbs_g": 10.0,
+            "fat_g": 10.0,
+            "confidence": "low"
+        })
+        assert result.startswith("Error")
+        summary = meal_handlers["meal_summary"]({})
+        assert "No meals logged" in summary
+
+    def test_log_meal_rejects_non_numeric_macros(self, meal_handlers):
+        """log_meal must reject non-numeric protein_g/carbs_g/fat_g (incl. bool)."""
+        for field, bad_value in [
+            ("protein_g", "lots"),
+            ("carbs_g", "some"),
+            ("fat_g", True),
+        ]:
+            ti = {
+                "description": "Test meal",
+                "calories": 300,
+                "protein_g": 10.0,
+                "carbs_g": 10.0,
+                "fat_g": 10.0,
+                "confidence": "medium",
+            }
+            ti[field] = bad_value
+            result = meal_handlers["log_meal"](ti)
+            assert result.startswith("Error"), f"{field}={bad_value!r} was accepted"
+        summary = meal_handlers["meal_summary"]({})
+        assert "No meals logged" in summary
+
+    def test_log_meal_rejects_non_string_description(self, meal_handlers):
+        """log_meal must reject a non-string description without raising."""
+        result = meal_handlers["log_meal"]({
+            "description": 12345,
+            "calories": 300,
+            "protein_g": 10.0,
+            "carbs_g": 10.0,
+            "fat_g": 10.0,
+            "confidence": "medium"
+        })
+        assert isinstance(result, str)
+        assert result.startswith("Error")
+
+    def test_meal_summary_never_raises_on_bad_row(self, conn, meal_handlers):
+        """meal_summary must return an Error string, not raise, when a bad row is
+        already in the DB (SQLite's flexible typing lets TEXT into INTEGER columns)."""
+        ts = datetime.now().isoformat(timespec="seconds")
+        conn.execute(
+            "INSERT INTO meals (ts, description, quantity, calories, protein_g, carbs_g, "
+            "fat_g, confidence, assumptions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (ts, "bad row", "", "a lot", "x", "y", "z", "low", ""),
+        )
+        conn.commit()
+
+        result = meal_handlers["meal_summary"]({})
+        assert isinstance(result, str)
+        assert result.startswith("Error reading meal log")
+
     def test_meal_summary_handler_empty(self, meal_handlers):
         """Test meal_summary with no meals logged."""
         result = meal_handlers["meal_summary"]({})
@@ -110,10 +189,10 @@ class TestMealTools:
         meal_store.add("Lunch: salad", "large", 350, 15.0, 40.0, 12.0, "high", "weighed ingredients")
 
         result = meal_handlers["meal_summary"]({})
-        assert "Today:" in result
-        assert "2 meals" in result
-        assert "550" in result  # 200 + 350
-        assert "21" in result   # 6 + 15 protein
+        # Exact spec template: "Today: N meals, X kcal, P g protein, C g carbs, F g fat"
+        assert result.splitlines()[0] == (
+            "Today: 2 meals, 550 kcal, 21.0 g protein, 75.0 g carbs, 15.0 g fat"
+        )
         assert "oatmeal" in result
         assert "salad" in result
 
@@ -191,18 +270,25 @@ class TestMealTools:
         assert spy_store.export_calls[0][0] == "csv"
 
     def test_export_meals_handler_invalid_format(self, meal_store):
-        """Test export_meals with invalid format returns error."""
+        """Test export_meals with invalid format returns the store's ValueError as an
+        Error string. Validation lives in ONE place (MealStore.export) — the handler
+        must delegate, so the spy MUST be called."""
         spy_store = SimpleNamespace()
+        spy_store.export_calls = []
 
         def spy_export(fmt, out_dir="data/exports"):
-            raise ValueError(f"invalid fmt {fmt!r}")
+            spy_store.export_calls.append(fmt)
+            raise ValueError(f"invalid fmt {fmt!r}; must be one of ['csv', 'json']")
 
         spy_store.export = spy_export
 
         handlers = meals.handlers(spy_store)
         result = handlers["export_meals"]({"format": "xml"})
 
-        assert "error" in result.lower() or "invalid" in result.lower()
+        assert result.startswith("Error")
+        assert "invalid fmt" in result
+        # Single validation path: handler delegated to the store instead of pre-checking
+        assert spy_store.export_calls == ["xml"]
 
     def test_log_and_summary_round_trip(self, meal_handlers, meal_store):
         """Test log→summary round trip shows totals and real DB ids."""
@@ -233,12 +319,10 @@ class TestMealTools:
 
         summary = meal_handlers["meal_summary"]({})
 
-        # Verify totals
-        assert "2 meals" in summary
-        assert "500" in summary  # 80 + 420
-        assert "21" in summary   # 3 + 18
-        assert "41" in summary   # 6 + 35
-        assert "24" in summary   # 4 + 20
+        # Verify exact totals line per spec template (spaces between number and unit)
+        assert summary.splitlines()[0] == (
+            "Today: 2 meals, 500 kcal, 21.0 g protein, 41.0 g carbs, 24.0 g fat"
+        )
 
         # Verify descriptions appear
         assert "coffee" in summary.lower()
