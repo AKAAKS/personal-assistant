@@ -467,3 +467,136 @@ def test_assistant_lock_holder_can_be_overridden():
     sentinel = object()
     server = JarvisServer(FakeAssistant(), assistant_lock_holder=sentinel)
     assert server.assistant_lock_holder is sentinel
+
+
+# --- conditional reminders (standing nudges) ---
+
+
+class SpyNotifier:
+    """Fake notifier that records notify() calls without doing any I/O."""
+
+    def __init__(self):
+        self.notify_calls = []
+
+    def notify(self, text, priority="low"):
+        self.notify_calls.append((text, priority))
+
+    def drain(self):
+        return []
+
+
+class FakeMealStore:
+    def __init__(self, logged: bool):
+        self._logged = logged
+
+    def logged_today(self, now=None):
+        return self._logged
+
+
+def test_fire_due_reminders_skips_notify_when_condition_met_and_meal_logged(tmp_path):
+    conn = db.connect(str(tmp_path / "jarvis.db"))
+    reminder_store = ReminderStore(conn)
+    notifier = SpyNotifier()
+    meal_store = FakeMealStore(logged=True)
+
+    long_past = datetime(2000, 1, 1, 0, 0, 0)
+    rid = reminder_store.add(
+        "log dinner",
+        long_past.isoformat(timespec="seconds"),
+        recurrence="daily",
+        condition="meal_not_logged_today",
+    )
+
+    server = JarvisServer(
+        FakeAssistant(), notifier=notifier, reminder_store=reminder_store, meal_store=meal_store
+    )
+    before = datetime.now()
+    asyncio.run(server._fire_due_reminders())
+
+    assert notifier.notify_calls == []  # skipped
+
+    row = conn.execute("SELECT due_ts, status FROM reminders WHERE id=?", (rid,)).fetchone()
+    assert row["status"] == "active"
+    new_due = datetime.fromisoformat(row["due_ts"])
+    assert new_due > before  # mark_fired still advanced the recurrence
+
+
+def test_fire_due_reminders_notifies_when_condition_met_and_meal_not_logged(tmp_path):
+    conn = db.connect(str(tmp_path / "jarvis.db"))
+    reminder_store = ReminderStore(conn)
+    notifier = SpyNotifier()
+    meal_store = FakeMealStore(logged=False)
+
+    long_past = datetime(2000, 1, 1, 0, 0, 0)
+    reminder_store.add(
+        "log dinner",
+        long_past.isoformat(timespec="seconds"),
+        condition="meal_not_logged_today",
+    )
+
+    server = JarvisServer(
+        FakeAssistant(), notifier=notifier, reminder_store=reminder_store, meal_store=meal_store
+    )
+    asyncio.run(server._fire_due_reminders())
+
+    assert notifier.notify_calls == [("Reminder: log dinner", "high")]
+
+
+def test_fire_due_reminders_notifies_when_meal_store_is_none_fail_open(tmp_path):
+    conn = db.connect(str(tmp_path / "jarvis.db"))
+    reminder_store = ReminderStore(conn)
+    notifier = SpyNotifier()
+
+    long_past = datetime(2000, 1, 1, 0, 0, 0)
+    reminder_store.add(
+        "log dinner",
+        long_past.isoformat(timespec="seconds"),
+        condition="meal_not_logged_today",
+    )
+
+    server = JarvisServer(
+        FakeAssistant(), notifier=notifier, reminder_store=reminder_store, meal_store=None
+    )
+    asyncio.run(server._fire_due_reminders())
+
+    assert notifier.notify_calls == [("Reminder: log dinner", "high")]
+
+
+def test_fire_due_reminders_unknown_condition_notifies_and_warns(tmp_path, caplog):
+    conn = db.connect(str(tmp_path / "jarvis.db"))
+    reminder_store = ReminderStore(conn)
+    notifier = SpyNotifier()
+    meal_store = FakeMealStore(logged=True)
+
+    long_past = datetime(2000, 1, 1, 0, 0, 0)
+    reminder_store.add(
+        "log dinner",
+        long_past.isoformat(timespec="seconds"),
+        condition="bogus_condition",
+    )
+
+    server = JarvisServer(
+        FakeAssistant(), notifier=notifier, reminder_store=reminder_store, meal_store=meal_store
+    )
+    with caplog.at_level("WARNING"):
+        asyncio.run(server._fire_due_reminders())
+
+    assert notifier.notify_calls == [("Reminder: log dinner", "high")]  # fail-open
+    assert any("bogus_condition" in rec.message for rec in caplog.records)
+
+
+def test_fire_due_reminders_no_condition_notifies_normally(tmp_path):
+    conn = db.connect(str(tmp_path / "jarvis.db"))
+    reminder_store = ReminderStore(conn)
+    notifier = SpyNotifier()
+    meal_store = FakeMealStore(logged=True)
+
+    long_past = datetime(2000, 1, 1, 0, 0, 0)
+    reminder_store.add("call mom", long_past.isoformat(timespec="seconds"))
+
+    server = JarvisServer(
+        FakeAssistant(), notifier=notifier, reminder_store=reminder_store, meal_store=meal_store
+    )
+    asyncio.run(server._fire_due_reminders())
+
+    assert notifier.notify_calls == [("Reminder: call mom", "high")]

@@ -20,6 +20,14 @@ TOOLS = [
                     "enum": ["none", "daily", "weekly"],
                     "description": "Recurrence type: 'none' (one-time), 'daily', or 'weekly'. Default: 'none'.",
                 },
+                "condition": {
+                    "type": "string",
+                    "enum": ["meal_not_logged_today"],
+                    "description": (
+                        "Optional condition: 'meal_not_logged_today' makes the reminder fire only "
+                        "if no meal has been logged that day (a standing nudge)."
+                    ),
+                },
             },
             "required": ["text", "due"],
         },
@@ -65,6 +73,7 @@ def handlers(reminder_store):
         text = ti.get("text", "").strip()
         due = ti.get("due", "").strip()
         recurrence = ti.get("recurrence", "none")
+        condition = ti.get("condition") or None
 
         if not text:
             return "Error: reminder text is required."
@@ -72,7 +81,7 @@ def handlers(reminder_store):
             return "Error: due datetime is required."
 
         try:
-            reminder_id = reminder_store.add(text, due, recurrence)
+            reminder_id = reminder_store.add(text, due, recurrence, condition=condition)
             return f"Reminder #{reminder_id} set for {due}"
         except ValueError as exc:
             return f"Error: {exc}"

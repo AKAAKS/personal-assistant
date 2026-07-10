@@ -212,3 +212,19 @@ def test_mark_fired_cancelled_daily_reminder_untouched(tmp_path):
     row = conn.execute("SELECT status, due_ts FROM reminders WHERE id=?", (rid,)).fetchone()
     assert row["status"] == "cancelled"
     assert row["due_ts"] == "2026-07-05T09:30:00"
+
+
+def test_add_stores_condition(tmp_path):
+    store, conn = make_store(tmp_path)
+    rid = store.add(
+        "log dinner", "2026-07-05T20:30:00", condition="meal_not_logged_today"
+    )
+    row = conn.execute("SELECT condition FROM reminders WHERE id=?", (rid,)).fetchone()
+    assert row["condition"] == "meal_not_logged_today"
+
+
+def test_add_default_condition_is_none(tmp_path):
+    store, conn = make_store(tmp_path)
+    rid = store.add("x", "2026-07-05T10:00:00")
+    row = conn.execute("SELECT condition FROM reminders WHERE id=?", (rid,)).fetchone()
+    assert row["condition"] is None

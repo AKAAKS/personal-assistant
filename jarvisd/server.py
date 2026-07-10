@@ -41,6 +41,7 @@ class JarvisServer:
         reminder_store=None,
         assistant_lock_holder=None,
         ha_listener=None,
+        meal_store=None,
     ):
         self.assistant = assistant
         self.stt = stt
@@ -49,6 +50,10 @@ class JarvisServer:
         self.port = port
         self.notifier = notifier
         self.reminder_store = reminder_store
+        # Optional MealStore; used only to evaluate the "meal_not_logged_today"
+        # standing-nudge condition in _fire_due_reminders. May be None (e.g. before
+        # bootstrap wires it up) -- conditional reminders then fail open (fire anyway).
+        self.meal_store = meal_store
         # Optional HAEventListener; may also be set as an attribute after construction
         # (the wiring in jarvisd/__main__.py needs `server._lock` to build its
         # run_direct/run_smart callables, so the listener is often created after the
@@ -254,14 +259,37 @@ class JarvisServer:
     async def _fire_due_reminders(self):
         """One scheduler tick: fire every currently-due reminder and advance it.
 
-        notifier.notify() does sqlite I/O and possibly a blocking HA HTTP call, and
-        mark_fired() does sqlite I/O -- both run via asyncio.to_thread so the event
-        loop is never blocked by them.
+        notifier.notify() does sqlite I/O and possibly a blocking HA HTTP call,
+        mark_fired() does sqlite I/O, and meal_store.logged_today() does sqlite I/O
+        too -- all run via asyncio.to_thread so the event loop is never blocked by
+        them.
+
+        Conditional reminders (r["condition"] set): a standing nudge like
+        "meal_not_logged_today" still advances recurrence via mark_fired every tick,
+        but the notify is skipped when the condition says it's unnecessary (e.g. a
+        meal was already logged today). An unrecognized condition value fails open
+        -- it fires (with a warning logged) rather than silently going dark, since a
+        typo in a condition string must never permanently suppress a reminder.
         """
         due = self.reminder_store.due(datetime.now())
         for r in due:
-            await asyncio.to_thread(self.notifier.notify, f"Reminder: {r['text']}", "high")
+            if await self._should_skip_notify(r):
+                log.info("Reminder #%s condition satisfied; skipping notify", r["id"])
+            else:
+                await asyncio.to_thread(self.notifier.notify, f"Reminder: {r['text']}", "high")
             await asyncio.to_thread(self.reminder_store.mark_fired, r["id"], datetime.now())
+
+    async def _should_skip_notify(self, r) -> bool:
+        """Whether a due reminder's condition says to skip notifying (but still fire/advance)."""
+        condition = r["condition"]
+        if condition is None:
+            return False
+        if condition == "meal_not_logged_today":
+            if self.meal_store is None:
+                return False  # fail-open: no meal_store wired up yet
+            return await asyncio.to_thread(self.meal_store.logged_today)
+        log.warning("Unknown reminder condition %r on reminder #%s; firing anyway", condition, r["id"])
+        return False
 
     async def _reminder_tick(self):
         """Background scheduler: check for due reminders every REMINDER_TICK_SEC.

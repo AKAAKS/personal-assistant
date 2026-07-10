@@ -76,6 +76,10 @@ def run(args, log):
         port=int(os.getenv("JARVIS_PORT", "8765")),
         notifier=notifier,
         reminder_store=reminder_store,
+        # meal_store intentionally omitted (defaults to None): create_assistant()
+        # doesn't build/return a MealStore yet, so conditional reminders whose
+        # condition is "meal_not_logged_today" fail open (fire anyway) until
+        # bootstrap wiring for MealStore lands.
     )
 
     ha_token = os.getenv("HA_TOKEN")
