@@ -16,5 +16,9 @@ pywin32>=306
 # Networking (brain/client split)
 websockets>=12.0
 
+# File tools (search_files / read_document)
+pypdf>=6.0.0
+python-docx>=1.2.0
+
 # Dev / test
 pytest>=8.0

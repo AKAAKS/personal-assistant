@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 from ha_client import HomeAssistantClient
 from jarvisd import db
-from jarvisd.core import Assistant
+from jarvisd.core import HAIKU_MODEL, Assistant
 from jarvisd.memory_store import MemoryStore
 from jarvisd.profile_store import ProfileStore
 from jarvisd.reminder_store import ReminderStore
@@ -101,6 +101,28 @@ def create_assistant():
         reminder_store=reminder_store,
         rules_store=rules_store,
     )
+
+    def summarizer(text: str) -> str:
+        """Condense long documents: free local Ollama when up, else one Haiku call.
+
+        Used by the file tools (jarvisd/tools/files.py) to summarize documents
+        too long to return in full. NOTE: not yet threaded into build_registry --
+        Assistant does not accept file_tools/file_summarizer yet (that wiring is
+        a separate task); this closure is defined here so it is ready once it does.
+        """
+        prompt = "Summarize the key points of this document in <=300 words:\n\n" + text
+        if ai.ollama.is_available():
+            try:
+                return ai.ollama.generate(prompt)
+            except Exception:
+                pass
+        resp = ai.client.messages.create(
+            model=HAIKU_MODEL, max_tokens=600,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        u = resp.usage
+        ai.cost_tracker.record(HAIKU_MODEL, u.input_tokens, u.output_tokens, source="summarize")
+        return "".join(b.text for b in resp.content if b.type == "text")
 
     features = ["Home Assistant", "PC Control"]
     if spotify:

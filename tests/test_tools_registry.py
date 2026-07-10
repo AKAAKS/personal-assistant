@@ -321,3 +321,45 @@ def test_registry_meal_tools_after_rules():
         last_rule_idx = max(tool_names.index(n) for n in rule_tools)
         first_meal_idx = min(tool_names.index(n) for n in meal_tools)
         assert first_meal_idx > last_rule_idx, "Meal tools should come after rule tools"
+
+
+def test_registry_without_file_tools():
+    """Test registry excludes file tools when file_tools is False (default)."""
+    tools, handlers = build_registry(FakeHA(), FakeSystem())
+    tool_names = [t["name"] for t in tools]
+
+    assert "search_files" not in tool_names
+    assert "read_document" not in tool_names
+
+
+def test_registry_with_file_tools():
+    """Test registry includes file tools when file_tools=True, even with no summarizer."""
+    tools, handlers = build_registry(FakeHA(), FakeSystem(), file_tools=True)
+    tool_names = [t["name"] for t in tools]
+
+    assert "search_files" in tool_names
+    assert "read_document" in tool_names
+    assert all(callable(handlers[name]) for name in ["search_files", "read_document"])
+
+
+def test_registry_file_tools_after_meals():
+    """Test file tools come after meal tools."""
+    from jarvisd.meal_store import MealStore
+    from jarvisd.db import connect
+
+    conn = connect(":memory:")
+    meal_store = MealStore(conn)
+
+    tools, handlers = build_registry(
+        FakeHA(), FakeSystem(),
+        meal_store=meal_store,
+        file_tools=True,
+    )
+    tool_names = [t["name"] for t in tools]
+
+    meal_tools = [n for n in tool_names if n in ("log_meal", "meal_summary", "export_meals")]
+    file_tool_names = [n for n in tool_names if n in ("search_files", "read_document")]
+
+    last_meal_idx = max(tool_names.index(n) for n in meal_tools)
+    first_file_idx = min(tool_names.index(n) for n in file_tool_names)
+    assert first_file_idx > last_meal_idx, "File tools should come after meal tools"
