@@ -92,7 +92,15 @@ def handlers(summarizer=None):
             if not isinstance(directory, str) or not directory.strip():
                 return "Error: directory must be a non-empty string."
             directory = directory.strip()
-            if is_secret_path(directory) or not is_allowed_path(directory):
+            try:
+                resolved_dir = Path(directory).expanduser().resolve()
+            except (OSError, ValueError):
+                return "Error: directory could not be validated."
+            # Dual check (canonical AND raw), same pattern as read_document and
+            # the guard: canonical catches 8.3 short-name aliases like CREDEN~1.
+            if is_secret_path(resolved_dir) or is_secret_path(directory):
+                return "Error: access to secret-shaped files is not permitted."
+            if not is_allowed_path(resolved_dir):
                 return "Error: directory is outside the allowed folders (Documents, Projects, Downloads)."
 
         if shutil.which("es"):

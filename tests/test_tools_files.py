@@ -1,4 +1,5 @@
 """Tests for file tools: search_files / read_document (jarvisd/tools/files.py)."""
+import subprocess
 import sys
 
 import pytest
@@ -76,6 +77,69 @@ class TestSearchFiles:
         outside.mkdir()
 
         result = handlers["search_files"]({"query": "x", "directory": str(outside)})
+
+        assert result.startswith("Error")
+
+
+class TestSearchEsPostFilter:
+    """The es.exe branch searches the whole disk; its post-filter is the
+    security boundary and must be exercised directly (canned stdout)."""
+
+    def _run_es(self, monkeypatch, file_root, stdout_lines):
+        monkeypatch.setattr(files.shutil, "which", lambda name: r"C:\tools\es.exe")
+
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 0, stdout="\n".join(stdout_lines), stderr="")
+
+        monkeypatch.setattr(files.subprocess, "run", fake_run)
+        return files.handlers()["search_files"]({"query": "report"})
+
+    def test_es_results_outside_roots_are_dropped(self, file_root, monkeypatch, tmp_path):
+        inside = file_root / "report.txt"
+        inside.write_text("x", encoding="utf-8")
+        outside = tmp_path / "elsewhere" / "report.txt"
+
+        result = self._run_es(monkeypatch, file_root, [str(inside), str(outside)])
+
+        assert str(inside) in result
+        assert str(outside) not in result
+
+    def test_es_secret_results_are_dropped(self, file_root, monkeypatch):
+        inside = file_root / "report.txt"
+        inside.write_text("x", encoding="utf-8")
+        secret = file_root / ".env"
+        secret.write_text("FAKE=1", encoding="utf-8")
+
+        result = self._run_es(monkeypatch, file_root, [str(inside), str(secret)])
+
+        assert str(inside) in result
+        assert ".env" not in result
+
+    def test_es_all_results_filtered_returns_no_match(self, file_root, monkeypatch, tmp_path):
+        outside = tmp_path / "elsewhere" / "report.txt"
+
+        result = self._run_es(monkeypatch, file_root, [str(outside)])
+
+        assert "No files found matching" in result
+
+
+class TestSearchDirectoryCanonicalization:
+    def test_secret_directory_via_short_name_is_rejected(self, file_root, handlers):
+        # 8.3 short names (CREDEN~1) alias secret-named dirs; the raw string
+        # doesn't match *credential* so the check must run on the canonical path.
+        import ctypes
+
+        secret_dir = file_root / "credentials_store"
+        secret_dir.mkdir()
+        buf = ctypes.create_unicode_buffer(260)
+        rc = ctypes.windll.kernel32.GetShortPathNameW(str(secret_dir), buf, 260)
+        if not rc:
+            pytest.skip("could not obtain a short path name")
+        short = buf.value
+        if short.lower() == str(secret_dir).lower():
+            pytest.skip("8.3 short names disabled on this filesystem")
+
+        result = handlers["search_files"]({"query": "x", "directory": short})
 
         assert result.startswith("Error")
 
