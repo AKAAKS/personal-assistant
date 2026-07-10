@@ -417,3 +417,105 @@ def test_pause_turn_continues_loop():
 
     assert reply == "final answer"
     assert len(fake_client.messages.calls) == 2
+
+
+def blocks_response(blocks, stop_reason="end_turn"):
+    """Fake API response with arbitrary content blocks (for server-side / tool_use mixes)."""
+    return SimpleNamespace(
+        content=list(blocks),
+        stop_reason=stop_reason,
+        usage=SimpleNamespace(
+            input_tokens=10,
+            output_tokens=5,
+            cache_read_input_tokens=0,
+            cache_creation_input_tokens=0,
+            server_tool_use=None,
+        ),
+    )
+
+
+def test_pause_turn_with_tool_use_still_executes_tools():
+    """pause_turn alongside local tool_use blocks must NOT skip tool execution:
+    the blocks go through execute_guarded and tool_results are appended, else the
+    conversation carries dangling tool_use into the next request (API 400)."""
+    from jarvisd.core import SONNET_MODEL
+
+    ai = make_assistant()
+    calls = []
+    ai.execute_guarded = (
+        lambda name, inp, autonomous=False: calls.append((name, inp)) or "devices: Desk"
+    )
+
+    tool_use = SimpleNamespace(type="tool_use", id="tu_pause", name="list_devices", input={})
+    first = blocks_response([tool_use], stop_reason="pause_turn")
+    fake_client = FakeAnthropicClient([first, fake_response("done after tools")])
+    ai.client = fake_client
+
+    reply = ai._claude_loop("check devices", SONNET_MODEL)
+
+    assert reply == "done after tools"
+    assert calls == [("list_devices", {})]
+    assert len(fake_client.messages.calls) == 2
+    # the tool_result for tu_pause was appended as the follow-up user message
+    tool_result_blocks = [
+        b
+        for m in ai.conversation
+        if m["role"] == "user" and isinstance(m["content"], list)
+        for b in m["content"]
+        if isinstance(b, dict) and b.get("type") == "tool_result"
+    ]
+    assert [b["tool_use_id"] for b in tool_result_blocks] == ["tu_pause"]
+
+
+def test_server_side_blocks_ignored_by_loop():
+    """server_tool_use / web_search_tool_result blocks are neither text nor tool_use:
+    the loop must return just the text and never try to execute them locally."""
+    from jarvisd.core import SONNET_MODEL
+
+    ai = make_assistant()
+    calls = []
+    ai.execute_guarded = (
+        lambda name, inp, autonomous=False: calls.append((name, inp)) or "unexpected"
+    )
+    content = [
+        SimpleNamespace(type="server_tool_use", id="srvtoolu_1", name="web_search", input={"query": "weather"}),
+        SimpleNamespace(type="web_search_tool_result", tool_use_id="srvtoolu_1", content=[]),
+        text_block("It's sunny today."),
+    ]
+    ai.client = FakeAnthropicClient([blocks_response(content)])
+
+    reply = ai._claude_loop("what's the weather", SONNET_MODEL)
+
+    assert reply == "It's sunny today."
+    assert calls == []
+
+
+def test_pause_cap_fallback_when_no_text():
+    """6 consecutive pause_turns exceed PAUSE_TURN_MAX_CONTINUATIONS=5; with no
+    text accumulated the loop bails with the fallback string instead of spinning."""
+    from jarvisd.core import PAUSE_TURN_MAX_CONTINUATIONS, SONNET_MODEL
+
+    responses = [blocks_response([], stop_reason="pause_turn") for _ in range(6)]
+    ai = make_assistant()
+    fake_client = FakeAnthropicClient(responses)
+    ai.client = fake_client
+
+    reply = ai._claude_loop("search something", SONNET_MODEL)
+
+    assert reply == "(web search did not complete)"
+    assert len(fake_client.messages.calls) == PAUSE_TURN_MAX_CONTINUATIONS + 1
+
+
+def test_pause_cap_returns_text_when_present():
+    """Same cap trip, but the pause responses carried text: return it rather than the fallback."""
+    from jarvisd.core import SONNET_MODEL
+
+    responses = [fake_response(f"chunk {i}", stop_reason="pause_turn") for i in range(6)]
+    ai = make_assistant()
+    fake_client = FakeAnthropicClient(responses)
+    ai.client = fake_client
+
+    reply = ai._claude_loop("search something", SONNET_MODEL)
+
+    assert reply == "chunk 5"
+    assert len(fake_client.messages.calls) == 6

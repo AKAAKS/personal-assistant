@@ -255,16 +255,20 @@ class Assistant:
             assistant_content = response.content
             self.conversation.append({"role": "assistant", "content": assistant_content})
 
-            if response.stop_reason == "pause_turn":
+            tool_use_blocks = [b for b in assistant_content if b.type == "tool_use"]
+
+            if response.stop_reason == "pause_turn" and not tool_use_blocks:
                 # Server-side tool (web_search) loop paused mid-turn; re-request
                 # WITHOUT adding a user message and the API resumes automatically.
+                # If local tool_use blocks are present we must NOT take this
+                # shortcut: skipping them would bypass execute_guarded and leave
+                # dangling tool_use in the conversation (API 400) — fall through
+                # to the normal execute-and-append path (the loop re-requests anyway).
                 pause_continuations += 1
                 if pause_continuations > PAUSE_TURN_MAX_CONTINUATIONS:
                     text_parts = [b.text for b in assistant_content if b.type == "text"]
                     return "\n".join(text_parts) if text_parts else "(web search did not complete)"
                 continue
-
-            tool_use_blocks = [b for b in assistant_content if b.type == "tool_use"]
 
             if not tool_use_blocks:
                 text_parts = [b.text for b in assistant_content if b.type == "text"]
