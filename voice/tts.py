@@ -87,3 +87,40 @@ class TextToSpeech:
         """List available system voices."""
         voices = self._engine_factory().getProperty("voices")
         return [{"id": v.id, "name": v.name, "languages": v.languages} for v in (voices or [])]
+
+
+class _EdgeWithFallback:
+    """Wraps EdgeTTS so a None result (network down, missing package, timeout)
+    falls back to pyttsx3's TextToSpeech instead of degrading straight to text.
+    The pyttsx3 engine is constructed lazily, only if/when it's actually needed."""
+
+    def __init__(self, edge, rate: int, voice_id: str | None):
+        self._edge = edge
+        self._rate = rate
+        self._voice_id = voice_id
+        self._fallback = None
+
+    def synthesize(self, text: str, timeout: float = SYNTH_TIMEOUT_SEC) -> bytes | None:
+        wav = self._edge.synthesize(text, timeout)
+        if wav is not None:
+            return wav
+        if self._fallback is None:
+            self._fallback = TextToSpeech(rate=self._rate, voice_id=self._voice_id)
+        return self._fallback.synthesize(text, timeout)
+
+
+def make_tts(backend: str | None = None, rate: int = 180, voice_id: str | None = None):
+    """Factory selecting a TTS backend by name (or TTS_BACKEND env var).
+
+    "edge" -> EdgeTTS (free Microsoft neural voices, network required),
+    wrapped with an automatic fallback to the offline pyttsx3 TextToSpeech
+    if edge synthesis ever returns None. Anything else (including the
+    default) -> the current, known-good, offline TextToSpeech.
+    """
+    if backend is None:
+        backend = os.getenv("TTS_BACKEND", "pyttsx3")
+    if backend == "edge":
+        from voice.tts_edge import EdgeTTS
+        edge = EdgeTTS(voice=voice_id)
+        return _EdgeWithFallback(edge, rate=rate, voice_id=voice_id)
+    return TextToSpeech(rate=rate, voice_id=voice_id)

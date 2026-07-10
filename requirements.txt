@@ -12,6 +12,8 @@ webrtcvad>=2.0.10
 numpy>=1.24.0
 pyttsx3>=2.90
 pywin32>=306
+edge-tts>=7.2.0
+miniaudio>=1.71
 
 # Networking (brain/client split)
 websockets>=12.0
