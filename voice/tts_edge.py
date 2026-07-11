@@ -24,9 +24,13 @@ import os
 import threading
 import wave
 
-log = logging.getLogger(__name__)
+# Single source of truth for the synthesis timeout (voice.tts has no top-level
+# dependency on this module — make_tts imports EdgeTTS lazily — so this import
+# is cycle-free). Sharing it keeps the daemon-freeze guard from drifting between
+# the two TTS backends.
+from voice.tts import SYNTH_TIMEOUT_SEC
 
-SYNTH_TIMEOUT_SEC = 20
+log = logging.getLogger(__name__)
 
 
 def _miniaudio_decode(mp3_bytes: bytes, output_format=None, nchannels=None, sample_rate=None):

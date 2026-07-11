@@ -116,6 +116,11 @@ def make_tts(backend: str | None = None, rate: int = 180, voice_id: str | None =
     wrapped with an automatic fallback to the offline pyttsx3 TextToSpeech
     if edge synthesis ever returns None. Anything else (including the
     default) -> the current, known-good, offline TextToSpeech.
+
+    `rate` is an integer words-per-minute value for the pyttsx3 backend (also
+    used by the edge backend's pyttsx3 fallback). It is intentionally NOT
+    forwarded to EdgeTTS: edge voices take a percentage-string rate
+    (e.g. "+10%"), a different unit — set that via EdgeTTS(rate=...) directly.
     """
     if backend is None:
         backend = os.getenv("TTS_BACKEND", "pyttsx3")
