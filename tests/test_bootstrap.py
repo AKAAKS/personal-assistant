@@ -61,6 +61,14 @@ def test_create_assistant_returns_meal_store(monkeypatch, tmp_path):
     assert "Habits" in features
     assert ai.cost_tracker.search_monthly_cap == 42
 
+    # The bootstrap-built ai must actually have the proposal tools registered —
+    # i.e. create_assistant() passed proposal_store into Assistant(...), not just
+    # into the returned tuple. Guards the call-site itself (dropping that kwarg
+    # would leave habit_scan running but the accept/dismiss tools unregistered).
+    assert "list_proposals" in ai._handlers
+    assert "accept_proposal" in ai._handlers
+    assert "dismiss_proposal" in ai._handlers
+
     conn.close()
 
 
