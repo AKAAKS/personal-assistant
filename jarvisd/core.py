@@ -75,6 +75,7 @@ class Assistant:
         search_monthly_cap: int = 100,
         meal_store=None,
         file_tools: bool = False,
+        proposal_store=None,
     ):
         spotify = None
         if spotify_client is not None and getattr(spotify_client, "is_authenticated", lambda: True)():
@@ -103,6 +104,7 @@ class Assistant:
             meal_store=meal_store,
             file_tools=file_tools,
             file_summarizer=self._summarize if file_tools else None,
+            proposal_store=proposal_store,
         )
         if self.tools:
             self.tools[-1] = {**self.tools[-1], "cache_control": {"type": "ephemeral"}}

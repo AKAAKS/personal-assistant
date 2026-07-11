@@ -50,18 +50,24 @@ def main():
 
 
 def run(args, log):
-    ai, features, conn, reminder_store, rules_store, ha, meal_store = create_assistant()
+    ai, features, conn, reminder_store, rules_store, ha, meal_store, proposal_store, habit_scan = create_assistant()
 
+    tts_backend = os.getenv("TTS_BACKEND", "pyttsx3")
     stt = tts = None
     if not args.no_speech:
         from voice.stt import SpeechToText
-        from voice.tts import TextToSpeech
+        from voice.tts import make_tts
         stt = SpeechToText(
             model_size=os.getenv("WHISPER_MODEL", "small"),
             device=os.getenv("WHISPER_DEVICE", "cuda"),
             compute_type=os.getenv("WHISPER_COMPUTE_TYPE", "int8_float16"),
         )
-        tts = TextToSpeech(rate=int(os.getenv("TTS_RATE", "180")))
+        tts = make_tts(
+            tts_backend,
+            rate=int(os.getenv("TTS_RATE", "180")),
+            voice_id=os.getenv("TTS_VOICE_ID") or None,
+        )
+        features.append(f"TTS ({tts_backend})")
 
     # Proactivity (reminders/notifier/HA rule triggers) needs a working DB conn;
     # bootstrap builds reminder_store/rules_store on that same conn all-or-nothing,
@@ -77,6 +83,8 @@ def run(args, log):
         notifier=notifier,
         reminder_store=reminder_store,
         meal_store=meal_store,
+        proposal_store=proposal_store,
+        habit_scan=habit_scan,
     )
 
     ha_token = os.getenv("HA_TOKEN")

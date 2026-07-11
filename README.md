@@ -126,6 +126,37 @@ its confidence (low/medium/high) and assumptions honestly with every log, but tr
 the numbers as directionally useful for spotting trends — not as precise nutrition
 facts.
 
+## Habit suggestions
+
+Every night (~3am local, override with `HABIT_SCAN_HOUR`) JARVIS mines
+`logs/audit.jsonl` for recurring patterns — the same tool called with the same
+input around the same time of day, several days running — and turns each new
+one into a one-sentence proposed fact via a single Haiku call. Nothing is
+written automatically and nothing interrupts you: the only thing you'll ever
+see unprompted is a one-line trailer on a reply, like `💡 2 suggestions`, when
+there's something pending.
+
+- "Show suggestions" — lists the pending proposals.
+- "Accept 1" — writes the fact to your profile (it survives a restart) and
+  marks the proposal accepted.
+- "Dismiss 2" — drops it; a dismissed or already-accepted habit is never
+  re-proposed, and re-scanning an already-seen pattern costs nothing (no
+  Haiku call — dedup happens before phrasing).
+
+A day with no qualifying habits, or only below-threshold/single-day patterns,
+spends $0. Mining itself is pure Python; the only cost is one Haiku call per
+brand-new confirmed candidate.
+
+## Voice
+
+Default TTS is offline `pyttsx3` (Windows SAPI5). Set `TTS_BACKEND=edge` to
+opt into `edge-tts`'s free Microsoft neural voices (`EDGE_TTS_VOICE`, default
+`en-US-GuyNeural`) — higher quality, but it needs network access to Microsoft's
+service. No `ffmpeg` install is required: the MP3 response is decoded to PCM
+in-process via `miniaudio`. If the network is down or synthesis fails for any
+reason, JARVIS automatically falls back to the offline `pyttsx3` voice rather
+than freezing or dropping audio entirely.
+
 ## Always-on
 
     scripts\install_autostart.bat     # registers a logon task (does NOT start it)
