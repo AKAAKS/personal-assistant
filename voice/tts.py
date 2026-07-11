@@ -117,15 +117,17 @@ def make_tts(backend: str | None = None, rate: int = 180, voice_id: str | None =
     if edge synthesis ever returns None. Anything else (including the
     default) -> the current, known-good, offline TextToSpeech.
 
-    `rate` is an integer words-per-minute value for the pyttsx3 backend (also
-    used by the edge backend's pyttsx3 fallback). It is intentionally NOT
-    forwarded to EdgeTTS: edge voices take a percentage-string rate
-    (e.g. "+10%"), a different unit — set that via EdgeTTS(rate=...) directly.
+    `rate` and `voice_id` are pyttsx3 (SAPI) settings — they apply to the
+    plain pyttsx3 backend and to the edge backend's pyttsx3 fallback. They are
+    intentionally NOT forwarded to EdgeTTS: edge voices are named differently
+    (e.g. "en-US-GuyNeural", set via EDGE_TTS_VOICE) and take a percentage-string
+    rate, so passing a SAPI voice GUID would silently break every edge synthesis
+    and force a permanent fallback. The edge backend reads EDGE_TTS_VOICE itself.
     """
     if backend is None:
         backend = os.getenv("TTS_BACKEND", "pyttsx3")
     if backend == "edge":
         from voice.tts_edge import EdgeTTS
-        edge = EdgeTTS(voice=voice_id)
+        edge = EdgeTTS()  # reads EDGE_TTS_VOICE; NOT the SAPI voice_id
         return _EdgeWithFallback(edge, rate=rate, voice_id=voice_id)
     return TextToSpeech(rate=rate, voice_id=voice_id)

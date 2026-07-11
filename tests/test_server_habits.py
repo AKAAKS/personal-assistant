@@ -114,6 +114,20 @@ def test_seconds_until_next_scan_same_day_when_before_hour(monkeypatch):
     assert seconds == 2 * 3600
 
 
+def test_seconds_until_next_scan_tolerates_malformed_hour_env(monkeypatch):
+    # A bad HABIT_SCAN_HOUR must NOT raise: this runs outside _habit_tick's
+    # try/except, so a raise here would silently kill the nightly task.
+    server = JarvisServer(FakeAssistant())
+    now = datetime(2026, 7, 10, 1, 0, 0)
+    for bad in ("3am", "25", "-1", "", "not-a-number"):
+        monkeypatch.setenv("HABIT_SCAN_HOUR", bad)
+        seconds = server._seconds_until_next_scan(now)  # must not raise
+        assert 0 < seconds <= 24 * 3600
+    # Falls back to the 3am default -> 2 hours from 1am.
+    monkeypatch.setenv("HABIT_SCAN_HOUR", "3am")
+    assert server._seconds_until_next_scan(now) == 2 * 3600
+
+
 # --- serve_forever wiring ---
 
 

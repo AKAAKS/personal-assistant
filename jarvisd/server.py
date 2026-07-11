@@ -334,7 +334,15 @@ class JarvisServer:
         waiting for a real multi-hour sleep: pass a fixed `now` and assert the
         computed delay directly.
         """
-        hour = int(os.environ.get("HABIT_SCAN_HOUR", "3"))
+        # Parse-guard the env var: this runs OUTSIDE the scan try/except, so a
+        # malformed HABIT_SCAN_HOUR ("3am", "25") raising here would silently
+        # kill the nightly task while the rest of the daemon keeps running.
+        try:
+            hour = int(os.environ.get("HABIT_SCAN_HOUR", "3"))
+        except (TypeError, ValueError):
+            hour = 3
+        if not 0 <= hour <= 23:
+            hour = 3
         target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
         if target <= now:
             target += timedelta(days=1)

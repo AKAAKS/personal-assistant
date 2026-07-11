@@ -40,6 +40,25 @@ def test_make_tts_edge_backend_has_synthesize_method():
     assert callable(tts.synthesize)
 
 
+def test_make_tts_edge_does_not_pass_sapi_voice_id_to_edge(monkeypatch):
+    # A SAPI voice GUID (TTS_VOICE_ID / voice_id) must NOT be handed to EdgeTTS
+    # as its voice name — that would silently break every edge synthesis and
+    # force a permanent pyttsx3 fallback. Edge reads EDGE_TTS_VOICE itself.
+    import voice.tts as tts_mod
+    captured = {}
+
+    class FakeEdge:
+        def __init__(self, *a, **k):
+            captured["args"] = a
+            captured["kwargs"] = k
+
+    monkeypatch.setattr("voice.tts_edge.EdgeTTS", FakeEdge)
+    tts_mod.make_tts("edge", voice_id="{SAPI-GUID-Zira}")
+
+    assert captured["args"] == ()
+    assert "voice" not in captured["kwargs"] or captured["kwargs"]["voice"] is None
+
+
 # ---------------------------------------------------------------------------
 # EdgeTTS.synthesize — offline behavior
 # ---------------------------------------------------------------------------
