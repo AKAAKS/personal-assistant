@@ -36,23 +36,39 @@ def strip_markdown(text: str) -> str:
         lines.append(line)
     text = "\n".join(lines)
 
-    def _strip_dunder_safe(match: "re.Match[str]") -> str:
-        # Genuine bold reads as a phrase ("__nice work__"); a bare identifier
-        # like "__init__" or "__main__" has no internal whitespace -- leave
-        # those alone instead of mangling the dunder.
-        inner = match.group(1)
-        if re.search(r"\s", inner):
-            return inner
-        return match.group(0)
+    # --- Emphasis stripping -------------------------------------------------
+    # This text is about to be spoken by a TTS engine. A literal "*" or "_"
+    # leaking into speech is the primary failure mode; stripping emphasis a
+    # little too eagerly is a benign, secondary one. So when a case is
+    # ambiguous, we STRIP -- we do not try to special-case every identifier
+    # shape that might collide with markup syntax.
+    #
+    # Paired bold markers are unwrapped unconditionally, even when glued to
+    # surrounding text ("**cat**s" -> "cats") or when the inner text happens
+    # to look like a bare identifier ("__init__" -> "init"). Yes, this mangles
+    # the Python dunder -- that's an ACCEPTED outcome. This is a home voice
+    # assistant (lights, music, reminders), not a code reader; do not re-add
+    # a dunder/identifier special case here.
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)  # **bold**
+    text = re.sub(r"__(.+?)__", r"\1", text)      # __bold__
 
-    # Emphasis markers only count as markup when the pair is genuinely
-    # markup: not glued to surrounding word characters (so snake_case and
-    # __init__ survive), and with no whitespace immediately inside the
-    # delimiters (so a lone " * " multiplication sign survives).
-    text = re.sub(r"(?<!\w)\*\*(?!\s)(.+?)(?<!\s)\*\*(?!\w)", r"\1", text)  # **bold**
-    text = re.sub(r"(?<!\w)__(?!\s)(.+?)(?<!\s)__(?!\w)", _strip_dunder_safe, text)  # __bold__
-    text = re.sub(r"(?<!\w)\*(?!\s)(.+?)(?<!\s)\*(?!\w)", r"\1", text)     # *italic*
-    text = re.sub(r"(?<!\w)_(?!_)(?!\s)(.+?)(?<!\s)(?<!_)_(?!\w)", r"\1", text)  # _italic_
+    # Leftover single "*" is swept up next: a run of `*` counts as markup
+    # (and is removed) if it touches a word character on either side. A
+    # standalone `*` with whitespace on both sides survives, since that's
+    # multiplication ("3 * 4 * 5"), not italics -- the one asterisk case
+    # that's preserved.
+    text = re.sub(r"(?<=\w)\*+|\*+(?=\w)", "", text)
+
+    # Leftover single "_" is markup unless it is exactly one underscore
+    # sitting between word characters on BOTH sides -- that's snake_case
+    # ("snake_case_name"), the one underscore case that's preserved, and it
+    # falls out of this rule structurally (not as a special case): a run of
+    # underscores with a word char on only one side, or a run of 2+
+    # underscores between word chars, is markup and gets removed.
+    text = re.sub(
+        r"(?<!\w)_+(?=\w)|(?<=\w)_+(?!\w)|(?<=\w)_{2,}(?=\w)", "", text
+    )
+
     text = re.sub(r"`(.+?)`", r"\1", text)                # `code`
     text = re.sub(r"\[(.+?)\]\((.*?)\)", r"\1", text)     # [text](url) -> text
     text = _EMOJI_RE.sub("", text)
