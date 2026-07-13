@@ -96,3 +96,14 @@ def test_execute_guarded_run_script_autonomous_never_executes():
     assert first.startswith("CONFIRMATION REQUIRED")
     assert second.startswith("CONFIRMATION REQUIRED")
     assert executed == []
+
+
+def test_system_prompt_carries_spoken_persona_rules():
+    from jarvisd.core import SYSTEM_PROMPT
+
+    p = SYSTEM_PROMPT.lower()
+    assert "no markdown" in p
+    assert "no bullet" in p or "no lists" in p
+    assert "read aloud" in p
+    # never the butler honorific
+    assert '"sir"' in SYSTEM_PROMPT or "never use \"sir\"" in SYSTEM_PROMPT
