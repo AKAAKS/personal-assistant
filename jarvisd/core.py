@@ -378,13 +378,25 @@ class Assistant:
           replacing it, and this also means a turn with only tool_use blocks
           and no text block is handled safely -- the note is just added as its
           own block, nothing existing needs to be found or touched).
+
+        Idempotent: calling it twice on the same turn leaves the turn unchanged
+        after the first call.
         """
         for turn in reversed(self.conversation):
             if turn["role"] != "assistant":
                 continue
             content = turn["content"]
             if isinstance(content, str):
+                # Already marked: no-op
+                if INTERRUPTION_NOTE in content:
+                    return
                 turn["content"] = content.rstrip() + " " + INTERRUPTION_NOTE
             elif isinstance(content, list):
+                # Already marked: check if any text block contains the note
+                if any(
+                    isinstance(block, dict) and block.get("type") == "text" and block.get("text") == INTERRUPTION_NOTE
+                    for block in content
+                ):
+                    return
                 content.append({"type": "text", "text": INTERRUPTION_NOTE})
             return

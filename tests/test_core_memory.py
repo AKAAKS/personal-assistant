@@ -666,6 +666,48 @@ def test_note_interruption_noop_on_empty_conversation():
     assert a.conversation == []
 
 
+def test_note_interruption_is_idempotent_string_content():
+    """Calling note_interruption() twice on a string-content turn must not
+    stack the marker -- the second call should be a no-op."""
+    a = _bare_assistant([
+        {"role": "user", "content": "play music"},
+        {"role": "assistant", "content": "I can play lots of things"},
+    ])
+    a.note_interruption()
+    after_first = a.conversation[-1]["content"]
+
+    a.note_interruption()
+    after_second = a.conversation[-1]["content"]
+
+    assert after_first == after_second
+    assert after_first.endswith(INTERRUPTION_NOTE)
+    # Verify the note is not doubled
+    assert after_first.count(INTERRUPTION_NOTE) == 1
+
+
+def test_note_interruption_is_idempotent_list_content():
+    """Calling note_interruption() twice on a list-content turn must not
+    append a duplicate marker block -- the second call should be a no-op."""
+    a = _bare_assistant([
+        {"role": "assistant", "content": [{"type": "text", "text": "here you go"}]},
+    ])
+    a.note_interruption()
+    after_first_content = list(a.conversation[-1]["content"])
+    after_first_str = str(after_first_content)
+
+    a.note_interruption()
+    after_second_content = a.conversation[-1]["content"]
+    after_second_str = str(after_second_content)
+
+    assert after_first_str == after_second_str
+    # Verify the marker block appears exactly once
+    marker_count = sum(
+        1 for block in after_second_content
+        if isinstance(block, dict) and block.get("text") == INTERRUPTION_NOTE
+    )
+    assert marker_count == 1
+
+
 def test_run_script_executes_after_a_real_turn_boundary():
     """The legitimate path still works: arm in one turn, confirm in the next.
     begin_turn() (called at the top of process()) is the turn boundary that makes
