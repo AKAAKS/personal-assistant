@@ -100,6 +100,28 @@ def _find_device(spotify, device_name):
     return None
 
 
+_NO_DEVICE_MSG = (
+    "No active Spotify device found. Open Spotify on your phone or computer and "
+    "start playing anything once so it registers as a device, then ask again. "
+    "(Spotify playback control also requires a Premium account.)"
+)
+
+
+def _pick_device(spotify):
+    """Best available playback target as (device_id, device_name), or (None, None).
+
+    Prefers the already-active device, else the first one Spotify lists.
+    """
+    try:
+        devices = spotify.get_devices()
+    except Exception:
+        devices = []
+    if not devices:
+        return None, None
+    target = next((d for d in devices if d.get("is_active")), devices[0])
+    return target["id"], target["name"]
+
+
 def handlers(spotify):
     """Spotify tool handlers closing over a SpotifyClient."""
 
@@ -120,7 +142,24 @@ def handlers(spotify):
             if not device_id:
                 return (f"Could not find Spotify device '{device_name}'. "
                         "Use spotify_devices to list available devices.")
-        spotify.play(uri=uri, device_id=device_id)
+        try:
+            spotify.play(uri=uri, device_id=device_id)
+        except Exception as e:
+            # The common failure is "no active device" — Spotify returns 404 on
+            # /me/player/play when nothing is registered as the active device.
+            # If the caller didn't target a specific device, recover by aiming
+            # at an available one; if there are none, say so clearly.
+            if device_id is None:
+                rid, rname = _pick_device(spotify)
+                if rid is None:
+                    return _NO_DEVICE_MSG
+                try:
+                    spotify.play(uri=uri, device_id=rid)
+                except Exception as e2:
+                    return f"Error playing on Spotify: {e2}"
+                base = "Resumed playback." if not uri else f"Now playing {uri}."
+                return base + f" On: {rname}."
+            return f"Error playing on Spotify: {e}"
         msg = "Resumed playback." if not uri else f"Now playing {uri}."
         if device_name:
             msg += f" On: {device_name}."
@@ -154,8 +193,20 @@ def handlers(spotify):
         return "No action specified."
 
     def spotify_queue(tool_input):
-        spotify.add_to_queue(tool_input["uri"])
-        return f"Added to queue: {tool_input['uri']}"
+        uri = tool_input["uri"]
+        try:
+            spotify.add_to_queue(uri)
+        except Exception:
+            # Same "no active device" recovery as spotify_play.
+            rid, rname = _pick_device(spotify)
+            if rid is None:
+                return _NO_DEVICE_MSG
+            try:
+                spotify.add_to_queue(uri, device_id=rid)
+            except Exception as e2:
+                return f"Error adding to Spotify queue: {e2}"
+            return f"Added to queue: {uri} (on {rname})."
+        return f"Added to queue: {uri}"
 
     def spotify_now_playing(tool_input):
         info = spotify.get_current_playback()
