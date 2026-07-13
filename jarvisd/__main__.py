@@ -55,6 +55,10 @@ def run(args, log):
     tts_backend = os.getenv("TTS_BACKEND", "pyttsx3")
     stt = tts = None
     if not args.no_speech:
+        # Importing faster-whisper/ctranslate2/torch + loading the CUDA model is a
+        # ~15s cold operation that prints nothing until it's underway. Announce it
+        # first (flushed) so this silent gap doesn't look like a hang worth Ctrl+C.
+        print("Loading speech models (Whisper + TTS)... first start can take ~15s.", flush=True)
         from voice.stt import SpeechToText
         from voice.tts import make_tts
         stt = SpeechToText(
