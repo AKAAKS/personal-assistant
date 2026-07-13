@@ -5,6 +5,7 @@ never touched; only the pieces _capture_followup uses are faked.
 """
 
 import io
+import time
 import wave
 
 import numpy as np
@@ -213,3 +214,53 @@ def test_wav_duration_zero_framerate_returns_zero_no_crash():
 
     # Test should not raise ZeroDivisionError and should return 0.0
     assert VoiceClient._wav_duration(bytes(wav_bytes)) == 0.0
+
+
+# --- _watch_for_wake() interruptible playback --------------------------------
+
+
+WAKE_CHUNK = 1280  # WAKE_WORD_CHUNK
+
+
+class FrameMic:
+    """Mic that always has a full wake-word chunk ready."""
+    def __init__(self):
+        self.clears = 0
+
+    def clear(self):
+        self.clears += 1
+
+    def read_frame(self, timeout=1.0):
+        return np.zeros(WAKE_CHUNK, dtype=np.int16)
+
+
+class FakeWake:
+    """process_frame returns True on the Nth call (0 = never)."""
+    def __init__(self, fire_on=0):
+        self.fire_on = fire_on
+        self.calls = 0
+
+    def process_frame(self, chunk):
+        self.calls += 1
+        return self.fire_on and self.calls >= self.fire_on
+
+
+def _watch_client(wake):
+    c = VoiceClient.__new__(VoiceClient)
+    c.mic = FrameMic()
+    c.wake_word = wake
+    c._wake_buf = np.array([], dtype=np.int16)
+    return c
+
+
+def test_watch_for_wake_returns_true_when_word_fires():
+    c = _watch_client(FakeWake(fire_on=2))
+    assert c._watch_for_wake(duration=5.0) is True
+    assert c.mic.clears == 1
+
+
+def test_watch_for_wake_returns_false_after_duration():
+    c = _watch_client(FakeWake(fire_on=0))  # never fires
+    start = time.monotonic()
+    assert c._watch_for_wake(duration=0.05) is False
+    assert time.monotonic() - start < 2.0  # exits near the deadline, doesn't hang

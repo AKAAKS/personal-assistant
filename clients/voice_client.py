@@ -7,6 +7,7 @@ import asyncio
 import io
 import logging
 import os
+import time
 import wave
 import winsound
 
@@ -94,6 +95,57 @@ class VoiceClient:
             return None
         log.info("Captured %.1fs of audio", len(audio) / 16000)
         return audio.tobytes()
+
+    def _watch_for_wake(self, duration: float) -> bool:
+        """While a reply plays, listen for the wake word. Returns True on a
+        barge-in, False if `duration` (+ a short tail) elapses with no wake word.
+
+        Echo-safe: the mic hears JARVIS's own TTS, but the wake-word model only
+        trips on 'hey jarvis' -- which JARVIS never says -- so it can't self-fire.
+        """
+        self.mic.clear()
+        self._wake_buf = np.array([], dtype=np.int16)
+        deadline = time.monotonic() + duration + 0.3  # small tail past clip end
+        while time.monotonic() < deadline:
+            frame = self.mic.read_frame(timeout=0.2)
+            if frame is None:
+                continue
+            self._wake_buf = np.concatenate([self._wake_buf, frame])
+            while len(self._wake_buf) >= WAKE_WORD_CHUNK:
+                chunk = self._wake_buf[:WAKE_WORD_CHUNK]
+                self._wake_buf = self._wake_buf[WAKE_WORD_CHUNK:]
+                if self.wake_word.process_frame(chunk):
+                    return True
+        return False
+
+    def _play_and_watch(self, wav: bytes) -> bool:
+        """Play a reply WAV asynchronously while watching for the wake word.
+        Returns True if the user interrupted, False if it finished on its own.
+        """
+        duration = self._wav_duration(wav)
+        self._play_buf = wav  # hold a reference alive for async playback
+        try:
+            winsound.PlaySound(wav, winsound.SND_MEMORY | winsound.SND_ASYNC)
+        except Exception:
+            # Async playback unavailable: fall back to a plain blocking play
+            # (no barge-in this time, but the reply is still heard).
+            try:
+                winsound.PlaySound(wav, winsound.SND_MEMORY)
+            except Exception:
+                pass
+            return False
+        try:
+            return self._watch_for_wake(duration)
+        finally:
+            try:
+                winsound.PlaySound(None, winsound.SND_PURGE)  # stop if still playing
+            except Exception:
+                pass
+
+    async def _play_and_watch_reply(self, wav: bytes) -> bool:
+        """Play a reply under the shared play-lock; return whether interrupted."""
+        async with self._play_lock:
+            return await asyncio.to_thread(self._play_and_watch, wav)
 
     def _capture_followup(self) -> bytes | None:
         """Record a follow-up utterance WITHOUT the wake word.
