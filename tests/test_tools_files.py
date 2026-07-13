@@ -80,6 +80,42 @@ class TestSearchFiles:
 
         assert result.startswith("Error")
 
+    def test_search_bare_directory_name_resolves_against_allowed_roots(self, tmp_path, monkeypatch):
+        # Regression: a bare "Downloads" must resolve to the allowed root, NOT
+        # <cwd>/Downloads (which is what silently returned nothing before).
+        downloads = tmp_path / "Downloads"
+        downloads.mkdir()
+        (downloads / "OS_Agent.pdf").write_text("x", encoding="utf-8")
+        monkeypatch.setenv("FILE_ROOTS", str(downloads))
+
+        result = files.handlers()["search_files"]({"query": "OS_Agent", "directory": "Downloads"})
+
+        assert "OS_Agent.pdf" in result
+
+    def test_search_bare_directory_name_case_insensitive(self, tmp_path, monkeypatch):
+        downloads = tmp_path / "Downloads"
+        downloads.mkdir()
+        (downloads / "note.txt").write_text("x", encoding="utf-8")
+        monkeypatch.setenv("FILE_ROOTS", str(downloads))
+
+        result = files.handlers()["search_files"]({"query": "note", "directory": "downloads"})
+
+        assert "note.txt" in result
+
+    def test_search_bare_directory_no_matching_root_is_clear_error(self, file_root, handlers):
+        # "Nowhere" matches no allowed root -> a clear error, not a silent "no files".
+        result = handlers["search_files"]({"query": "x", "directory": "Nowhere"})
+
+        assert result.startswith("Error")
+        assert "allowed folders" in result
+
+    def test_search_absolute_directory_still_works(self, file_root, handlers):
+        (file_root / "report.txt").write_text("x", encoding="utf-8")
+
+        result = handlers["search_files"]({"query": "report", "directory": str(file_root)})
+
+        assert "report.txt" in result
+
 
 class TestSearchEsPostFilter:
     """The es.exe branch searches the whole disk; its post-filter is the

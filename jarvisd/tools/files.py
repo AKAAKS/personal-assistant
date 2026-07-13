@@ -125,7 +125,7 @@ def handlers(summarizer=None):
                 return "Error: directory must be a non-empty string."
             directory = directory.strip()
             try:
-                resolved_dir = Path(directory).expanduser().resolve()
+                resolved_dir = _resolve_directory(directory)
             except (OSError, ValueError):
                 return "Error: directory could not be validated."
             # Dual check (canonical AND raw), same pattern as read_document and
@@ -134,6 +134,9 @@ def handlers(summarizer=None):
                 return "Error: access to secret-shaped files is not permitted."
             if not is_allowed_path(resolved_dir):
                 return "Error: directory is outside the allowed folders (Documents, Projects, Downloads)."
+            # Search the RESOLVED absolute path downstream, not the raw name — a
+            # bare "Downloads" must not be re-resolved against the daemon's CWD.
+            directory = str(resolved_dir)
 
         if shutil.which("es"):
             hits = _search_es(query, directory)
@@ -300,6 +303,29 @@ def _list_available_scripts(scripts_dir: Path) -> str:
     if not names:
         return "No scripts are available."
     return "Available scripts: " + ", ".join(names)
+
+
+def _resolve_directory(directory: str) -> Path:
+    """Resolve a user/model-supplied search `directory` sensibly.
+
+    A bare or relative name like "Downloads" must resolve against the ALLOWED
+    ROOTS (the user's Documents/Projects/Downloads), NOT the daemon's working
+    directory — otherwise "Downloads" silently becomes <cwd>/Downloads, which
+    doesn't exist, and the search returns nothing. Absolute paths are honored
+    as given; a bare name that matches no allowed root falls through to a normal
+    resolve so is_allowed_path can reject it with a clear message.
+    """
+    p = Path(directory).expanduser()
+    if p.is_absolute():
+        return p.resolve()
+    needle = directory.replace("\\", "/").strip("/").lower()
+    for root in allowed_roots():
+        if root.name.lower() == needle:
+            return root
+        candidate = (root / directory).resolve()
+        if candidate.exists():
+            return candidate
+    return p.resolve()
 
 
 def _search_es(query: str, directory: "str | None") -> list[str]:
