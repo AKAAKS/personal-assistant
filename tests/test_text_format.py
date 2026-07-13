@@ -103,3 +103,32 @@ def test_unbalanced_asterisk_runs_stripped():
     assert strip_markdown("*** waiting ***") == "waiting"
     assert strip_markdown("** leading test") == "leading test"
     assert strip_markdown("trailing test **") == "trailing test"
+
+
+def test_glued_asterisk_and_underscore_markup_leaves_no_stray():
+    # Root-cause fix: the asterisk pass used to run before the underscore
+    # pass, so by the time underscore markup was evaluated its "*" boundary
+    # context had already been deleted -- a single "_" between two word
+    # characters is then indistinguishable from legitimate snake_case, and
+    # gets (wrongly) preserved as a stray literal underscore. Running the
+    # underscore pass first (while "*" is still present, and still a
+    # non-word character to \w) fixes this at the source.
+    assert strip_markdown("**bold**_italic_") == "bolditalic"
+    assert strip_markdown("_italic_**bold**") == "italicbold"
+    assert "_" not in strip_markdown("**Warning:**_do not proceed_")
+    assert "*" not in strip_markdown("**Warning:**_do not proceed_")
+
+    # A run of 2+ underscores is never snake_case (mirrors wave 3's
+    # asterisk-run normalization) -- so odd/long underscore runs glued
+    # next to other markup must not leave a stray single "_" behind either.
+    assert strip_markdown("__bold___italic_") == "bolditalic"
+    assert strip_markdown("__a___b__") == "ab"
+
+    # snake_case itself must still survive untouched.
+    assert strip_markdown("snake_case_name") == "snake_case_name"
+
+    out = strip_markdown(
+        "Mix **bold**_glued_, _glued_**bold**, and __a___b__ together."
+    )
+    assert "*" not in out
+    assert "_" not in out

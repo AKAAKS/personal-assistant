@@ -43,21 +43,62 @@ def strip_markdown(text: str) -> str:
     # ambiguous, we STRIP -- we do not try to special-case every identifier
     # shape that might collide with markup syntax.
     #
+    # ORDERING IS LOAD-BEARING: the underscore pass runs BEFORE the asterisk
+    # pass. If asterisks were stripped first (as an earlier version did),
+    # "**bold**_italic_" would become "bold_italic" before the underscore
+    # rule ever saw it -- and a single "_" sitting between two word
+    # characters is then structurally indistinguishable from legitimate
+    # snake_case, so it would be (wrongly) preserved as a stray literal
+    # underscore spoken aloud. Running the underscore pass first, while "*"
+    # is still present in the text, fixes this at the source: `\w` never
+    # matches "*", so an underscore delimiter glued against an asterisk run
+    # is correctly seen as flanked by a non-word character (markup, not
+    # snake_case) with no extra guard needed -- it falls out of the
+    # existing \w-based rules for free. Do not reorder these passes back.
+    #
     # An unbalanced run of 3+ asterisks (e.g. "*** waiting ***") would
     # otherwise make the lazy **bold** pairing below consume unevenly,
     # leaving single stray asterisks behind that are indistinguishable from
     # genuine multiplication. Collapse any such run to a clean pair first so
     # it pairs up correctly (or falls through to the leftover-run sweep).
+    # A run of 2+ underscores is never snake_case, so mirror the same
+    # normalization for "_" before underscore pairing/sweeping below.
     text = re.sub(r"\*{3,}", "**", text)
+    text = re.sub(r"_{3,}", "__", text)
+
+    # Paired __bold__ markers are unwrapped unconditionally, even when the
+    # inner text happens to look like a bare identifier ("__init__" ->
+    # "init"). Yes, this mangles the Python dunder -- that's an ACCEPTED
+    # outcome. This is a home voice assistant (lights, music, reminders),
+    # not a code reader; do not re-add a dunder/identifier special case
+    # here. This must run before the "**bold**" pairing below (see ordering
+    # note above).
+    text = re.sub(r"__(.+?)__", r"\1", text)      # __bold__
+
+    # Leftover single "_" is markup unless it is exactly one underscore
+    # sitting between word characters on BOTH sides -- that's snake_case
+    # ("snake_case_name"), the one underscore case that's preserved, and it
+    # falls out of this rule structurally (not as a special case): a run of
+    # underscores with a word char on only one side, or a run of 2+
+    # underscores between word chars, is markup and gets removed. Critically,
+    # this still runs while any surrounding "*" markup is intact, so a "_"
+    # glued to a "*" run is correctly treated as non-word-flanked (markup),
+    # not snake_case.
+    text = re.sub(
+        r"(?<!\w)_+(?=\w)|(?<=\w)_+(?!\w)|(?<=\w)_{2,}(?=\w)", "", text
+    )
+
+    # A run of 2+ underscores has no snake_case carve-out -- it is always
+    # markup (e.g. an unbalanced "__" from a truncated bold pair, or a run
+    # flanked by whitespace on both sides) and must be removed
+    # unconditionally. Mirrors the equivalent asterisk sweep below.
+    text = re.sub(r" *_{2,} *", " ", text)
 
     # Paired bold markers are unwrapped unconditionally, even when glued to
-    # surrounding text ("**cat**s" -> "cats") or when the inner text happens
-    # to look like a bare identifier ("__init__" -> "init"). Yes, this mangles
-    # the Python dunder -- that's an ACCEPTED outcome. This is a home voice
-    # assistant (lights, music, reminders), not a code reader; do not re-add
-    # a dunder/identifier special case here.
+    # surrounding text ("**cat**s" -> "cats"). By this point any "_" markup
+    # has already been resolved using "*" as intact boundary context, so it
+    # is now safe to remove the asterisks.
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)  # **bold**
-    text = re.sub(r"__(.+?)__", r"\1", text)      # __bold__
 
     # Leftover single "*" is swept up next: a run of `*` counts as markup
     # (and is removed) if it touches a word character on either side. A
@@ -71,16 +112,6 @@ def strip_markdown(text: str) -> str:
     # be removed unconditionally, even when flanked by whitespace on both
     # sides. Only a genuinely isolated SINGLE "*" survives that sweep.
     text = re.sub(r" *\*{2,} *", " ", text)
-
-    # Leftover single "_" is markup unless it is exactly one underscore
-    # sitting between word characters on BOTH sides -- that's snake_case
-    # ("snake_case_name"), the one underscore case that's preserved, and it
-    # falls out of this rule structurally (not as a special case): a run of
-    # underscores with a word char on only one side, or a run of 2+
-    # underscores between word chars, is markup and gets removed.
-    text = re.sub(
-        r"(?<!\w)_+(?=\w)|(?<=\w)_+(?!\w)|(?<=\w)_{2,}(?=\w)", "", text
-    )
 
     text = re.sub(r"`(.+?)`", r"\1", text)                # `code`
     text = re.sub(r"\[(.+?)\]\((.*?)\)", r"\1", text)     # [text](url) -> text
