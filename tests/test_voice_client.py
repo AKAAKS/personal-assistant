@@ -144,3 +144,30 @@ def test_wav_duration_bad_bytes_is_zero():
 def test_wav_duration_empty_wav_is_zero():
     """_wav_duration should return 0.0 for an empty WAV file."""
     assert VoiceClient._wav_duration(_make_wav(0.0)) == 0.0
+
+
+def test_wav_duration_zero_framerate_returns_zero_no_crash():
+    """Regression: _wav_duration should guard against framerate=0 and not crash.
+
+    A WAV header declaring framerate=0 would cause ZeroDivisionError when
+    computing duration without the 'if rate else 0.0' guard. This test verifies
+    the guard is in place and prevents the crash.
+    """
+    # Build a WAV buffer with framerate=0 by patching the header
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)  # Start with valid rate
+        w.writeframes(np.zeros(16000, dtype=np.int16).tobytes())
+
+    wav_bytes = bytearray(buf.getvalue())
+    # Sample rate is at byte offset 24 (4 bytes, little-endian)
+    wav_bytes[24:28] = b'\x00\x00\x00\x00'
+
+    # Verify wave module parses it with framerate=0
+    with wave.open(io.BytesIO(bytes(wav_bytes)), "rb") as w:
+        assert w.getframerate() == 0, "Failed to construct framerate=0 WAV"
+
+    # Test should not raise ZeroDivisionError and should return 0.0
+    assert VoiceClient._wav_duration(bytes(wav_bytes)) == 0.0
