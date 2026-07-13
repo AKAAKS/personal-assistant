@@ -4,6 +4,9 @@ We build the client via __new__ so the wake-word model and real microphone are
 never touched; only the pieces _capture_followup uses are faked.
 """
 
+import io
+import wave
+
 import numpy as np
 
 from clients.voice_client import VoiceClient
@@ -99,3 +102,45 @@ def test_misfire_outside_conversation_is_a_noop():
     # into a conversation or start counting.
     nxt = VoiceClient._followup_next(in_conversation=False, misfires=0, productive=False)
     assert nxt == (False, 0)
+
+
+# --- _wav_duration() helpers and tests ----------------------------------------
+
+
+def _make_wav(seconds: float, rate: int = 16000) -> bytes:
+    """Build a real WAV buffer with the stdlib wave module."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(np.zeros(int(seconds * rate), dtype=np.int16).tobytes())
+    return buf.getvalue()
+
+
+def test_wav_duration_reads_header():
+    """_wav_duration should parse duration from valid WAV headers."""
+    assert abs(VoiceClient._wav_duration(_make_wav(0.5)) - 0.5) < 0.01
+    assert abs(VoiceClient._wav_duration(_make_wav(1.0, rate=22050)) - 1.0) < 0.01
+
+
+def test_wav_duration_different_sample_rates():
+    """_wav_duration should work correctly at different sample rates."""
+    # Test 44100 Hz
+    assert abs(VoiceClient._wav_duration(_make_wav(0.5, rate=44100)) - 0.5) < 0.01
+    # Test 8000 Hz
+    assert abs(VoiceClient._wav_duration(_make_wav(2.0, rate=8000)) - 2.0) < 0.01
+    # Test 48000 Hz
+    assert abs(VoiceClient._wav_duration(_make_wav(0.25, rate=48000)) - 0.25) < 0.01
+
+
+def test_wav_duration_bad_bytes_is_zero():
+    """_wav_duration should return 0.0 for non-WAV bytes."""
+    assert VoiceClient._wav_duration(b"not a wav") == 0.0
+    assert VoiceClient._wav_duration(b"") == 0.0
+    assert VoiceClient._wav_duration(b"\x00\x00\x00\x00") == 0.0
+
+
+def test_wav_duration_empty_wav_is_zero():
+    """_wav_duration should return 0.0 for an empty WAV file."""
+    assert VoiceClient._wav_duration(_make_wav(0.0)) == 0.0

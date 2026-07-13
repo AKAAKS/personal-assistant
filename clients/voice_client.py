@@ -4,8 +4,10 @@ Run: python -m clients.voice_client
 """
 
 import asyncio
+import io
 import logging
 import os
+import wave
 import winsound
 
 import numpy as np
@@ -115,6 +117,16 @@ class VoiceClient:
             winsound.Beep(400, 250)
         except Exception:
             pass
+
+    @staticmethod
+    def _wav_duration(wav: bytes) -> float:
+        """Length of a WAV clip in seconds from its header (0.0 if unreadable)."""
+        try:
+            with wave.open(io.BytesIO(wav), "rb") as w:
+                rate = w.getframerate()
+                return w.getnframes() / float(rate) if rate else 0.0
+        except (wave.Error, EOFError):
+            return 0.0
 
     @staticmethod
     def _followup_next(*, in_conversation: bool, misfires: int, productive: bool):
