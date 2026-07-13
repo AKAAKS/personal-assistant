@@ -69,47 +69,62 @@ class RaisingMemoryStore:
 # ---------------------------------------------------------------------------
 
 
-def test_build_system_single_block_when_no_profile_store():
+def test_build_system_cached_prompt_plus_uncached_time_when_no_profile():
     ai = make_assistant()
     blocks = ai._build_system()
-    assert len(blocks) == 1
-    assert blocks[0]["text"] == __import__("jarvisd.core", fromlist=["SYSTEM_PROMPT"]).SYSTEM_PROMPT
+    # system prompt (cached) + current-time block (uncached, always last)
+    assert len(blocks) == 2
+    from jarvisd.core import SYSTEM_PROMPT
+    assert blocks[0]["text"] == SYSTEM_PROMPT
     assert blocks[0]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in blocks[-1]  # a value that changes every call must not be cached
+    assert "current local date and time" in blocks[-1]["text"].lower()
 
 
-def test_build_system_single_block_when_profile_empty(tmp_path):
+def test_build_system_no_profile_block_when_profile_empty(tmp_path):
     profile_store = ProfileStore(path=str(tmp_path / "profile.md"))  # file doesn't exist -> ""
     ai = make_assistant(profile_store=profile_store)
     blocks = ai._build_system()
-    assert len(blocks) == 1
+    assert len(blocks) == 2  # system prompt + time; no profile block
+    assert all("What you know about the user" not in b["text"] for b in blocks)
 
 
-def test_build_system_profile_block_present_last_with_cache_control(tmp_path):
+def test_build_system_profile_cached_before_uncached_time(tmp_path):
     profile_store = ProfileStore(path=str(tmp_path / "profile.md"))
     profile_store.append("likes tea in the morning")
     ai = make_assistant(profile_store=profile_store)
 
     blocks = ai._build_system()
 
-    assert len(blocks) == 2
+    assert len(blocks) == 3  # system prompt + profile + time
     from jarvisd.core import SYSTEM_PROMPT
     assert blocks[0]["text"] == SYSTEM_PROMPT
     assert blocks[0]["cache_control"] == {"type": "ephemeral"}
 
-    profile_block = blocks[-1]
+    profile_block = blocks[1]
     assert profile_block["text"].startswith("# What you know about the user")
     assert "likes tea in the morning" in profile_block["text"]
     assert profile_block["cache_control"] == {"type": "ephemeral"}
+
+    # time block is last and uncached, so it never invalidates the cached prefix
+    assert "cache_control" not in blocks[-1]
+    assert "current local date and time" in blocks[-1]["text"].lower()
+
+
+def test_build_system_time_block_reflects_current_date():
+    from datetime import datetime
+    ai = make_assistant()
+    assert str(datetime.now().year) in ai._build_system()[-1]["text"]
 
 
 def test_build_system_called_fresh_reflects_profile_changes(tmp_path):
     """ProfileStore.load() is mtime-cached; _build_system() should still see edits made after construction."""
     profile_store = ProfileStore(path=str(tmp_path / "profile.md"))
     ai = make_assistant(profile_store=profile_store)
-    assert len(ai._build_system()) == 1
+    assert len(ai._build_system()) == 2  # system prompt + time
 
     profile_store.append("new fact")
-    assert len(ai._build_system()) == 2
+    assert len(ai._build_system()) == 3  # system prompt + profile + time
 
 
 # ---------------------------------------------------------------------------

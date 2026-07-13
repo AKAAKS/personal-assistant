@@ -1,6 +1,7 @@
 """Claude-powered agent core: routing, cost tracking, tool-use loop."""
 
 import logging
+from datetime import datetime
 
 import anthropic
 
@@ -155,6 +156,19 @@ class Assistant:
                     "text": f"# What you know about the user\n\n{profile}",
                     "cache_control": {"type": "ephemeral"},
                 })
+        # Current local time — appended AFTER the last cached block and WITHOUT
+        # cache_control, so the model can resolve relative times ("in 2 minutes",
+        # "tomorrow at 8am") while the cached SYSTEM_PROMPT+profile prefix stays a
+        # cache hit (a value that changes every call must never carry cache_control).
+        now = datetime.now().astimezone()
+        blocks.append({
+            "type": "text",
+            "text": (
+                f"The current local date and time is {now:%A, %Y-%m-%d %H:%M %Z}. "
+                "Use this to resolve relative times (e.g. 'in 2 minutes', 'in an hour', "
+                "'tomorrow at 8am') into absolute times when setting reminders."
+            ),
+        })
         return blocks
 
     def _record_turn(self, role: str, text: str) -> None:
