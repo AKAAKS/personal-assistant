@@ -20,6 +20,11 @@ log = logging.getLogger(__name__)
 
 WAKE_WORD_CHUNK = 1280  # openwakeword expects 80ms chunks at 16kHz
 
+# After JARVIS replies, keep listening this many seconds for a follow-up WITHOUT
+# requiring the wake word again, so a back-and-forth conversation is hands-free.
+# If no speech starts within the window, we drop back to wake-word gating.
+FOLLOWUP_WINDOW_SEC = float(os.getenv("FOLLOWUP_WINDOW_SEC", "6"))
+
 
 class VoiceClient:
 
@@ -76,6 +81,28 @@ class VoiceClient:
             log.info("Captured %.1fs of audio", len(audio) / 16000)
             return audio.tobytes()
 
+    def _capture_followup(self) -> bytes | None:
+        """Record a follow-up utterance WITHOUT the wake word.
+
+        Used right after JARVIS replies so a conversation can continue
+        hands-free. Returns PCM bytes if the user starts speaking within
+        FOLLOWUP_WINDOW_SEC, or None if the window passes in silence (meaning
+        the conversation is over and we should re-arm the wake word).
+        """
+        self.mic.clear()  # discard whatever was captured while JARVIS was talking
+        try:
+            winsound.Beep(1000, 120)  # soft, higher cue: "still listening"
+        except Exception:
+            pass
+        audio = self.vad.record_until_silence(
+            self.mic, max_seconds=15.0, silence_ms=800,
+            speech_timeout_sec=FOLLOWUP_WINDOW_SEC,
+        )
+        if audio is None or len(audio) < 1600:
+            return None
+        log.info("Captured %.1fs follow-up", len(audio) / 16000)
+        return audio.tobytes()
+
     @staticmethod
     def _failure_beep():
         try:
@@ -107,21 +134,33 @@ class VoiceClient:
                     on_proactive_audio=self._play,
                 )
                 recv_task = asyncio.create_task(receiver.run())
+                in_conversation = False  # True while a hands-free back-and-forth is active
                 try:
                     while True:
-                        pcm = await asyncio.to_thread(self._capture_utterance)
-                        if pcm is None:
-                            continue
+                        if in_conversation:
+                            print("  Listening for follow-up... (or stay quiet to end)")
+                            pcm = await asyncio.to_thread(self._capture_followup)
+                            if pcm is None:
+                                print("  (conversation ended — say 'hey jarvis' to start again)\n")
+                                in_conversation = False
+                                continue
+                        else:
+                            pcm = await asyncio.to_thread(self._capture_utterance)
+                            if pcm is None:
+                                continue
                         await ws.send(pcm)
                         item = await receiver.get_reply(recv_task)
                         reply = item["data"]
                         if reply.get("type") == "error":
                             print(f"  [error] {reply.get('error')}\n")
                             self._failure_beep()
+                            in_conversation = False  # drop out of the conversation on error
                             continue
                         if not reply.get("heard") and not reply.get("text"):
                             print("  (didn't catch that)\n")
                             self._failure_beep()
+                            # Stay in conversation if we were already in one (give
+                            # another hands-free try); otherwise remain wake-word gated.
                             continue
                         if reply.get("heard"):
                             print(f"  You: {reply['heard']}")
@@ -131,6 +170,9 @@ class VoiceClient:
                             wav = await item["wav_future"]
                             if wav is not None:
                                 await self._play(wav)
+                        # A completed exchange -> keep listening for a follow-up
+                        # without the wake word.
+                        in_conversation = True
                 finally:
                     recv_task.cancel()
                     try:
