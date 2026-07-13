@@ -43,6 +43,13 @@ def strip_markdown(text: str) -> str:
     # ambiguous, we STRIP -- we do not try to special-case every identifier
     # shape that might collide with markup syntax.
     #
+    # An unbalanced run of 3+ asterisks (e.g. "*** waiting ***") would
+    # otherwise make the lazy **bold** pairing below consume unevenly,
+    # leaving single stray asterisks behind that are indistinguishable from
+    # genuine multiplication. Collapse any such run to a clean pair first so
+    # it pairs up correctly (or falls through to the leftover-run sweep).
+    text = re.sub(r"\*{3,}", "**", text)
+
     # Paired bold markers are unwrapped unconditionally, even when glued to
     # surrounding text ("**cat**s" -> "cats") or when the inner text happens
     # to look like a bare identifier ("__init__" -> "init"). Yes, this mangles
@@ -58,6 +65,12 @@ def strip_markdown(text: str) -> str:
     # multiplication ("3 * 4 * 5"), not italics -- the one asterisk case
     # that's preserved.
     text = re.sub(r"(?<=\w)\*+|\*+(?=\w)", "", text)
+
+    # A run of 2+ asterisks has no multiplication carve-out -- it is always
+    # markup (e.g. an unbalanced "**" from a truncated bold pair) and must
+    # be removed unconditionally, even when flanked by whitespace on both
+    # sides. Only a genuinely isolated SINGLE "*" survives that sweep.
+    text = re.sub(r" *\*{2,} *", " ", text)
 
     # Leftover single "_" is markup unless it is exactly one underscore
     # sitting between word characters on BOTH sides -- that's snake_case

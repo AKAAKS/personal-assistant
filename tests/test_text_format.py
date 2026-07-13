@@ -92,3 +92,14 @@ def test_no_stray_emphasis_characters_survive_mixed_markup():
     )
     assert "*" not in out
     assert "_" not in out
+
+
+def test_unbalanced_asterisk_runs_stripped():
+    # Only a genuinely isolated SINGLE "*" flanked by whitespace on both
+    # sides survives (multiplication). Any run of 2+ asterisks is markup
+    # and must never survive, no matter what surrounds it.
+    assert strip_markdown("text ** more") == "text more"
+    assert "*" not in strip_markdown("compute 2 ** 3 to get 8")
+    assert strip_markdown("*** waiting ***") == "waiting"
+    assert strip_markdown("** leading test") == "leading test"
+    assert strip_markdown("trailing test **") == "trailing test"
