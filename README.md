@@ -157,6 +157,9 @@ in-process via `miniaudio`. If the network is down or synthesis fails for any
 reason, JARVIS automatically falls back to the offline `pyttsx3` voice rather
 than freezing or dropping audio entirely.
 
+Say "hey jarvis" while JARVIS is talking to interrupt it and give a new
+instruction or correction.
+
 ## Always-on
 
     scripts\install_autostart.bat     # registers a logon task (does NOT start it)

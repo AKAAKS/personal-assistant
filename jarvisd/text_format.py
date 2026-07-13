@@ -98,6 +98,12 @@ def strip_markdown(text: str) -> str:
     text = re.sub(r"_+", _keep_snake_case_underscore, text)
     text = text.replace("*", "")
 
+    # Whitespace normalization. A content-mutating step above (most often
+    # emoji removal, e.g. "\n\n\U0001F4A1 You have..." -> "\n\n You have...")
+    # can leave a residual leading/trailing space on a line where the removed
+    # token used to sit. Strip each line's edge whitespace before collapsing
+    # blank lines/runs so no such residue survives into spoken prose.
+    text = "\n".join(line.strip(" \t") for line in text.split("\n"))
     text = re.sub(r"\n{2,}", "\n", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     return text.strip()

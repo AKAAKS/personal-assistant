@@ -33,6 +33,21 @@ def test_emoji_dropped():
     assert strip_markdown("Enjoy! 🎵😊").strip() == "Enjoy!"
 
 
+def test_emoji_removal_leaves_no_leading_space_on_its_line():
+    """Emoji removal happens mid-line (e.g. a "\\n\\n💡 You have..." trailer);
+    the space that separated the emoji from the following word must not
+    survive as a leading space once the emoji itself is gone."""
+    out = strip_markdown("Here's your reply.\n\n\U0001F4A1 You have 2 things to review.")
+    assert out == "Here's your reply.\nYou have 2 things to review."
+    assert "\n " not in out
+
+
+def test_emoji_removal_leaves_no_trailing_space_on_its_line():
+    out = strip_markdown("Great job today \U0001F389\nKeep it up.")
+    assert out == "Great job today\nKeep it up."
+    assert " \n" not in out
+
+
 def test_plain_prose_unchanged():
     s = "Sure, what do you want to hear?"
     assert strip_markdown(s) == s
