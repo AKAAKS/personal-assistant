@@ -58,6 +58,42 @@ How you work:
 INTERRUPTION_NOTE = "(The user interrupted and cut off this reply before I finished.)"
 
 
+def _find_last_assistant_turn(conversation: list[dict]) -> dict | None:
+    """Return the most recent assistant-role turn in `conversation`, or None.
+
+    Shared by Assistant.note_interruption()'s no-arg walk and by
+    JarvisServer's barge-in capture-at-receipt logic (see
+    JarvisServer._capture_interrupt_target), so "what counts as the current
+    last assistant turn" is defined in exactly one place.
+    """
+    for turn in reversed(conversation):
+        if turn["role"] == "assistant":
+            return turn
+    return None
+
+
+def _mark_turn_interrupted(turn: dict) -> None:
+    """Append the INTERRUPTION_NOTE marker onto a single assistant turn dict.
+
+    Factored out of note_interruption() so its content-shape handling
+    (str vs. SDK content-block list) and idempotency live in exactly one
+    place, whether the turn was found by walking self.conversation or passed
+    in explicitly by the caller.
+    """
+    content = turn["content"]
+    if isinstance(content, str):
+        if INTERRUPTION_NOTE in content:
+            return  # already marked
+        turn["content"] = content.rstrip() + " " + INTERRUPTION_NOTE
+    elif isinstance(content, list):
+        if any(
+            isinstance(block, dict) and block.get("type") == "text" and block.get("text") == INTERRUPTION_NOTE
+            for block in content
+        ):
+            return  # already marked
+        content.append({"type": "text", "text": INTERRUPTION_NOTE})
+
+
 def web_search_tool(model: str) -> dict:
     """Newest server-side web_search variant the model supports (spec §4).
 
@@ -362,13 +398,36 @@ class Assistant:
         """Clear conversation history."""
         self.conversation = []
 
-    def note_interruption(self) -> None:
-        """Mark the most recent assistant reply as cut off by the user.
+    def note_interruption(self, turn: dict | None = None) -> None:
+        """Mark an assistant reply as cut off by the user.
 
         Called when the user barged in (said the wake word) mid-reply. The
         marker lives in conversation history so the model's next completion
         knows its last reply wasn't fully heard and the user's new message is
-        likely a correction or redirect. No-op if there's no assistant turn.
+        likely a correction or redirect.
+
+        Two calling conventions:
+        - No `turn` (or `turn=None`, indistinguishable in Python): walk
+          self.conversation from the end and mark the most recent
+          assistant-role turn -- the original behavior. No-op if there's no
+          assistant turn.
+        - Explicit `turn` (a dict): mark that exact turn instead of searching.
+          Used by the server, which captures the target turn at interrupt
+          FRAME RECEIPT rather than at consume time (assistant.conversation is
+          shared/global -- an HA-rule action or another connected client can
+          append new assistant turns in the window before the barge-in audio
+          arrives, and marking whatever is then-newest would mark the wrong
+          reply). The passed turn may no longer be self.conversation's most
+          recent assistant turn, or may even have been compacted out of
+          self.conversation entirely by _compact_history -- marking it is
+          still safe, just a harmless no-op on the live history in that case,
+          since it's a plain dict the caller already holds a reference to.
+
+        Note: the case where the server captured NO assistant turn at
+        interrupt receipt (nothing to mark) is handled by the caller skipping
+        the call to this method entirely, not by passing turn=None -- since
+        turn=None here just triggers the walk above, same as calling with no
+        argument at all. See JarvisServer._process.
 
         Handles both content shapes an assistant turn can have:
         - fast/local path: `content` is a plain str -> append the note as text.
@@ -382,21 +441,8 @@ class Assistant:
         Idempotent: calling it twice on the same turn leaves the turn unchanged
         after the first call.
         """
-        for turn in reversed(self.conversation):
-            if turn["role"] != "assistant":
-                continue
-            content = turn["content"]
-            if isinstance(content, str):
-                # Already marked: no-op
-                if INTERRUPTION_NOTE in content:
-                    return
-                turn["content"] = content.rstrip() + " " + INTERRUPTION_NOTE
-            elif isinstance(content, list):
-                # Already marked: check if any text block contains the note
-                if any(
-                    isinstance(block, dict) and block.get("type") == "text" and block.get("text") == INTERRUPTION_NOTE
-                    for block in content
-                ):
-                    return
-                content.append({"type": "text", "text": INTERRUPTION_NOTE})
+        if turn is None:
+            turn = _find_last_assistant_turn(self.conversation)
+        if turn is None:
             return
+        _mark_turn_interrupted(turn)

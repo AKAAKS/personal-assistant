@@ -708,6 +708,76 @@ def test_note_interruption_is_idempotent_list_content():
     assert marker_count == 1
 
 
+# ---------------------------------------------------------------------------
+# note_interruption(turn=...): explicit-target variant used by the server's
+# capture-at-receipt barge-in fix (a stale flag consumed later must still mark
+# the turn that was actually playing when the interrupt happened, not
+# whatever is newest in self.conversation by consume time).
+# ---------------------------------------------------------------------------
+
+
+def test_note_interruption_marks_explicit_turn_not_the_newest_one():
+    """Captured turn is the FIRST assistant reply; a second, newer assistant
+    turn has since been appended (e.g. an HA-rule action, or another client's
+    exchange). Passing the captured turn explicitly must mark that one, not
+    self.conversation's current last assistant turn."""
+    first_reply = {"role": "assistant", "content": "reply that was actually interrupted"}
+    a = _bare_assistant([
+        first_reply,
+        {"role": "user", "content": "and then"},
+        {"role": "assistant", "content": "unrelated later reply"},
+    ])
+    a.note_interruption(first_reply)
+    assert first_reply["content"].endswith(INTERRUPTION_NOTE)
+    assert a.conversation[-1]["content"] == "unrelated later reply"  # untouched
+
+
+def test_note_interruption_none_is_indistinguishable_from_no_arg():
+    """Python can't tell note_interruption(None) apart from note_interruption()
+    -- both must do exactly the original walk-and-mark-most-recent thing. The
+    "a stored capture of None means don't mark anything" rule from the barge-in
+    fix is enforced by the SERVER (it simply skips calling note_interruption at
+    all when the turn it captured at interrupt receipt was None -- see
+    JarvisServer._process / test_server.py's stored-None test), not by this
+    method silently no-op'ing on an explicit None."""
+    a = _bare_assistant([
+        {"role": "assistant", "content": "some later reply"},
+    ])
+    a.note_interruption(None)
+    assert a.conversation[-1]["content"].endswith(INTERRUPTION_NOTE)
+
+
+def test_note_interruption_explicit_turn_list_content():
+    """Explicit-turn variant handles the Claude list-content shape identically
+    to the no-arg walk (shared marking logic)."""
+    turn = {"role": "assistant", "content": [{"type": "text", "text": "here you go"}]}
+    a = _bare_assistant([turn])
+    a.note_interruption(turn)
+    assert turn["content"][-1] == {"type": "text", "text": INTERRUPTION_NOTE}
+
+
+def test_note_interruption_explicit_turn_is_idempotent():
+    turn = {"role": "assistant", "content": "here you go"}
+    a = _bare_assistant([turn])
+    a.note_interruption(turn)
+    after_first = turn["content"]
+    a.note_interruption(turn)
+    assert turn["content"] == after_first
+    assert turn["content"].count(INTERRUPTION_NOTE) == 1
+
+
+def test_note_interruption_explicit_turn_survives_compaction():
+    """A turn captured at interrupt receipt may have since been compacted out
+    of self.conversation entirely (_compact_history trims MAX_HISTORY). Marking
+    it must not raise -- it's a harmless no-op on the live history, since the
+    caller holds its own reference to the dict."""
+    turn = {"role": "assistant", "content": "long since compacted away"}
+    a = _bare_assistant([{"role": "assistant", "content": "current live turn"}])
+    a.note_interruption(turn)  # turn is not even in a.conversation
+    assert turn["content"].endswith(INTERRUPTION_NOTE)
+    assert a.conversation[-1]["content"] == "current live turn"  # untouched
+
+
 def test_run_script_executes_after_a_real_turn_boundary():
     """The legitimate path still works: arm in one turn, confirm in the next.
     begin_turn() (called at the top of process()) is the turn boundary that makes
