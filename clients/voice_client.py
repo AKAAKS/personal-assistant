@@ -5,6 +5,7 @@ Run: python -m clients.voice_client
 
 import asyncio
 import io
+import json
 import logging
 import os
 import time
@@ -230,11 +231,12 @@ class VoiceClient:
                     on_proactive_audio=self._play,
                 )
                 recv_task = asyncio.create_task(receiver.run())
-                in_conversation = False  # True while a hands-free back-and-forth is active
-                misfires = 0  # consecutive non-productive follow-ups this conversation
+                in_conversation = False  # True during a hands-free back-and-forth
+                misfires = 0             # consecutive non-productive follow-ups
+                pending_barge_in = False  # user interrupted; record their new turn next
 
                 def advance(productive: bool):
-                    """Apply the state transition and announce a conversation end."""
+                    """Apply the follow-up state transition; announce an ending."""
                     nonlocal in_conversation, misfires
                     was = in_conversation
                     in_conversation, misfires = self._followup_next(
@@ -246,13 +248,18 @@ class VoiceClient:
 
                 try:
                     while True:
-                        if in_conversation:
+                        if pending_barge_in:
+                            # We just cut off a reply; the user is already talking.
+                            pending_barge_in = False
+                            pcm = await asyncio.to_thread(self._record_utterance)
+                            if pcm is None:
+                                advance(productive=False)
+                                continue
+                        elif in_conversation:
                             print("  Listening for follow-up... (or stay quiet to end)")
                             pcm = await asyncio.to_thread(self._capture_followup)
                             if pcm is None:
-                                # A fully silent window is a strong "done" signal
-                                # (a quiet room) — end the conversation at once.
-                                misfires = MAX_FOLLOWUP_MISFIRES
+                                misfires = MAX_FOLLOWUP_MISFIRES  # silent window ends it
                                 advance(productive=False)
                                 continue
                         else:
@@ -265,15 +272,12 @@ class VoiceClient:
                         if reply.get("type") == "error":
                             print(f"  [error] {reply.get('error')}\n")
                             self._failure_beep()
-                            misfires = MAX_FOLLOWUP_MISFIRES  # force end on error
+                            misfires = MAX_FOLLOWUP_MISFIRES
                             advance(productive=False)
                             continue
                         if not reply.get("heard") and not reply.get("text"):
                             print("  (didn't catch that)\n")
                             self._failure_beep()
-                            # In a conversation this is usually the room's ambient
-                            # noise tripping the VAD, not the user — accumulate
-                            # toward ending rather than looping forever.
                             advance(productive=False)
                             continue
                         if reply.get("heard"):
@@ -283,9 +287,13 @@ class VoiceClient:
                         if reply.get("audio_follows"):
                             wav = await item["wav_future"]
                             if wav is not None:
-                                await self._play(wav)
-                        # A completed exchange -> keep listening for a follow-up
-                        # without the wake word, and reset the misfire streak.
+                                interrupted = await self._play_and_watch_reply(wav)
+                                if interrupted:
+                                    print("  [interrupted]")
+                                    await ws.send(json.dumps({"type": "interrupt"}))
+                                    pending_barge_in = True
+                                    continue  # skip advance; go record the new turn
+                        # A completed exchange -> keep listening for a follow-up.
                         advance(productive=True)
                 finally:
                     recv_task.cancel()
