@@ -38,3 +38,21 @@ def test_plain_prose_unchanged():
 
 def test_empty_string_safe():
     assert strip_markdown("") == ""
+
+
+def test_asterisk_multiplication_preserved():
+    assert (
+        strip_markdown("3 * 4 * 5 equals 60")
+        == "3 * 4 * 5 equals 60"
+    )
+
+
+def test_dunder_and_snake_case_identifiers_preserved():
+    assert (
+        strip_markdown("The setup_wizard_v2 module is __init__ based")
+        == "The setup_wizard_v2 module is __init__ based"
+    )
+
+
+def test_empty_link_url_unwrapped():
+    assert strip_markdown("[text]()") == "text"

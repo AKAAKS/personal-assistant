@@ -36,12 +36,25 @@ def strip_markdown(text: str) -> str:
         lines.append(line)
     text = "\n".join(lines)
 
-    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)          # **bold**
-    text = re.sub(r"__(.+?)__", r"\1", text)              # __bold__
-    text = re.sub(r"\*(.+?)\*", r"\1", text)              # *italic*
-    text = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"\1", text)   # _italic_
+    def _strip_dunder_safe(match: "re.Match[str]") -> str:
+        # Genuine bold reads as a phrase ("__nice work__"); a bare identifier
+        # like "__init__" or "__main__" has no internal whitespace -- leave
+        # those alone instead of mangling the dunder.
+        inner = match.group(1)
+        if re.search(r"\s", inner):
+            return inner
+        return match.group(0)
+
+    # Emphasis markers only count as markup when the pair is genuinely
+    # markup: not glued to surrounding word characters (so snake_case and
+    # __init__ survive), and with no whitespace immediately inside the
+    # delimiters (so a lone " * " multiplication sign survives).
+    text = re.sub(r"(?<!\w)\*\*(?!\s)(.+?)(?<!\s)\*\*(?!\w)", r"\1", text)  # **bold**
+    text = re.sub(r"(?<!\w)__(?!\s)(.+?)(?<!\s)__(?!\w)", _strip_dunder_safe, text)  # __bold__
+    text = re.sub(r"(?<!\w)\*(?!\s)(.+?)(?<!\s)\*(?!\w)", r"\1", text)     # *italic*
+    text = re.sub(r"(?<!\w)_(?!_)(?!\s)(.+?)(?<!\s)(?<!_)_(?!\w)", r"\1", text)  # _italic_
     text = re.sub(r"`(.+?)`", r"\1", text)                # `code`
-    text = re.sub(r"\[(.+?)\]\((.+?)\)", r"\1", text)     # [text](url) -> text
+    text = re.sub(r"\[(.+?)\]\((.*?)\)", r"\1", text)     # [text](url) -> text
     text = _EMOJI_RE.sub("", text)
 
     text = re.sub(r"\n{2,}", "\n", text)
