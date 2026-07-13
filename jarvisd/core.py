@@ -55,6 +55,8 @@ How you work:
 - "Give me my briefing" = weather plus top headlines (web search), today's reminders (list_reminders), and today's meals (meal_summary), delivered as a short spoken rundown.
 """
 
+INTERRUPTION_NOTE = "(The user interrupted and cut off this reply before I finished.)"
+
 
 def web_search_tool(model: str) -> dict:
     """Newest server-side web_search variant the model supports (spec §4).
@@ -359,3 +361,30 @@ class Assistant:
     def reset_conversation(self):
         """Clear conversation history."""
         self.conversation = []
+
+    def note_interruption(self) -> None:
+        """Mark the most recent assistant reply as cut off by the user.
+
+        Called when the user barged in (said the wake word) mid-reply. The
+        marker lives in conversation history so the model's next completion
+        knows its last reply wasn't fully heard and the user's new message is
+        likely a correction or redirect. No-op if there's no assistant turn.
+
+        Handles both content shapes an assistant turn can have:
+        - fast/local path: `content` is a plain str -> append the note as text.
+        - Claude path: `content` is a list of SDK content blocks -> APPEND a new
+          text block rather than mutating an existing block in place (SDK
+          blocks are pydantic models; mutating one in place is not the same as
+          replacing it, and this also means a turn with only tool_use blocks
+          and no text block is handled safely -- the note is just added as its
+          own block, nothing existing needs to be found or touched).
+        """
+        for turn in reversed(self.conversation):
+            if turn["role"] != "assistant":
+                continue
+            content = turn["content"]
+            if isinstance(content, str):
+                turn["content"] = content.rstrip() + " " + INTERRUPTION_NOTE
+            elif isinstance(content, list):
+                content.append({"type": "text", "text": INTERRUPTION_NOTE})
+            return

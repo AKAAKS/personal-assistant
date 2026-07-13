@@ -570,6 +570,102 @@ def test_model_cannot_self_confirm_run_script_within_one_turn():
     assert executed == []
 
 
+
+
+# ---------------------------------------------------------------------------
+# Task 4: barge-in interruption marker
+# ---------------------------------------------------------------------------
+
+
+from jarvisd.core import Assistant, INTERRUPTION_NOTE
+
+
+def _bare_assistant(conversation):
+    a = Assistant.__new__(Assistant)  # skip __init__ (no API key / clients needed)
+    a.conversation = conversation
+    return a
+
+
+def test_note_interruption_marks_string_assistant_turn():
+    """Fast/local path assistant turns store content as a plain str (core.py ~line 251)."""
+    a = _bare_assistant([
+        {"role": "user", "content": "play music"},
+        {"role": "assistant", "content": "I can play lots of things"},
+    ])
+    a.note_interruption()
+    assert a.conversation[-1]["content"].endswith(INTERRUPTION_NOTE)
+
+
+def test_note_interruption_marks_list_assistant_turn():
+    """Claude path assistant turns store content as a list of SDK content blocks
+    (core.py ~line 321-322, `assistant_content = response.content`)."""
+    a = _bare_assistant([
+        {"role": "assistant", "content": [{"type": "text", "text": "here you go"}]},
+    ])
+    a.note_interruption()
+    last = a.conversation[-1]["content"]
+    assert last[-1] == {"type": "text", "text": INTERRUPTION_NOTE}
+
+
+def test_note_interruption_does_not_mutate_existing_list_blocks():
+    """The marker must be APPENDED as a new block, never mutated onto an existing
+    block object -- real anthropic SDK content blocks (TextBlock/ToolUseBlock) are
+    pydantic models, not plain dicts, and mutating one in place is not the same
+    as replacing it. Use the same SimpleNamespace(type=..., text=...) stand-in
+    `text_block()` this test module already uses elsewhere (e.g.
+    test_claude_loop_still_enforces_guard_via_execute_guarded) to mirror the
+    attribute-access (`.type`/`.text`) shape real SDK blocks expose, rather than
+    a dict -- so this test would catch an implementation that tries to reach
+    into the block and set `.text` instead of appending."""
+    block = text_block("here you go")
+    a = _bare_assistant([
+        {"role": "assistant", "content": [block]},
+    ])
+    a.note_interruption()
+    content = a.conversation[-1]["content"]
+    assert content[0] is block  # original block object untouched, not mutated in place
+    assert block.text == "here you go"
+    assert content[-1] == {"type": "text", "text": INTERRUPTION_NOTE}
+
+
+def test_note_interruption_safe_with_only_tool_use_blocks():
+    """The last assistant turn may hold only tool_use blocks and no text block
+    (e.g. mid tool-call). note_interruption() must not corrupt it -- it appends
+    a new text marker block rather than trying to locate/mutate a text block
+    that doesn't exist."""
+    tool_use_block = SimpleNamespace(type="tool_use", id="tu_1", name="list_devices", input={})
+    a = _bare_assistant([
+        {"role": "assistant", "content": [tool_use_block]},
+    ])
+    a.note_interruption()
+    content = a.conversation[-1]["content"]
+    assert content[0] is tool_use_block  # untouched
+    assert content[-1] == {"type": "text", "text": INTERRUPTION_NOTE}
+
+
+def test_note_interruption_targets_most_recent_assistant_turn():
+    a = _bare_assistant([
+        {"role": "assistant", "content": "first reply"},
+        {"role": "user", "content": "and then"},
+        {"role": "assistant", "content": "second reply"},
+    ])
+    a.note_interruption()
+    assert a.conversation[0]["content"] == "first reply"          # untouched
+    assert a.conversation[-1]["content"].endswith(INTERRUPTION_NOTE)
+
+
+def test_note_interruption_noop_without_assistant_turn():
+    a = _bare_assistant([{"role": "user", "content": "hello"}])
+    a.note_interruption()  # must not raise
+    assert a.conversation == [{"role": "user", "content": "hello"}]
+
+
+def test_note_interruption_noop_on_empty_conversation():
+    a = _bare_assistant([])
+    a.note_interruption()  # must not raise
+    assert a.conversation == []
+
+
 def test_run_script_executes_after_a_real_turn_boundary():
     """The legitimate path still works: arm in one turn, confirm in the next.
     begin_turn() (called at the top of process()) is the turn boundary that makes
