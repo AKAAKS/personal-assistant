@@ -97,6 +97,67 @@ def test_audio_round_trip_with_speech():
     assert isinstance(wav, (bytes, bytearray)) and wav.startswith(b"RIFF-fake-wav:")
 
 
+def test_reply_markdown_is_stripped_before_send():
+    class MarkdownAssistant(FakeAssistant):
+        def process(self, text):
+            return "**Sure** — here you go:\n- one\n- two 🎵"
+
+    async def scenario(ws):
+        await ws.send(json.dumps({"type": "text_in", "text": "hi"}))
+        return json.loads(await ws.recv())
+
+    reply = run_client(JarvisServer(MarkdownAssistant()), scenario)
+    assert "**" not in reply["text"]
+    assert "- one" not in reply["text"]
+    assert "🎵" not in reply["text"]
+    assert "Sure" in reply["text"] and "one" in reply["text"] and "two" in reply["text"]
+
+
+def test_reply_markdown_is_stripped_before_synthesis():
+    """The TTS must synthesize the cleaned prose, not the raw markdown."""
+    class MarkdownAssistant(FakeAssistant):
+        def process(self, text):
+            return "**Sure** — here you go:\n- one\n- two 🎵"
+
+    async def scenario(ws):
+        await ws.send(json.dumps({"type": "text_in", "text": "hi", "speak": True}))
+        reply = json.loads(await ws.recv())
+        wav = await ws.recv()
+        return reply, wav
+
+    server = JarvisServer(MarkdownAssistant(), tts=FakeTTS())
+    reply, wav = run_client(server, scenario)
+    assert b"**" not in wav
+    assert b"- one" not in wav
+    assert "🎵".encode() not in wav
+    assert wav == b"RIFF-fake-wav:" + reply["text"].encode()
+
+
+def test_conversation_history_keeps_raw_markdown_untouched():
+    """strip_markdown must clean the outgoing copy only -- never the model's
+    own conversation history (what it reasons over on the next turn)."""
+    raw = "**Sure** — here you go:\n- one\n- two 🎵"
+
+    class MarkdownAssistant(FakeAssistant):
+        def __init__(self):
+            super().__init__()
+            self.conversation = []
+
+        def process(self, text):
+            self.conversation.append({"role": "user", "content": text})
+            self.conversation.append({"role": "assistant", "content": raw})
+            return raw
+
+    async def scenario(ws):
+        await ws.send(json.dumps({"type": "text_in", "text": "hi"}))
+        return json.loads(await ws.recv())
+
+    assistant = MarkdownAssistant()
+    reply = run_client(JarvisServer(assistant), scenario)
+    assert "**" not in reply["text"]
+    assert assistant.conversation[-1] == {"role": "assistant", "content": raw}
+
+
 def test_silent_audio_returns_empty_reply():
     class SilentSTT:
         def transcribe(self, audio):

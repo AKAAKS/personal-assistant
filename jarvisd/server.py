@@ -23,6 +23,8 @@ from datetime import datetime, timedelta
 
 import websockets
 
+from jarvisd.text_format import strip_markdown
+
 log = logging.getLogger(__name__)
 
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024  # 15s of 16kHz int16 is ~0.5MB; generous cap
@@ -155,7 +157,8 @@ class JarvisServer:
             return reply
         notices = await asyncio.to_thread(self.notifier.drain)
         if notices:
-            reply = reply + "\n\nWhile you were away:\n" + "\n".join("- " + n for n in notices)
+            joined = "; ".join(notices)
+            reply = reply + f"\n\nAlso, while you were away: {joined}."
         return reply
 
     async def _handle_json(self, ws, raw: str):
@@ -203,6 +206,7 @@ class JarvisServer:
         await self._send_reply(ws, reply, heard=heard, speak=True)
 
     async def _send_reply(self, ws, reply: str, heard, speak: bool):
+        reply = strip_markdown(reply)  # clean prose for both display and TTS
         wav = None
         if speak and self.tts is not None and reply:
             wav = await asyncio.to_thread(self.tts.synthesize, reply)

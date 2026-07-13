@@ -270,7 +270,7 @@ def test_text_in_appends_drained_notices_to_reply():
         return json.loads(await ws.recv())
 
     reply = run_client(JarvisServer(FakeAssistant(), notifier=notifier), scenario)
-    assert reply["text"] == "echo: hi\n\nWhile you were away:\n- milk\n- trash day"
+    assert reply["text"] == "echo: hi\nAlso, while you were away: milk; trash day."
     assert notifier.drain_calls == 1
 
 
@@ -289,7 +289,7 @@ def test_audio_in_appends_drained_notices_to_reply():
 
     server = JarvisServer(FakeAssistant(), stt=FakeSTT(), notifier=notifier)
     reply = run_client(server, scenario)
-    assert reply["text"] == "echo: turn on the light\n\nWhile you were away:\n- someone rang the doorbell"
+    assert reply["text"] == "echo: turn on the light\nAlso, while you were away: someone rang the doorbell."
     assert notifier.drain_calls == 1
 
 

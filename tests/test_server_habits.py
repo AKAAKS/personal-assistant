@@ -214,8 +214,6 @@ def test_habit_trailer_coexists_with_drained_notices():
 
     server = JarvisServer(FakeAssistant(), notifier=notifier, proposal_store=proposal_store)
     reply = run_client(server, scenario)
-    assert "While you were away:" in reply["text"]
-    assert "- milk" in reply["text"]
-    assert "- trash day" in reply["text"]
+    assert "Also, while you were away: milk; trash day." in reply["text"]
     assert "1 habit suggestion" in reply["text"]
     assert "show suggestions" in reply["text"]
