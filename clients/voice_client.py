@@ -25,6 +25,12 @@ WAKE_WORD_CHUNK = 1280  # openwakeword expects 80ms chunks at 16kHz
 # If no speech starts within the window, we drop back to wake-word gating.
 FOLLOWUP_WINDOW_SEC = float(os.getenv("FOLLOWUP_WINDOW_SEC", "6"))
 
+# End the hands-free conversation after this many consecutive non-productive
+# follow-ups (a silent window OR audio that transcribed to nothing). Without a
+# cap, a noisy room keeps tripping the VAD -> empty transcription -> retry,
+# looping forever; this bounds it so we re-arm the wake word.
+MAX_FOLLOWUP_MISFIRES = int(os.getenv("MAX_FOLLOWUP_MISFIRES", "2"))
+
 
 class VoiceClient:
 
@@ -110,6 +116,26 @@ class VoiceClient:
         except Exception:
             pass
 
+    @staticmethod
+    def _followup_next(*, in_conversation: bool, misfires: int, productive: bool):
+        """Advance the hands-free conversation state after one exchange.
+
+        `productive` is True when the server returned a real reply, False when
+        the follow-up transcribed to nothing (a "misfire"). Returns the next
+        `(in_conversation, misfires)`. A productive exchange keeps us in the
+        conversation and clears the misfire streak; while in a conversation,
+        consecutive misfires accumulate until MAX_FOLLOWUP_MISFIRES, at which
+        point we leave conversation mode and re-arm the wake word. This is the
+        guard against a noisy room looping forever on empty transcriptions.
+        """
+        if productive:
+            return True, 0
+        if in_conversation:
+            misfires += 1
+            if misfires >= MAX_FOLLOWUP_MISFIRES:
+                return False, 0
+        return in_conversation, misfires
+
     async def _play(self, wav: bytes):
         """Play a WAV under the shared lock so a proactive and a reply WAV
         can never sound simultaneously (winsound.PlaySound is blocking)."""
@@ -135,14 +161,29 @@ class VoiceClient:
                 )
                 recv_task = asyncio.create_task(receiver.run())
                 in_conversation = False  # True while a hands-free back-and-forth is active
+                misfires = 0  # consecutive non-productive follow-ups this conversation
+
+                def advance(productive: bool):
+                    """Apply the state transition and announce a conversation end."""
+                    nonlocal in_conversation, misfires
+                    was = in_conversation
+                    in_conversation, misfires = self._followup_next(
+                        in_conversation=in_conversation, misfires=misfires,
+                        productive=productive,
+                    )
+                    if was and not in_conversation:
+                        print("  (conversation ended — say 'hey jarvis' to start again)\n")
+
                 try:
                     while True:
                         if in_conversation:
                             print("  Listening for follow-up... (or stay quiet to end)")
                             pcm = await asyncio.to_thread(self._capture_followup)
                             if pcm is None:
-                                print("  (conversation ended — say 'hey jarvis' to start again)\n")
-                                in_conversation = False
+                                # A fully silent window is a strong "done" signal
+                                # (a quiet room) — end the conversation at once.
+                                misfires = MAX_FOLLOWUP_MISFIRES
+                                advance(productive=False)
                                 continue
                         else:
                             pcm = await asyncio.to_thread(self._capture_utterance)
@@ -154,13 +195,16 @@ class VoiceClient:
                         if reply.get("type") == "error":
                             print(f"  [error] {reply.get('error')}\n")
                             self._failure_beep()
-                            in_conversation = False  # drop out of the conversation on error
+                            misfires = MAX_FOLLOWUP_MISFIRES  # force end on error
+                            advance(productive=False)
                             continue
                         if not reply.get("heard") and not reply.get("text"):
                             print("  (didn't catch that)\n")
                             self._failure_beep()
-                            # Stay in conversation if we were already in one (give
-                            # another hands-free try); otherwise remain wake-word gated.
+                            # In a conversation this is usually the room's ambient
+                            # noise tripping the VAD, not the user — accumulate
+                            # toward ending rather than looping forever.
+                            advance(productive=False)
                             continue
                         if reply.get("heard"):
                             print(f"  You: {reply['heard']}")
@@ -171,8 +215,8 @@ class VoiceClient:
                             if wav is not None:
                                 await self._play(wav)
                         # A completed exchange -> keep listening for a follow-up
-                        # without the wake word.
-                        in_conversation = True
+                        # without the wake word, and reset the misfire streak.
+                        advance(productive=True)
                 finally:
                     recv_task.cancel()
                     try:

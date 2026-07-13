@@ -60,3 +60,42 @@ def test_followup_uses_the_configured_window():
     c = _client(None)
     c._capture_followup()
     assert c.vad.calls[0]["speech_timeout_sec"] == voice_client.FOLLOWUP_WINDOW_SEC
+
+
+# --- conversation state machine (_followup_next) ------------------------------
+# Regression guard: a noisy room trips the VAD every couple seconds, producing
+# audio that transcribes to nothing. Without a misfire cap the client looped
+# forever re-recording that noise. These pin the "eventually re-arm" behavior.
+
+def test_productive_reply_keeps_conversation_and_clears_misfires():
+    nxt = VoiceClient._followup_next(in_conversation=True, misfires=1, productive=True)
+    assert nxt == (True, 0)
+
+
+def test_productive_reply_starts_a_conversation():
+    nxt = VoiceClient._followup_next(in_conversation=False, misfires=0, productive=True)
+    assert nxt == (True, 0)
+
+
+def test_misfires_accumulate_then_end_the_conversation():
+    from clients import voice_client
+
+    # Simulate the runaway: keep feeding empty transcriptions while in a
+    # conversation and assert it terminates within MAX_FOLLOWUP_MISFIRES.
+    in_conv, misfires = True, 0
+    seen = 0
+    while in_conv:
+        in_conv, misfires = VoiceClient._followup_next(
+            in_conversation=in_conv, misfires=misfires, productive=False
+        )
+        seen += 1
+        assert seen <= voice_client.MAX_FOLLOWUP_MISFIRES  # must not loop forever
+    assert seen == voice_client.MAX_FOLLOWUP_MISFIRES
+    assert (in_conv, misfires) == (False, 0)
+
+
+def test_misfire_outside_conversation_is_a_noop():
+    # Not in a conversation (wake-word gated): an empty result must not flip us
+    # into a conversation or start counting.
+    nxt = VoiceClient._followup_next(in_conversation=False, misfires=0, productive=False)
+    assert nxt == (False, 0)
