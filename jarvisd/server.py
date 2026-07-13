@@ -3,6 +3,12 @@
 Protocol:
   client -> brain  JSON  {"type": "text_in", "text": str, "speak": bool?}
                    JSON  {"type": "reset"}
+                   JSON  {"type": "interrupt"}
+                          (barge-in: client cut off a spoken reply via the wake
+                          word; carries no data. No reply frame is sent -- the
+                          next binary utterance on this connection that yields
+                          non-empty text has the model's last reply marked as
+                          cut off before it is processed.)
                    binary one utterance of 16 kHz mono int16 PCM
   brain -> client  JSON  {"type": "reply", "text": str, "heard": str|null,
                           "audio_follows": bool}
@@ -86,6 +92,9 @@ class JarvisServer:
         # ws -> asyncio.Lock serializing writes to that connection: a JSON+WAV frame
         # pair must never be split by a concurrent proactive push (or vice versa).
         self._clients: dict = {}
+        # Per-connection flag: set by a {"type":"interrupt"} frame, consumed by
+        # the next transcribed audio turn to mark the model's last reply cut off.
+        self._pending_interrupt: set = set()
         self._loop = None  # captured in serve_forever(); lets worker threads push safely
         self._reminder_task = None
         self._ws_server = None  # set while serve_forever() is running (tests read the bound port)
@@ -142,9 +151,12 @@ class JarvisServer:
                     await self._safe_send(ws, json.dumps({"type": "error", "error": str(e)}))
         finally:
             self._clients.pop(ws, None)
+            self._pending_interrupt.discard(ws)
 
-    async def _process(self, text: str) -> str:
+    async def _process(self, text: str, note_interruption: bool = False) -> str:
         async with self._lock:
+            if note_interruption:
+                self.assistant.note_interruption()
             return await asyncio.to_thread(self.assistant.process, text)
 
     async def _append_drained_notices(self, reply: str) -> str:
@@ -178,6 +190,11 @@ class JarvisServer:
             await self._safe_send(ws, json.dumps(
                 {"type": "reply", "text": "Conversation cleared.", "heard": None, "audio_follows": False}
             ))
+        elif mtype == "interrupt":
+            # Client cut off a spoken reply via the wake word. Flag the connection;
+            # the next transcribed turn will mark the model's last reply. No reply
+            # frame -- the client isn't awaiting one (it's already recording).
+            self._pending_interrupt.add(ws)
         else:
             await self._safe_send(
                 ws, json.dumps({"type": "error", "error": f"unknown message type: {mtype!r}"})
@@ -189,6 +206,8 @@ class JarvisServer:
                 ws, json.dumps({"type": "error", "error": "speech not enabled on this server"})
             )
             return
+        interrupted = ws in self._pending_interrupt
+        self._pending_interrupt.discard(ws)  # consume regardless of outcome
         import numpy as np
         audio = np.frombuffer(pcm, dtype=np.int16)
         log.info("Audio in: %.1fs (%d bytes)", len(audio) / 16000, len(pcm))
@@ -200,7 +219,7 @@ class JarvisServer:
             )
             return
         log.info("Heard: %s", heard)
-        reply = await self._process(heard)
+        reply = await self._process(heard, note_interruption=interrupted)
         reply = await self._append_drained_notices(reply)
         reply = await self._append_habit_trailer(reply)
         await self._send_reply(ws, reply, heard=heard, speak=True)

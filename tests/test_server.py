@@ -169,3 +169,83 @@ def test_silent_audio_returns_empty_reply():
 
     reply = run_client(JarvisServer(FakeAssistant(), stt=SilentSTT(), tts=FakeTTS()), scenario)
     assert reply["heard"] == "" and reply["audio_follows"] is False
+
+
+class NoteAssistant(FakeAssistant):
+    """Tracks note_interruption() calls, and -- critically -- whether each one
+    happened strictly before the next process() call, to prove ordering."""
+
+    def __init__(self):
+        super().__init__()
+        self.notes = 0
+        self.call_order = []
+
+    def note_interruption(self):
+        self.notes += 1
+        self.call_order.append("note_interruption")
+
+    def process(self, text):
+        self.call_order.append("process")
+        return super().process(text)
+
+
+def test_interrupt_frame_marks_next_transcribed_turn():
+    fake = NoteAssistant()
+
+    async def scenario(ws):
+        await ws.send(json.dumps({"type": "interrupt"}))
+        await ws.send(np.zeros(16000, dtype=np.int16).tobytes())
+        reply = json.loads(await ws.recv())
+        if reply.get("audio_follows"):
+            await ws.recv()  # drain the WAV frame
+        return reply
+
+    reply = run_client(JarvisServer(fake, stt=FakeSTT(), tts=FakeTTS()), scenario)
+    assert fake.notes == 1
+    assert reply["heard"] == "turn on the light"
+    # Ordering matters: the model must see the cut-off marker before it reasons
+    # about the new utterance, not after.
+    assert fake.call_order == ["note_interruption", "process"]
+
+
+def test_interrupt_then_silence_marks_nothing():
+    class SilentSTT:
+        def transcribe(self, audio):
+            return ""
+
+    fake = NoteAssistant()
+
+    async def scenario(ws):
+        await ws.send(json.dumps({"type": "interrupt"}))
+        await ws.send(np.zeros(1600, dtype=np.int16).tobytes())
+        return json.loads(await ws.recv())
+
+    run_client(JarvisServer(fake, stt=SilentSTT(), tts=FakeTTS()), scenario)
+    assert fake.notes == 0
+    assert fake.call_order == []  # process() never even ran for an empty transcript
+
+
+def test_interrupt_without_following_audio_does_not_leak_across_connections():
+    """An interrupt frame with no subsequent audio on that connection (e.g. the
+    client disconnects, or a second connection comes in) must not mark some
+    unrelated later turn -- the flag is per-connection, not global."""
+    fake = NoteAssistant()
+    server = JarvisServer(fake, stt=FakeSTT(), tts=FakeTTS())
+
+    async def interrupt_then_disconnect(ws):
+        await ws.send(json.dumps({"type": "interrupt"}))
+        # Disconnect without ever sending audio on this connection.
+
+    async def plain_audio_turn(ws):
+        await ws.send(np.zeros(16000, dtype=np.int16).tobytes())
+        reply = json.loads(await ws.recv())
+        if reply.get("audio_follows"):
+            await ws.recv()
+        return reply
+
+    run_client(server, interrupt_then_disconnect)
+    reply = run_client(server, plain_audio_turn)
+
+    assert fake.notes == 0
+    assert reply["heard"] == "turn on the light"
+    assert not server._pending_interrupt  # nothing left dangling after either connection
