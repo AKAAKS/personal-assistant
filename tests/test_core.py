@@ -105,5 +105,5 @@ def test_system_prompt_carries_spoken_persona_rules():
     assert "no markdown" in p
     assert "no bullet" in p or "no lists" in p
     assert "read aloud" in p
-    # never the butler honorific
-    assert '"sir"' in SYSTEM_PROMPT or "never use \"sir\"" in SYSTEM_PROMPT
+    # never the butler honorific — check the actual prohibition, not just that "sir" appears
+    assert 'never use "sir"' in SYSTEM_PROMPT
