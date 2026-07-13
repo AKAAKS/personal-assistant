@@ -1,3 +1,5 @@
+import re
+
 from jarvisd.text_format import strip_markdown
 
 
@@ -41,10 +43,14 @@ def test_empty_string_safe():
 
 
 def test_asterisk_multiplication_preserved():
-    assert (
-        strip_markdown("3 * 4 * 5 equals 60")
-        == "3 * 4 * 5 equals 60"
-    )
+    # Contract change (wave 5, final): the multiplication carve-out is
+    # DROPPED. It was invented during review, not required by the original
+    # spec, and preserving it cost five regression cycles chasing every new
+    # shape of glued/nested/unbalanced markup. This is a home voice
+    # assistant -- it will never speak "3 * 4"; the system prompt already
+    # tells the model to write plain spoken prose. Every "*" is now deleted
+    # unconditionally, so this is an ACCEPTED outcome, not a regression.
+    assert strip_markdown("3 * 4 * 5 equals 60") == "3 4 5 equals 60"
 
 
 def test_dunder_and_snake_case_identifiers_preserved():
@@ -132,3 +138,49 @@ def test_glued_asterisk_and_underscore_markup_leaves_no_stray():
     )
     assert "*" not in out
     assert "_" not in out
+
+
+def _underscores_are_all_snake_case(out: str) -> bool:
+    """True iff every "_" in `out` is flanked by a word char on both sides."""
+    for i, ch in enumerate(out):
+        if ch != "_":
+            continue
+        left = out[i - 1] if i > 0 else ""
+        right = out[i + 1] if i + 1 < len(out) else ""
+        if not (re.match(r"\w", left) and re.match(r"\w", right)):
+            return False
+    return True
+
+
+def test_no_stray_markup_characters_survive():
+    # Wave 5 (final): the contract is now total by construction -- an
+    # unconditional final sweep deletes every remaining "*" and every
+    # remaining "_" except one flanked by word characters on both sides
+    # (snake_case). No sequential boundary-sensitive regex chain can be
+    # trusted to catch every new adversarial shape (five waves proved that);
+    # this sweep can't miss a case because it isn't conditional on any case.
+    adversarial_inputs = [
+        "_**bold**_",
+        "_*x*_",
+        "_***word***_",
+        "**bold**_italic_",
+        "_italic_**bold**",
+        "*_word_*",
+        "text ** more",
+        "*** waiting ***",
+        "(*) note",
+        "end.* next",
+        "_ a _",
+        "__a___b__",
+        "****",
+        "**",
+    ]
+    for s in adversarial_inputs:
+        out = strip_markdown(s)
+        assert "*" not in out, f"stray '*' survived for input {s!r}: {out!r}"
+        assert _underscores_are_all_snake_case(out), (
+            f"stray '_' survived for input {s!r}: {out!r}"
+        )
+
+    # The one sanctioned carve-out must still survive intact.
+    assert strip_markdown("snake_case_name") == "snake_case_name"
