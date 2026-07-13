@@ -56,7 +56,7 @@ class VoiceClient:
         self._play_lock = asyncio.Lock()
 
     def _capture_utterance(self) -> bytes | None:
-        """Block until wake word, then record until silence. PCM bytes or None."""
+        """Block until the wake word, then record one utterance. PCM or None."""
         while True:
             frame = self.mic.read_frame(timeout=1.0)
             if frame is None:
@@ -68,26 +68,32 @@ class VoiceClient:
             self._wake_buf = self._wake_buf[WAKE_WORD_CHUNK:]
             if not self.wake_word.process_frame(chunk):
                 continue
-
             log.info("Wake word detected")
-            self.mic.clear()  # drop the wake phrase, keep anything said from here on
-            self._wake_buf = np.array([], dtype=np.int16)
-            try:
-                winsound.Beep(800, 200)
-            except Exception:
-                pass
-            print("  Listening...")
+            return self._record_utterance()
 
-            audio = self.vad.record_until_silence(
-                self.mic, max_seconds=15.0, silence_ms=800, speech_timeout_sec=5.0,
-            )
-            if audio is None or len(audio) < 1600:
-                log.info("No speech after wake word")
-                print("  (no speech detected)\n")
-                self._failure_beep()
-                return None
-            log.info("Captured %.1fs of audio", len(audio) / 16000)
-            return audio.tobytes()
+    def _record_utterance(self) -> bytes | None:
+        """Record one utterance NOW (no wake word): beep, capture until silence.
+
+        Returns PCM bytes, or None if nothing was said. Used both right after a
+        wake-word detection and right after a barge-in interrupt.
+        """
+        self.mic.clear()  # drop the wake phrase / anything said while JARVIS talked
+        self._wake_buf = np.array([], dtype=np.int16)
+        try:
+            winsound.Beep(800, 200)
+        except Exception:
+            pass
+        print("  Listening...")
+        audio = self.vad.record_until_silence(
+            self.mic, max_seconds=15.0, silence_ms=800, speech_timeout_sec=5.0,
+        )
+        if audio is None or len(audio) < 1600:
+            log.info("No speech captured")
+            print("  (no speech detected)\n")
+            self._failure_beep()
+            return None
+        log.info("Captured %.1fs of audio", len(audio) / 16000)
+        return audio.tobytes()
 
     def _capture_followup(self) -> bytes | None:
         """Record a follow-up utterance WITHOUT the wake word.

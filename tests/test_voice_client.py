@@ -39,6 +39,48 @@ def _client(vad_result):
     return c
 
 
+# --- _record_utterance() (the record-after-wake half, shared with barge-in) ---
+
+
+def test_record_utterance_returns_pcm_on_speech():
+    audio = np.ones(16000, dtype=np.int16)
+    c = _client(audio)
+    c._wake_buf = np.array([], dtype=np.int16)
+    out = c._record_utterance()
+    assert out == audio.tobytes()
+    assert c.mic.clears == 1
+
+
+def test_record_utterance_returns_none_on_silence():
+    c = _client(None)
+    c._wake_buf = np.array([], dtype=np.int16)
+    assert c._record_utterance() is None
+
+
+def test_record_utterance_returns_none_on_tooshort_blip():
+    c = _client(np.ones(100, dtype=np.int16))  # < 1600 samples -> ignored
+    c._wake_buf = np.array([], dtype=np.int16)
+    assert c._record_utterance() is None
+
+
+def test_record_utterance_resets_wake_buf():
+    c = _client(np.ones(16000, dtype=np.int16))
+    c._wake_buf = np.array([1, 2, 3], dtype=np.int16)
+    c._record_utterance()
+    assert len(c._wake_buf) == 0
+
+
+def test_record_utterance_uses_the_same_vad_params_as_capture_utterance():
+    c = _client(np.ones(16000, dtype=np.int16))
+    c._wake_buf = np.array([], dtype=np.int16)
+    c._record_utterance()
+    assert c.vad.calls[0] == {
+        "max_seconds": 15.0,
+        "silence_ms": 800,
+        "speech_timeout_sec": 5.0,
+    }
+
+
 def test_followup_returns_pcm_bytes_when_speech_captured():
     audio = np.ones(16000, dtype=np.int16)  # 1s of "speech"
     c = _client(audio)
