@@ -6,6 +6,33 @@ Haiku/Sonnet/local routing, a $20/month budget guard, and a security layer.
 
 Design docs: `docs/superpowers/specs/`.
 
+## Highlights
+
+- **Agentic tool-use loop** — Claude drives real devices and the OS through a
+  registry of guarded tools (Home Assistant, Spotify, Android TV, file system,
+  web search), not a fixed command set.
+- **Tiered routing with a hard budget** — a regex intent classifier sends each
+  turn to a local model, Haiku, or Sonnet; a cache-aware cost tracker enforces a
+  `$20/month` cap and force-downgrades near the limit.
+- **Security guard as a single choke point** — every tool call passes through
+  permission tiers (read-only / write / destructive / forbidden), a path
+  allowlist + secret-file block, blocked-URL/ID patterns, and an audit log.
+  Destructive actions require a **turn-bounded** human confirmation, so the model
+  can't self-confirm its own destructive call inside one reasoning loop (closed a
+  live prompt-injection hole).
+- **Proactive, not just reactive** — reminders that survive restarts (with a
+  spoken → phone-push → "while you were away" fallback chain) and Home Assistant
+  event-triggered automations, direct ($0) or AI-reasoned.
+- **Memory** — SQLite FTS episodic recall + a curated profile injected into the
+  prompt; conversation history restored across daemon restarts.
+- **Nightly habit mining** — pure-Python pattern mining over the audit log turns
+  recurring actions into one-line proposed facts (~1 Haiku call per new
+  candidate, $0 otherwise); nothing is written without your approval.
+- **Offline-first voice** — "hey jarvis" wake word, Whisper STT, and TTS that
+  prefers offline SAPI5 but can use free neural voices, with automatic fallback.
+- **Built test-first** — **517 passing tests**, a thin-client/daemon split
+  designed for a future Raspberry Pi satellite, and loopback-only networking.
+
 ## Setup
 
     pip install -r requirements.txt
