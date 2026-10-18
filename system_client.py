@@ -41,6 +41,25 @@ class SystemClient:
             return f"{name} is not running."
         return f"Could not close {name}: {result.stderr.strip()}"
 
+    # Process image names for apps we can detect as already-running.
+    _RUNNING_NAMES = {
+        "firefox": "firefox.exe", "chrome": "chrome.exe", "edge": "msedge.exe",
+        "notepad": "notepad.exe", "spotify": "Spotify.exe", "discord": "Discord.exe",
+        "steam": "steam.exe", "vscode": "Code.exe", "vs code": "Code.exe", "code": "Code.exe",
+        "terminal": "WindowsTerminal.exe", "task manager": "Taskmgr.exe", "taskmgr": "Taskmgr.exe",
+    }
+
+    def _is_running(self, proc_name: str) -> bool:
+        """True if a process with this image name is currently running."""
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"IMAGENAME eq {proc_name}", "/NH", "/FO", "CSV"],
+                capture_output=True, text=True, timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return proc_name.lower() in result.stdout.lower()
+
     def launch_app(self, target: str) -> str:
         app_map = {
             "firefox": "firefox",
@@ -64,6 +83,12 @@ class SystemClient:
             "snipping tool": "SnippingTool",
         }
         target_lower = target.lower().strip()
+        # Source of truth beats memory: if the app is already running, say so
+        # instead of relaunching, so "open X" / "is X open?" reflect reality
+        # rather than the model's recollection of a past launch.
+        proc_name = self._RUNNING_NAMES.get(target_lower)
+        if proc_name and self._is_running(proc_name):
+            return f"{target} is already running."
         cmd = app_map.get(target_lower, target)
 
         # os.startfile -> ShellExecute, which resolves protocols, paths, PATH,

@@ -136,34 +136,27 @@ def handlers(spotify):
     def spotify_play(tool_input):
         uri = tool_input.get("uri")
         device_name = tool_input.get("device_name")
-        device_id = None
         if device_name:
             device_id = _find_device(spotify, device_name)
             if not device_id:
                 return (f"Could not find Spotify device '{device_name}'. "
                         "Use spotify_devices to list available devices.")
+            resolved_name = device_name
+        else:
+            # No device specified: resolve the best available target up front.
+            # A bare /me/player/play with no *active* device returns 204 but
+            # silently no-ops, so targeting a concrete device_id is what actually
+            # starts audio (and lets us report honestly instead of a false
+            # "Now playing"). If there's no device at all, say so.
+            device_id, resolved_name = _pick_device(spotify)
+            if device_id is None:
+                return _NO_DEVICE_MSG
         try:
             spotify.play(uri=uri, device_id=device_id)
         except Exception as e:
-            # The common failure is "no active device" — Spotify returns 404 on
-            # /me/player/play when nothing is registered as the active device.
-            # If the caller didn't target a specific device, recover by aiming
-            # at an available one; if there are none, say so clearly.
-            if device_id is None:
-                rid, rname = _pick_device(spotify)
-                if rid is None:
-                    return _NO_DEVICE_MSG
-                try:
-                    spotify.play(uri=uri, device_id=rid)
-                except Exception as e2:
-                    return f"Error playing on Spotify: {e2}"
-                base = "Resumed playback." if not uri else f"Now playing {uri}."
-                return base + f" On: {rname}."
             return f"Error playing on Spotify: {e}"
-        msg = "Resumed playback." if not uri else f"Now playing {uri}."
-        if device_name:
-            msg += f" On: {device_name}."
-        return msg
+        base = "Resumed playback." if not uri else f"Now playing {uri}."
+        return base + f" On: {resolved_name}."
 
     def spotify_playback_control(tool_input):
         action = tool_input.get("action")

@@ -209,19 +209,34 @@ class SpotifyClient:
             data = self._get("/me/player")
             if not data:
                 return None
-            item = data.get("item", {})
+            # Spotify can return a player state with item/device/album = null
+            # (connected but between tracks, playing an ad, or a private session),
+            # so coalesce each to {} before .get() to avoid a NoneType crash.
+            item = data.get("item") or {}
+            album = item.get("album") or {}
+            device = data.get("device") or {}
             return {
                 "is_playing": data.get("is_playing"),
                 "track": item.get("name"),
                 "artist": ", ".join(a["name"] for a in item.get("artists", [])),
-                "album": item.get("album", {}).get("name"),
-                "device": data.get("device", {}).get("name"),
+                "album": album.get("name"),
+                "device": device.get("name"),
                 "progress_ms": data.get("progress_ms"),
                 "duration_ms": item.get("duration_ms"),
                 "shuffle": data.get("shuffle_state"),
                 "repeat": data.get("repeat_state"),
             }
-        except requests.HTTPError:
+        except (requests.HTTPError, ValueError):
+            # HTTPError: request failed. ValueError: 204 No Content -> empty body
+            # -> resp.json() raises -> "nothing is playing".
+            return None
+
+    def _track_album_uri(self, track_uri: str) -> str | None:
+        """Album URI for a track, so single-track playback can carry a context."""
+        try:
+            tid = track_uri.split(":")[-1]
+            return (self._get(f"/tracks/{tid}").get("album") or {}).get("uri")
+        except Exception:
             return None
 
     def play(self, uri: str | None = None, device_id: str | None = None):
@@ -233,7 +248,14 @@ class SpotifyClient:
         body = None
         if uri:
             if ":track:" in uri:
-                body = {"uris": [uri]}
+                # A bare single-track `uris` list is silently dropped by some
+                # Spotify desktop clients (returns 204 but the player goes blank).
+                # Playing the track inside its album context is reliable, so
+                # resolve the album and offset to the track; fall back to the
+                # bare list only if the album lookup fails.
+                album_uri = self._track_album_uri(uri)
+                body = ({"context_uri": album_uri, "offset": {"uri": uri}}
+                        if album_uri else {"uris": [uri]})
             else:
                 body = {"context_uri": uri}
         self._put("/me/player/play", json_data=body, params=params)

@@ -48,6 +48,7 @@ Security policy (strictly enforced):
 - Destructive actions require user confirmation
 
 How you work:
+- Whether an app, device, or track is currently open, running, or playing is live state that changes on its own — you cannot know it from memory. To report or act on it, call the relevant tool to check or do it; never assume it from earlier in the conversation, because what you did before may no longer be true.
 - Confirm actions briefly after doing them ("Done — lights are off.").
 - Chain multiple actions when it makes sense (e.g. "movie night" = dim the lights and open Netflix).
 - Spotify: search for the URI first, then play. Target a specific device only if asked.
@@ -376,7 +377,8 @@ class Assistant:
 
             if not tool_use_blocks:
                 text_parts = [b.text for b in assistant_content if b.type == "text"]
-                return "\n".join(text_parts)
+                reply = "\n".join(p for p in text_parts if p).strip()
+                return reply or "Done."
 
             tool_results = []
             for tool_block in tool_use_blocks:
