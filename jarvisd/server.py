@@ -3,6 +3,18 @@
 Protocol:
   client -> brain  JSON  {"type": "text_in", "text": str, "speak": bool?}
                    JSON  {"type": "reset"}
+                   JSON  {"type": "interrupt"}
+                          (barge-in: client cut off a spoken reply via the wake
+                          word; carries no data. No reply frame is sent. The
+                          server captures the assistant's most recent reply
+                          turn RIGHT NOW, at receipt -- not later, when the
+                          next binary utterance on this connection arrives --
+                          because assistant.conversation is shared/global and
+                          could otherwise gain unrelated turns (an HA-rule
+                          action, another client) in the meantime. Once that
+                          next utterance yields non-empty text, the captured
+                          turn -- not whatever is newest by then -- is marked
+                          cut off before the new turn is processed.)
                    binary one utterance of 16 kHz mono int16 PCM
   brain -> client  JSON  {"type": "reply", "text": str, "heard": str|null,
                           "audio_follows": bool}
@@ -22,6 +34,8 @@ import os
 from datetime import datetime, timedelta
 
 import websockets
+
+from jarvisd.text_format import strip_markdown
 
 log = logging.getLogger(__name__)
 
@@ -84,6 +98,16 @@ class JarvisServer:
         # ws -> asyncio.Lock serializing writes to that connection: a JSON+WAV frame
         # pair must never be split by a concurrent proactive push (or vice versa).
         self._clients: dict = {}
+        # Per-connection barge-in target: ws -> the assistant turn dict
+        # captured at {"type":"interrupt"} RECEIPT (or None if there was no
+        # assistant turn yet), consumed by the next transcribed audio turn on
+        # that connection to mark that captured turn cut off. Captured at
+        # receipt time rather than at consume time (a bare flag) so a barge-in
+        # that arrives much later -- or never, if the user says the wake word
+        # and then nothing -- still marks the reply that was actually
+        # interrupted instead of whatever assistant.conversation's newest
+        # turn happens to be by then.
+        self._pending_interrupt: dict = {}
         self._loop = None  # captured in serve_forever(); lets worker threads push safely
         self._reminder_task = None
         self._ws_server = None  # set while serve_forever() is running (tests read the bound port)
@@ -140,10 +164,38 @@ class JarvisServer:
                     await self._safe_send(ws, json.dumps({"type": "error", "error": str(e)}))
         finally:
             self._clients.pop(ws, None)
+            self._pending_interrupt.pop(ws, None)
 
-    async def _process(self, text: str) -> str:
+    async def _process(self, text: str, interrupted_turn=None) -> str:
         async with self._lock:
+            # A captured turn of None means either no interrupt happened, or
+            # one did but there was no assistant turn to mark at receipt --
+            # both cases mean "nothing was playing that could be cut off", so
+            # note_interruption isn't called at all (calling it with turn=None
+            # would instead trigger its no-arg walk-and-mark-most-recent
+            # fallback, which is not what's wanted here).
+            if interrupted_turn is not None:
+                self.assistant.note_interruption(interrupted_turn)
             return await asyncio.to_thread(self.assistant.process, text)
+
+    def _capture_interrupt_target(self):
+        """Return the assistant's most recent assistant-role turn right now,
+        or None if there isn't one.
+
+        Called at {"type":"interrupt"} frame RECEIPT (see _handle_json), not
+        at barge-in audio consume time, so a late (or indefinitely delayed)
+        barge-in still marks the reply that was actually interrupted.
+        assistant.conversation is shared/global -- an HA-rule action
+        (__main__.py's run_direct/run_smart) or another connected client can
+        append new turns in the window before this connection's next audio
+        frame arrives, and capturing now (rather than a bare flag consumed
+        later) is what keeps that window from mattering.
+        """
+        conversation = getattr(self.assistant, "conversation", None) or []
+        for turn in reversed(conversation):
+            if turn.get("role") == "assistant":
+                return turn
+        return None
 
     async def _append_drained_notices(self, reply: str) -> str:
         """Append any queued proactive notices to a reply.
@@ -155,7 +207,8 @@ class JarvisServer:
             return reply
         notices = await asyncio.to_thread(self.notifier.drain)
         if notices:
-            reply = reply + "\n\nWhile you were away:\n" + "\n".join("- " + n for n in notices)
+            joined = "; ".join(notices)
+            reply = reply + f"\n\nAlso, while you were away: {joined}."
         return reply
 
     async def _handle_json(self, ws, raw: str):
@@ -175,6 +228,22 @@ class JarvisServer:
             await self._safe_send(ws, json.dumps(
                 {"type": "reply", "text": "Conversation cleared.", "heard": None, "audio_follows": False}
             ))
+        elif mtype == "interrupt":
+            # Client cut off a spoken reply via the wake word. Capture the
+            # target turn NOW rather than record a bare flag: assistant.
+            # conversation is shared/global, so waiting until the barge-in
+            # audio's _process (which can arrive seconds later, or never)
+            # risks marking a turn that was never spoken to this client if
+            # something else appends to the conversation in between (see
+            # _capture_interrupt_target). Captured under self._lock -- the
+            # same lock guarding every other read/mutation of
+            # assistant.conversation (_process, and __main__.py's
+            # run_direct/run_smart) -- so the capture can't race a concurrent
+            # append. No reply frame -- the client isn't awaiting one (it's
+            # already recording).
+            async with self._lock:
+                turn = self._capture_interrupt_target()
+            self._pending_interrupt[ws] = turn
         else:
             await self._safe_send(
                 ws, json.dumps({"type": "error", "error": f"unknown message type: {mtype!r}"})
@@ -186,6 +255,11 @@ class JarvisServer:
                 ws, json.dumps({"type": "error", "error": "speech not enabled on this server"})
             )
             return
+        # Consume regardless of outcome: pop returns the turn captured at
+        # interrupt receipt (or None -- either because there was no interrupt
+        # flag at all, or there was one but no assistant turn existed to
+        # capture; _process treats both identically, as "nothing to mark").
+        interrupted_turn = self._pending_interrupt.pop(ws, None)
         import numpy as np
         audio = np.frombuffer(pcm, dtype=np.int16)
         log.info("Audio in: %.1fs (%d bytes)", len(audio) / 16000, len(pcm))
@@ -197,12 +271,13 @@ class JarvisServer:
             )
             return
         log.info("Heard: %s", heard)
-        reply = await self._process(heard)
+        reply = await self._process(heard, interrupted_turn=interrupted_turn)
         reply = await self._append_drained_notices(reply)
         reply = await self._append_habit_trailer(reply)
         await self._send_reply(ws, reply, heard=heard, speak=True)
 
     async def _send_reply(self, ws, reply: str, heard, speak: bool):
+        reply = strip_markdown(reply)  # clean prose for both display and TTS
         wav = None
         if speak and self.tts is not None and reply:
             wav = await asyncio.to_thread(self.tts.synthesize, reply)

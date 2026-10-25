@@ -570,6 +570,214 @@ def test_model_cannot_self_confirm_run_script_within_one_turn():
     assert executed == []
 
 
+
+
+# ---------------------------------------------------------------------------
+# Task 4: barge-in interruption marker
+# ---------------------------------------------------------------------------
+
+
+from jarvisd.core import Assistant, INTERRUPTION_NOTE
+
+
+def _bare_assistant(conversation):
+    a = Assistant.__new__(Assistant)  # skip __init__ (no API key / clients needed)
+    a.conversation = conversation
+    return a
+
+
+def test_note_interruption_marks_string_assistant_turn():
+    """Fast/local path assistant turns store content as a plain str (core.py ~line 251)."""
+    a = _bare_assistant([
+        {"role": "user", "content": "play music"},
+        {"role": "assistant", "content": "I can play lots of things"},
+    ])
+    a.note_interruption()
+    assert a.conversation[-1]["content"].endswith(INTERRUPTION_NOTE)
+
+
+def test_note_interruption_marks_list_assistant_turn():
+    """Claude path assistant turns store content as a list of SDK content blocks
+    (core.py ~line 321-322, `assistant_content = response.content`)."""
+    a = _bare_assistant([
+        {"role": "assistant", "content": [{"type": "text", "text": "here you go"}]},
+    ])
+    a.note_interruption()
+    last = a.conversation[-1]["content"]
+    assert last[-1] == {"type": "text", "text": INTERRUPTION_NOTE}
+
+
+def test_note_interruption_does_not_mutate_existing_list_blocks():
+    """The marker must be APPENDED as a new block, never mutated onto an existing
+    block object -- real anthropic SDK content blocks (TextBlock/ToolUseBlock) are
+    pydantic models, not plain dicts, and mutating one in place is not the same
+    as replacing it. Use the same SimpleNamespace(type=..., text=...) stand-in
+    `text_block()` this test module already uses elsewhere (e.g.
+    test_claude_loop_still_enforces_guard_via_execute_guarded) to mirror the
+    attribute-access (`.type`/`.text`) shape real SDK blocks expose, rather than
+    a dict -- so this test would catch an implementation that tries to reach
+    into the block and set `.text` instead of appending."""
+    block = text_block("here you go")
+    a = _bare_assistant([
+        {"role": "assistant", "content": [block]},
+    ])
+    a.note_interruption()
+    content = a.conversation[-1]["content"]
+    assert content[0] is block  # original block object untouched, not mutated in place
+    assert block.text == "here you go"
+    assert content[-1] == {"type": "text", "text": INTERRUPTION_NOTE}
+
+
+def test_note_interruption_safe_with_only_tool_use_blocks():
+    """The last assistant turn may hold only tool_use blocks and no text block
+    (e.g. mid tool-call). note_interruption() must not corrupt it -- it appends
+    a new text marker block rather than trying to locate/mutate a text block
+    that doesn't exist."""
+    tool_use_block = SimpleNamespace(type="tool_use", id="tu_1", name="list_devices", input={})
+    a = _bare_assistant([
+        {"role": "assistant", "content": [tool_use_block]},
+    ])
+    a.note_interruption()
+    content = a.conversation[-1]["content"]
+    assert content[0] is tool_use_block  # untouched
+    assert content[-1] == {"type": "text", "text": INTERRUPTION_NOTE}
+
+
+def test_note_interruption_targets_most_recent_assistant_turn():
+    a = _bare_assistant([
+        {"role": "assistant", "content": "first reply"},
+        {"role": "user", "content": "and then"},
+        {"role": "assistant", "content": "second reply"},
+    ])
+    a.note_interruption()
+    assert a.conversation[0]["content"] == "first reply"          # untouched
+    assert a.conversation[-1]["content"].endswith(INTERRUPTION_NOTE)
+
+
+def test_note_interruption_noop_without_assistant_turn():
+    a = _bare_assistant([{"role": "user", "content": "hello"}])
+    a.note_interruption()  # must not raise
+    assert a.conversation == [{"role": "user", "content": "hello"}]
+
+
+def test_note_interruption_noop_on_empty_conversation():
+    a = _bare_assistant([])
+    a.note_interruption()  # must not raise
+    assert a.conversation == []
+
+
+def test_note_interruption_is_idempotent_string_content():
+    """Calling note_interruption() twice on a string-content turn must not
+    stack the marker -- the second call should be a no-op."""
+    a = _bare_assistant([
+        {"role": "user", "content": "play music"},
+        {"role": "assistant", "content": "I can play lots of things"},
+    ])
+    a.note_interruption()
+    after_first = a.conversation[-1]["content"]
+
+    a.note_interruption()
+    after_second = a.conversation[-1]["content"]
+
+    assert after_first == after_second
+    assert after_first.endswith(INTERRUPTION_NOTE)
+    # Verify the note is not doubled
+    assert after_first.count(INTERRUPTION_NOTE) == 1
+
+
+def test_note_interruption_is_idempotent_list_content():
+    """Calling note_interruption() twice on a list-content turn must not
+    append a duplicate marker block -- the second call should be a no-op."""
+    a = _bare_assistant([
+        {"role": "assistant", "content": [{"type": "text", "text": "here you go"}]},
+    ])
+    a.note_interruption()
+    after_first_content = list(a.conversation[-1]["content"])
+    after_first_str = str(after_first_content)
+
+    a.note_interruption()
+    after_second_content = a.conversation[-1]["content"]
+    after_second_str = str(after_second_content)
+
+    assert after_first_str == after_second_str
+    # Verify the marker block appears exactly once
+    marker_count = sum(
+        1 for block in after_second_content
+        if isinstance(block, dict) and block.get("text") == INTERRUPTION_NOTE
+    )
+    assert marker_count == 1
+
+
+# ---------------------------------------------------------------------------
+# note_interruption(turn=...): explicit-target variant used by the server's
+# capture-at-receipt barge-in fix (a stale flag consumed later must still mark
+# the turn that was actually playing when the interrupt happened, not
+# whatever is newest in self.conversation by consume time).
+# ---------------------------------------------------------------------------
+
+
+def test_note_interruption_marks_explicit_turn_not_the_newest_one():
+    """Captured turn is the FIRST assistant reply; a second, newer assistant
+    turn has since been appended (e.g. an HA-rule action, or another client's
+    exchange). Passing the captured turn explicitly must mark that one, not
+    self.conversation's current last assistant turn."""
+    first_reply = {"role": "assistant", "content": "reply that was actually interrupted"}
+    a = _bare_assistant([
+        first_reply,
+        {"role": "user", "content": "and then"},
+        {"role": "assistant", "content": "unrelated later reply"},
+    ])
+    a.note_interruption(first_reply)
+    assert first_reply["content"].endswith(INTERRUPTION_NOTE)
+    assert a.conversation[-1]["content"] == "unrelated later reply"  # untouched
+
+
+def test_note_interruption_none_is_indistinguishable_from_no_arg():
+    """Python can't tell note_interruption(None) apart from note_interruption()
+    -- both must do exactly the original walk-and-mark-most-recent thing. The
+    "a stored capture of None means don't mark anything" rule from the barge-in
+    fix is enforced by the SERVER (it simply skips calling note_interruption at
+    all when the turn it captured at interrupt receipt was None -- see
+    JarvisServer._process / test_server.py's stored-None test), not by this
+    method silently no-op'ing on an explicit None."""
+    a = _bare_assistant([
+        {"role": "assistant", "content": "some later reply"},
+    ])
+    a.note_interruption(None)
+    assert a.conversation[-1]["content"].endswith(INTERRUPTION_NOTE)
+
+
+def test_note_interruption_explicit_turn_list_content():
+    """Explicit-turn variant handles the Claude list-content shape identically
+    to the no-arg walk (shared marking logic)."""
+    turn = {"role": "assistant", "content": [{"type": "text", "text": "here you go"}]}
+    a = _bare_assistant([turn])
+    a.note_interruption(turn)
+    assert turn["content"][-1] == {"type": "text", "text": INTERRUPTION_NOTE}
+
+
+def test_note_interruption_explicit_turn_is_idempotent():
+    turn = {"role": "assistant", "content": "here you go"}
+    a = _bare_assistant([turn])
+    a.note_interruption(turn)
+    after_first = turn["content"]
+    a.note_interruption(turn)
+    assert turn["content"] == after_first
+    assert turn["content"].count(INTERRUPTION_NOTE) == 1
+
+
+def test_note_interruption_explicit_turn_survives_compaction():
+    """A turn captured at interrupt receipt may have since been compacted out
+    of self.conversation entirely (_compact_history trims MAX_HISTORY). Marking
+    it must not raise -- it's a harmless no-op on the live history, since the
+    caller holds its own reference to the dict."""
+    turn = {"role": "assistant", "content": "long since compacted away"}
+    a = _bare_assistant([{"role": "assistant", "content": "current live turn"}])
+    a.note_interruption(turn)  # turn is not even in a.conversation
+    assert turn["content"].endswith(INTERRUPTION_NOTE)
+    assert a.conversation[-1]["content"] == "current live turn"  # untouched
+
+
 def test_run_script_executes_after_a_real_turn_boundary():
     """The legitimate path still works: arm in one turn, confirm in the next.
     begin_turn() (called at the top of process()) is the turn boundary that makes

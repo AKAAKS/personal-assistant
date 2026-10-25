@@ -21,28 +21,78 @@ SONNET_MODEL = "claude-sonnet-5"
 WEB_SEARCH_MAX_USES_PER_REQUEST = 3
 PAUSE_TURN_MAX_CONTINUATIONS = 5
 
-SYSTEM_PROMPT = """You are JARVIS, a personal AI assistant. You control the user's smart home, Spotify, Android TV, and PC.
+SYSTEM_PROMPT = """You are JARVIS, the user's personal AI assistant. You control their smart home, Spotify, Android TV, and PC.
+
+Persona and voice — this matters as much as being correct:
+- You speak out loud through a voice assistant. Everything you say is READ ALOUD, so talk the way people talk, not the way documents are written.
+- You are concise, dry, and quietly competent, with a touch of understated wit — a capable aide who's comfortable with the user. Warm, never gushing. Address the user directly; never use "sir" or their name as a title.
+- Hard rules for every reply:
+  - Plain spoken sentences only. NO markdown, NO bullet points, NO numbered lists, NO headings, NO bold or italics, NO emoji.
+  - Default to one or two sentences. Only go longer when the user explicitly asks for detail.
+  - Use contractions. Get to the point; skip preamble like "Sure, I can help with that!".
+  - If you must convey several items, say them in a sentence ("You've got three: eggs, a run, and the dentist"), never as a list.
+  - When you're unsure what the user meant, ask about the single most likely interpretation as a short question — don't enumerate every possibility.
+  - If your previous reply was cut off (you'll see a note saying so), the user interrupted to correct or redirect you. Adjust to what they now want; don't repeat what you were saying.
 
 Capabilities:
-- **Smart home** (Home Assistant): lights, switches, climate, sensors, notifications
-- **Spotify**: search, play on any device, control playback
-- **Android TV**: launch/navigate apps, type in search fields, remote control
-- **PC control**: launch/close apps, list processes, open URLs, system info
-- **Web search**: current information from the web, with citations. Each search costs money — search only when the answer needs current information.
-- **Habit suggestions**: when the user asks about suggestions, or to surface them, use list_proposals; accept_proposal/dismiss_proposal act on them.
+- Smart home (Home Assistant): lights, switches, climate, sensors, notifications
+- Spotify: search, play on any device, control playback
+- Android TV: launch/navigate apps, type in search fields, remote control
+- PC control: launch/close apps, list processes, open URLs, system info
+- Web search: current information from the web, with citations. Each search costs money — only search when the answer needs current information.
+- Habit suggestions: when the user asks about suggestions, use list_proposals; accept_proposal/dismiss_proposal act on them.
 
 Security policy (strictly enforced):
 - NO access to bank accounts, cards, financial services, or sensitive IDs
 - Banking/payment/trading URLs are blocked
 - Destructive actions require user confirmation
 
-Guidelines:
-- Be conversational but concise. Confirm actions after performing them.
-- Chain multiple actions when appropriate (e.g. "movie night" = dim lights + open Netflix).
-- Spotify: search first for URIs, then play. Target specific devices if asked.
-- TV: launch app first, then navigate to search, then type query.
-- "Give me my briefing" = weather + top headlines (web search) + today's reminders (list_reminders) + today's meals (meal_summary).
+How you work:
+- Whether an app, device, or track is currently open, running, or playing is live state that changes on its own — you cannot know it from memory. To report or act on it, call the relevant tool to check or do it; never assume it from earlier in the conversation, because what you did before may no longer be true.
+- Confirm actions briefly after doing them ("Done — lights are off.").
+- Chain multiple actions when it makes sense (e.g. "movie night" = dim the lights and open Netflix).
+- Spotify: search for the URI first, then play. Target a specific device only if asked.
+- TV: launch the app first, then open its search, then type the query.
+- "Give me my briefing" = weather plus top headlines (web search), today's reminders (list_reminders), and today's meals (meal_summary), delivered as a short spoken rundown.
 """
+
+INTERRUPTION_NOTE = "(The user interrupted and cut off this reply before I finished.)"
+
+
+def _find_last_assistant_turn(conversation: list[dict]) -> dict | None:
+    """Return the most recent assistant-role turn in `conversation`, or None.
+
+    Shared by Assistant.note_interruption()'s no-arg walk and by
+    JarvisServer's barge-in capture-at-receipt logic (see
+    JarvisServer._capture_interrupt_target), so "what counts as the current
+    last assistant turn" is defined in exactly one place.
+    """
+    for turn in reversed(conversation):
+        if turn["role"] == "assistant":
+            return turn
+    return None
+
+
+def _mark_turn_interrupted(turn: dict) -> None:
+    """Append the INTERRUPTION_NOTE marker onto a single assistant turn dict.
+
+    Factored out of note_interruption() so its content-shape handling
+    (str vs. SDK content-block list) and idempotency live in exactly one
+    place, whether the turn was found by walking self.conversation or passed
+    in explicitly by the caller.
+    """
+    content = turn["content"]
+    if isinstance(content, str):
+        if INTERRUPTION_NOTE in content:
+            return  # already marked
+        turn["content"] = content.rstrip() + " " + INTERRUPTION_NOTE
+    elif isinstance(content, list):
+        if any(
+            isinstance(block, dict) and block.get("type") == "text" and block.get("text") == INTERRUPTION_NOTE
+            for block in content
+        ):
+            return  # already marked
+        content.append({"type": "text", "text": INTERRUPTION_NOTE})
 
 
 def web_search_tool(model: str) -> dict:
@@ -327,7 +377,8 @@ class Assistant:
 
             if not tool_use_blocks:
                 text_parts = [b.text for b in assistant_content if b.type == "text"]
-                return "\n".join(text_parts)
+                reply = "\n".join(p for p in text_parts if p).strip()
+                return reply or "Done."
 
             tool_results = []
             for tool_block in tool_use_blocks:
@@ -348,3 +399,52 @@ class Assistant:
     def reset_conversation(self):
         """Clear conversation history."""
         self.conversation = []
+
+    def note_interruption(self, turn: dict | None = None) -> None:
+        """Mark an assistant reply as cut off by the user.
+
+        Called when the user barged in (said the wake word) mid-reply. The
+        marker lives in conversation history so the model's next completion
+        knows its last reply wasn't fully heard and the user's new message is
+        likely a correction or redirect.
+
+        Two calling conventions:
+        - No `turn` (or `turn=None`, indistinguishable in Python): walk
+          self.conversation from the end and mark the most recent
+          assistant-role turn -- the original behavior. No-op if there's no
+          assistant turn.
+        - Explicit `turn` (a dict): mark that exact turn instead of searching.
+          Used by the server, which captures the target turn at interrupt
+          FRAME RECEIPT rather than at consume time (assistant.conversation is
+          shared/global -- an HA-rule action or another connected client can
+          append new assistant turns in the window before the barge-in audio
+          arrives, and marking whatever is then-newest would mark the wrong
+          reply). The passed turn may no longer be self.conversation's most
+          recent assistant turn, or may even have been compacted out of
+          self.conversation entirely by _compact_history -- marking it is
+          still safe, just a harmless no-op on the live history in that case,
+          since it's a plain dict the caller already holds a reference to.
+
+        Note: the case where the server captured NO assistant turn at
+        interrupt receipt (nothing to mark) is handled by the caller skipping
+        the call to this method entirely, not by passing turn=None -- since
+        turn=None here just triggers the walk above, same as calling with no
+        argument at all. See JarvisServer._process.
+
+        Handles both content shapes an assistant turn can have:
+        - fast/local path: `content` is a plain str -> append the note as text.
+        - Claude path: `content` is a list of SDK content blocks -> APPEND a new
+          text block rather than mutating an existing block in place (SDK
+          blocks are pydantic models; mutating one in place is not the same as
+          replacing it, and this also means a turn with only tool_use blocks
+          and no text block is handled safely -- the note is just added as its
+          own block, nothing existing needs to be found or touched).
+
+        Idempotent: calling it twice on the same turn leaves the turn unchanged
+        after the first call.
+        """
+        if turn is None:
+            turn = _find_last_assistant_turn(self.conversation)
+        if turn is None:
+            return
+        _mark_turn_interrupted(turn)

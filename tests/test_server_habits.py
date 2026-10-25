@@ -214,8 +214,26 @@ def test_habit_trailer_coexists_with_drained_notices():
 
     server = JarvisServer(FakeAssistant(), notifier=notifier, proposal_store=proposal_store)
     reply = run_client(server, scenario)
-    assert "While you were away:" in reply["text"]
-    assert "- milk" in reply["text"]
-    assert "- trash day" in reply["text"]
+    assert "Also, while you were away: milk; trash day." in reply["text"]
     assert "1 habit suggestion" in reply["text"]
     assert "show suggestions" in reply["text"]
+
+
+def test_habit_trailer_emoji_stripped_from_outgoing_reply_with_no_stray_space():
+    """_send_reply runs strip_markdown on the outgoing copy of every reply
+    (never on conversation history), so the habit trailer's leading emoji
+    (jarvisd/server.py's _append_habit_trailer: "\\n\\n\U0001F4A1 You have...")
+    must never reach the wire, AND removing it must not leave a stray leading
+    space behind on that line."""
+    proposal_store = FakeProposalStore([{"id": 1}])
+
+    async def scenario(ws):
+        await ws.send(json.dumps({"type": "text_in", "text": "hi"}))
+        return json.loads(await ws.recv())
+
+    server = JarvisServer(FakeAssistant(), proposal_store=proposal_store)
+    reply = run_client(server, scenario)
+    assert "\U0001F4A1" not in reply["text"]
+    assert "\n You have" not in reply["text"]
+    assert " You have" not in reply["text"]
+    assert "You have 1 habit suggestion" in reply["text"]

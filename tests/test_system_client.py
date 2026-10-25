@@ -23,10 +23,23 @@ def test_launch_app_retries_with_exe_suffix(monkeypatch):
         if not cmd.endswith(".exe"):
             raise FileNotFoundError(cmd)
 
+    # firefox is in _RUNNING_NAMES, so launch_app would first probe the real
+    # tasklist; pin it to "not running" so the test doesn't depend on whether
+    # Firefox happens to be open on the machine running the suite.
+    monkeypatch.setattr(SystemClient, "_is_running", lambda self, proc: False)
     monkeypatch.setattr(os, "startfile", fake_startfile)
     out = SystemClient().launch_app("firefox")
     assert out == "Launched firefox."
     assert calls == ["firefox", "firefox.exe"]
+
+
+def test_launch_app_reports_already_running_without_relaunching(monkeypatch):
+    calls = []
+    monkeypatch.setattr(SystemClient, "_is_running", lambda self, proc: True)
+    monkeypatch.setattr(os, "startfile", lambda cmd: calls.append(cmd))
+    out = SystemClient().launch_app("firefox")
+    assert out == "firefox is already running."
+    assert calls == []  # source of truth beats memory: no relaunch
 
 
 def test_launch_app_uses_protocol_for_epic(monkeypatch):

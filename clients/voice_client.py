@@ -4,8 +4,13 @@ Run: python -m clients.voice_client
 """
 
 import asyncio
+import io
+import json
 import logging
 import os
+import tempfile
+import time
+import wave
 import winsound
 
 import numpy as np
@@ -54,7 +59,7 @@ class VoiceClient:
         self._play_lock = asyncio.Lock()
 
     def _capture_utterance(self) -> bytes | None:
-        """Block until wake word, then record until silence. PCM bytes or None."""
+        """Block until the wake word, then record one utterance. PCM or None."""
         while True:
             frame = self.mic.read_frame(timeout=1.0)
             if frame is None:
@@ -66,26 +71,105 @@ class VoiceClient:
             self._wake_buf = self._wake_buf[WAKE_WORD_CHUNK:]
             if not self.wake_word.process_frame(chunk):
                 continue
-
             log.info("Wake word detected")
-            self.mic.clear()  # drop the wake phrase, keep anything said from here on
-            self._wake_buf = np.array([], dtype=np.int16)
+            return self._record_utterance()
+
+    def _record_utterance(self) -> bytes | None:
+        """Record one utterance NOW (no wake word): beep, capture until silence.
+
+        Returns PCM bytes, or None if nothing was said. Used both right after a
+        wake-word detection and right after a barge-in interrupt.
+        """
+        self.mic.clear()  # drop the wake phrase / anything said while JARVIS talked
+        self._wake_buf = np.array([], dtype=np.int16)
+        try:
+            winsound.Beep(800, 200)
+        except Exception:
+            pass
+        print("  Listening...")
+        audio = self.vad.record_until_silence(
+            self.mic, max_seconds=15.0, silence_ms=800, speech_timeout_sec=5.0,
+        )
+        if audio is None or len(audio) < 1600:
+            log.info("No speech captured")
+            print("  (no speech detected)\n")
+            self._failure_beep()
+            return None
+        log.info("Captured %.1fs of audio", len(audio) / 16000)
+        return audio.tobytes()
+
+    def _watch_for_wake(self, duration: float) -> bool:
+        """While a reply plays, listen for the wake word. Returns True on a
+        barge-in, False if `duration` (+ a short tail) elapses with no wake word.
+
+        Echo-safe: the mic hears JARVIS's own TTS, but the wake-word model only
+        trips on 'hey jarvis' -- which JARVIS never says -- so it can't self-fire.
+        """
+        self.mic.clear()
+        self._wake_buf = np.array([], dtype=np.int16)
+        deadline = time.monotonic() + duration + 0.3  # small tail past clip end
+        while time.monotonic() < deadline:
+            frame = self.mic.read_frame(timeout=0.2)
+            if frame is None:
+                continue
+            self._wake_buf = np.concatenate([self._wake_buf, frame])
+            while len(self._wake_buf) >= WAKE_WORD_CHUNK:
+                chunk = self._wake_buf[:WAKE_WORD_CHUNK]
+                self._wake_buf = self._wake_buf[WAKE_WORD_CHUNK:]
+                if self.wake_word.process_frame(chunk):
+                    return True
+        return False
+
+    def _play_and_watch(self, wav: bytes) -> bool:
+        """Play a reply WAV asynchronously while watching for the wake word.
+        Returns True if the user interrupted, False if it finished on its own.
+
+        winsound cannot play asynchronously from a memory buffer -- it raises
+        "Cannot play asynchronously from memory" -- so async playback (the only
+        kind that lets the wake-word watch run concurrently) goes through a temp
+        file with SND_FILENAME | SND_ASYNC. The file is purged and removed once
+        the watch ends.
+        """
+        duration = self._wav_duration(wav)
+        tmp_path = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(suffix=".wav", prefix="jarvis_reply_")
+            os.close(fd)
+            with open(tmp_path, "wb") as f:
+                f.write(wav)
+            winsound.PlaySound(tmp_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        except Exception:
+            # Async playback unavailable: fall back to a plain blocking play from
+            # memory (no barge-in this time, but the reply is still heard).
             try:
-                winsound.Beep(800, 200)
+                winsound.PlaySound(wav, winsound.SND_MEMORY)
             except Exception:
                 pass
-            print("  Listening...")
+            self._remove_tempfile(tmp_path)
+            return False
+        try:
+            return self._watch_for_wake(duration)
+        finally:
+            try:
+                winsound.PlaySound(None, winsound.SND_PURGE)  # stop if still playing
+            except Exception:
+                pass
+            self._remove_tempfile(tmp_path)
 
-            audio = self.vad.record_until_silence(
-                self.mic, max_seconds=15.0, silence_ms=800, speech_timeout_sec=5.0,
-            )
-            if audio is None or len(audio) < 1600:
-                log.info("No speech after wake word")
-                print("  (no speech detected)\n")
-                self._failure_beep()
-                return None
-            log.info("Captured %.1fs of audio", len(audio) / 16000)
-            return audio.tobytes()
+    @staticmethod
+    def _remove_tempfile(path: str | None) -> None:
+        """Best-effort delete of a reply temp file; a stray clip never matters."""
+        if not path:
+            return
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+    async def _play_and_watch_reply(self, wav: bytes) -> bool:
+        """Play a reply under the shared play-lock; return whether interrupted."""
+        async with self._play_lock:
+            return await asyncio.to_thread(self._play_and_watch, wav)
 
     def _capture_followup(self) -> bytes | None:
         """Record a follow-up utterance WITHOUT the wake word.
@@ -115,6 +199,16 @@ class VoiceClient:
             winsound.Beep(400, 250)
         except Exception:
             pass
+
+    @staticmethod
+    def _wav_duration(wav: bytes) -> float:
+        """Length of a WAV clip in seconds from its header (0.0 if unreadable)."""
+        try:
+            with wave.open(io.BytesIO(wav), "rb") as w:
+                rate = w.getframerate()
+                return w.getnframes() / float(rate) if rate else 0.0
+        except (wave.Error, EOFError):
+            return 0.0
 
     @staticmethod
     def _followup_next(*, in_conversation: bool, misfires: int, productive: bool):
@@ -160,11 +254,12 @@ class VoiceClient:
                     on_proactive_audio=self._play,
                 )
                 recv_task = asyncio.create_task(receiver.run())
-                in_conversation = False  # True while a hands-free back-and-forth is active
-                misfires = 0  # consecutive non-productive follow-ups this conversation
+                in_conversation = False  # True during a hands-free back-and-forth
+                misfires = 0             # consecutive non-productive follow-ups
+                pending_barge_in = False  # user interrupted; record their new turn next
 
                 def advance(productive: bool):
-                    """Apply the state transition and announce a conversation end."""
+                    """Apply the follow-up state transition; announce an ending."""
                     nonlocal in_conversation, misfires
                     was = in_conversation
                     in_conversation, misfires = self._followup_next(
@@ -176,13 +271,18 @@ class VoiceClient:
 
                 try:
                     while True:
-                        if in_conversation:
+                        if pending_barge_in:
+                            # We just cut off a reply; the user is already talking.
+                            pending_barge_in = False
+                            pcm = await asyncio.to_thread(self._record_utterance)
+                            if pcm is None:
+                                advance(productive=False)
+                                continue
+                        elif in_conversation:
                             print("  Listening for follow-up... (or stay quiet to end)")
                             pcm = await asyncio.to_thread(self._capture_followup)
                             if pcm is None:
-                                # A fully silent window is a strong "done" signal
-                                # (a quiet room) — end the conversation at once.
-                                misfires = MAX_FOLLOWUP_MISFIRES
+                                misfires = MAX_FOLLOWUP_MISFIRES  # silent window ends it
                                 advance(productive=False)
                                 continue
                         else:
@@ -195,15 +295,12 @@ class VoiceClient:
                         if reply.get("type") == "error":
                             print(f"  [error] {reply.get('error')}\n")
                             self._failure_beep()
-                            misfires = MAX_FOLLOWUP_MISFIRES  # force end on error
+                            misfires = MAX_FOLLOWUP_MISFIRES
                             advance(productive=False)
                             continue
                         if not reply.get("heard") and not reply.get("text"):
                             print("  (didn't catch that)\n")
                             self._failure_beep()
-                            # In a conversation this is usually the room's ambient
-                            # noise tripping the VAD, not the user — accumulate
-                            # toward ending rather than looping forever.
                             advance(productive=False)
                             continue
                         if reply.get("heard"):
@@ -213,9 +310,13 @@ class VoiceClient:
                         if reply.get("audio_follows"):
                             wav = await item["wav_future"]
                             if wav is not None:
-                                await self._play(wav)
-                        # A completed exchange -> keep listening for a follow-up
-                        # without the wake word, and reset the misfire streak.
+                                interrupted = await self._play_and_watch_reply(wav)
+                                if interrupted:
+                                    print("  [interrupted]")
+                                    await ws.send(json.dumps({"type": "interrupt"}))
+                                    pending_barge_in = True
+                                    continue  # skip advance; go record the new turn
+                        # A completed exchange -> keep listening for a follow-up.
                         advance(productive=True)
                 finally:
                     recv_task.cancel()
