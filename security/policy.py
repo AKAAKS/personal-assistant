@@ -45,6 +45,7 @@ TOOL_PERMISSIONS = {
     "remember": "write",
     "recall": "read_only",
     # Proactivity
+    "set_timer": "write",
     "set_reminder": "write",
     "list_reminders": "read_only",
     "cancel_reminder": "write",
@@ -55,6 +56,8 @@ TOOL_PERMISSIONS = {
     "log_meal": "write",
     "meal_summary": "read_only",
     "export_meals": "write",
+    "set_nutrition_targets": "write",
+    "meal_trends": "read_only",
     # Files
     "search_files": "read_only",
     "read_document": "read_only",
@@ -72,6 +75,9 @@ TOOL_PERMISSIONS = {
     "calendar_get_day": "read_only",
     "calendar_create_event": "write",
     "calendar_delete_event": "destructive",
+    # Clipboard
+    "get_clipboard": "read_only",
+    "set_clipboard": "write",
 }
 
 DEFAULT_PERMISSION = "write"

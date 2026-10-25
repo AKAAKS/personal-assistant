@@ -1,6 +1,6 @@
 """Tool registry — assembles definitions + handlers for the available clients."""
 
-from jarvisd.tools import ha, spotify, system, tv, memory, reminders, rules, meals, files, proposals, gmail, calendar, terminal
+from jarvisd.tools import ha, spotify, system, tv, memory, reminders, rules, meals, files, proposals, gmail, calendar, terminal, clipboard
 
 
 def build_registry(
@@ -34,11 +34,12 @@ def build_registry(
     8. files (if file_tools is True; file_summarizer may still be None)
     9. proposals (if proposal_store)
     """
-    tools = list(ha.TOOLS) + list(system.TOOLS) + list(terminal.TOOLS)
+    tools = list(ha.TOOLS) + list(system.TOOLS) + list(terminal.TOOLS) + list(clipboard.TOOLS)
     handler_map = {}
     handler_map.update(ha.handlers(ha_client))
     handler_map.update(system.handlers(system_client))
     handler_map.update(terminal.handlers(system_client))
+    handler_map.update(clipboard.handlers())
     if spotify_client is not None:
         tools += list(spotify.TOOLS)
         handler_map.update(spotify.handlers(spotify_client))

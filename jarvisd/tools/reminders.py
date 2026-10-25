@@ -1,6 +1,29 @@
-"""Reminder tools: set, list, and cancel reminders."""
+"""Reminder tools: set, list, and cancel reminders (plus quick timers)."""
+
+from datetime import datetime, timedelta
 
 TOOLS = [
+    {
+        "name": "set_timer",
+        "description": (
+            "Set a quick countdown timer that goes off after a number of minutes "
+            "(e.g. 'set a 10-minute timer'). A one-off reminder under the hood."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "minutes": {
+                    "type": "number",
+                    "description": "How many minutes until the timer goes off.",
+                },
+                "label": {
+                    "type": "string",
+                    "description": "Optional label, e.g. 'tea' or 'laundry'.",
+                },
+            },
+            "required": ["minutes"],
+        },
+    },
     {
         "name": "set_reminder",
         "description": "Set a reminder for a specific time. Supports one-time, daily, or weekly recurring reminders.",
@@ -68,6 +91,22 @@ def handlers(reminder_store):
         dict: tool name -> callable(tool_input: dict) -> str
     """
 
+    def set_timer(ti):
+        """Set a quick countdown timer (a one-off reminder N minutes out)."""
+        minutes = ti.get("minutes")
+        if not isinstance(minutes, (int, float)) or isinstance(minutes, bool) or minutes <= 0:
+            return "Error: minutes is required and must be a positive number."
+        label = ti.get("label")
+        label = label.strip() if isinstance(label, str) and label.strip() else ""
+        text = f"Timer: {label}" if label else "Timer's up."
+        due = (datetime.now() + timedelta(minutes=float(minutes))).isoformat(timespec="seconds")
+        try:
+            reminder_store.add(text, due, "none")
+        except ValueError as exc:
+            return f"Error: {exc}"
+        pretty = int(minutes) if float(minutes).is_integer() else minutes
+        return f"Timer set for {pretty} minute(s)" + (f" — {label}." if label else ".")
+
     def set_reminder(ti):
         """Set a reminder."""
         text = ti.get("text", "").strip()
@@ -120,6 +159,7 @@ def handlers(reminder_store):
             return f"Error: reminder #{reminder_id} not found or already done."
 
     return {
+        "set_timer": set_timer,
         "set_reminder": set_reminder,
         "list_reminders": list_reminders,
         "cancel_reminder": cancel_reminder,

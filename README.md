@@ -80,6 +80,9 @@ otherwise it falls back to a Home Assistant phone push, and if that also fails (
 HA is down) it's queued and delivered as "While you were away: ..." the next time
 you chat.
 
+**Timers** — "set a 10-minute timer", "set a 5-minute timer for the tea". A timer is
+just a one-off reminder under the hood, so it fires the same way.
+
 **Trigger rules** — ask JARVIS to create an automation from an HA event. Two kinds:
 
 - *Direct* (runs a tool call immediately, no AI involved, $0 cost):
@@ -159,6 +162,15 @@ recursive mass-delete, registry deletion, download-and-execute cradles, and raw
 shutdown; `run_command`/`system_power` additionally require confirmation. Set
 `JARVIS_ALLOW_SHELL=0` to disable the terminal/command surface entirely.
 
+## Clipboard
+
+JARVIS can read and write your PC clipboard (via `pyperclip`):
+
+- "Summarize what I just copied" / "translate this" — reads the clipboard
+  (**get_clipboard**).
+- "Copy that command to my clipboard" — puts text on the clipboard so you can
+  paste it anywhere with Ctrl+V (**set_clipboard**).
+
 ## Gmail & Calendar
 
 Optional Google integration (set `GOOGLE_CREDENTIALS_FILE`; see `.env.example` for
@@ -182,6 +194,10 @@ Log meals by voice or text and JARVIS estimates macros for trend tracking:
 - "Log a meal: two eggs and toast with butter" — logs with estimated calories/
   protein/carbs/fat, a stated confidence, and any portion assumptions made.
 - "How am I doing today?" — today's totals across everything logged.
+- "Set my daily targets to 2200 calories, 150g protein, 200g carbs, 70g fat" —
+  once set, the day's summary shows progress toward them (e.g. "1500/2200 kcal, 68%").
+- "What are my nutrition trends this week?" — per-day calories/macros over the last
+  N days (default 7) plus a daily average.
 - "Export my meal log" — writes a CSV or JSON file to `data/exports/`.
 
 Important: these are **LLM estimates, not a food database lookup**. JARVIS states
