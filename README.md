@@ -139,6 +139,26 @@ first; say "yes, run it" and JARVIS retries the same call to actually run it. A
 trigger rule (HA automation) can never get past this confirmation on its own — running
 scripts autonomously, without a person present to confirm, is not allowed.
 
+## Terminal & PC power
+
+Beyond launching apps, JARVIS can work with the terminal and power state:
+
+- **open_terminal** — open a visible terminal window you then drive yourself,
+  optionally running a command: "run Claude in a terminal", "open a terminal in my
+  project and start the dev server".
+- **run_command** — run a one-off command and read the output back: "what's my IP?",
+  "git status in my project". Destructive-tier, so it asks for confirmation first.
+- **system_power** — "restart my PC" / "shut down" / "cancel the shutdown". JARVIS
+  first scans open apps for likely unsaved work (**scan_unsaved_work**), warns you,
+  and on confirmation issues the shutdown **without force** so each app shows its own
+  save prompt (Windows' native, reliable path — no blind auto-saving).
+
+Safety: both `open_terminal` and `run_command` run every command through a
+denylist sanitizer (`security/command_sanitizer.py`) that blocks disk format/wipe,
+recursive mass-delete, registry deletion, download-and-execute cradles, and raw
+shutdown; `run_command`/`system_power` additionally require confirmation. Set
+`JARVIS_ALLOW_SHELL=0` to disable the terminal/command surface entirely.
+
 ## Gmail & Calendar
 
 Optional Google integration (set `GOOGLE_CREDENTIALS_FILE`; see `.env.example` for

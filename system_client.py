@@ -3,6 +3,9 @@
 import os
 import subprocess
 
+# How long a headless run_command may run before it is killed.
+COMMAND_TIMEOUT_SEC = 60
+
 
 class SystemClient:
 
@@ -124,6 +127,78 @@ class SystemClient:
     def open_url(self, url: str) -> str:
         os.startfile(url)
         return f"Opened {url} in default browser."
+
+    def run_command(self, command: str) -> tuple[int, str, str]:
+        """Run a shell command headlessly and return (exit_code, stdout, stderr).
+
+        The caller (tools/terminal.py) sanitizes the command and the security
+        guard requires confirmation first — this method is the raw executor.
+        """
+        try:
+            result = subprocess.run(
+                command, shell=True, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=COMMAND_TIMEOUT_SEC,
+            )
+        except subprocess.TimeoutExpired:
+            return 124, "", f"command timed out after {COMMAND_TIMEOUT_SEC}s"
+        return result.returncode, result.stdout or "", result.stderr or ""
+
+    def open_terminal(self, command: "str | None" = None) -> None:
+        """Open a VISIBLE terminal window, optionally running `command` and
+        keeping the window open (so the user can interact — e.g. `claude`).
+
+        Prefers Windows Terminal (`wt`); falls back to a new cmd console.
+        """
+        creationflags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+        inner = ["cmd", "/k", command] if command else ["cmd"]
+        try:
+            subprocess.Popen(["wt", *inner])
+            return
+        except (OSError, subprocess.SubprocessError):
+            pass
+        subprocess.Popen(inner, creationflags=creationflags)
+
+    def list_windows(self) -> list[tuple[int, str]]:
+        """Return (pid, title) for every visible top-level window with a title.
+
+        Used by the shutdown unsaved-work scan. Best-effort — returns [] if the
+        pywin32 window APIs are unavailable.
+        """
+        try:
+            import win32gui
+            import win32process
+        except ImportError:
+            return []
+        out: list[tuple[int, str]] = []
+
+        def _cb(hwnd, _):
+            if not win32gui.IsWindowVisible(hwnd):
+                return
+            title = win32gui.GetWindowText(hwnd)
+            if not title.strip():
+                return
+            try:
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            except Exception:
+                pid = 0
+            out.append((pid, title))
+
+        win32gui.EnumWindows(_cb, None)
+        return out
+
+    def power(self, action: str, grace_seconds: int = 60) -> str:
+        """Restart/shutdown (WITHOUT /f, so each app shows its own save prompt)
+        or cancel a pending shutdown. Returns the executed description."""
+        if action == "cancel":
+            subprocess.run(["shutdown", "/a"], capture_output=True, text=True, timeout=10)
+            return "Cancelled the pending shutdown."
+        flag = "/r" if action == "restart" else "/s"
+        subprocess.run(
+            ["shutdown", flag, "/t", str(int(grace_seconds))],
+            capture_output=True, text=True, timeout=10,
+        )
+        verb = "Restart" if action == "restart" else "Shutdown"
+        return f"{verb} scheduled in {int(grace_seconds)}s (apps will prompt to save)."
 
     def system_info(self) -> str:
         try:

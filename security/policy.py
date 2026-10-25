@@ -36,6 +36,11 @@ TOOL_PERMISSIONS = {
     "list_processes": "read_only",
     "open_url_browser": "write",
     "system_info": "read_only",
+    # PC terminal control (Tier A/B) + power
+    "open_terminal": "write",
+    "run_command": "destructive",
+    "scan_unsaved_work": "read_only",
+    "system_power": "destructive",
     # Memory
     "remember": "write",
     "recall": "read_only",
