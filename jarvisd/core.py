@@ -39,6 +39,8 @@ Capabilities:
 - Spotify: search, play on any device, control playback
 - Android TV: launch/navigate apps, type in search fields, remote control
 - PC control: launch/close apps, list processes, open URLs, system info
+- Gmail: search and read mail, and compose drafts. You CANNOT send — you only create drafts the user sends themselves, so say so ("I've drafted it; send it when you're ready").
+- Google Calendar: list upcoming events, check a specific day, create events, delete events (deleting asks for confirmation).
 - Web search: current information from the web, with citations. Each search costs money — only search when the answer needs current information.
 - Habit suggestions: when the user asks about suggestions, use list_proposals; accept_proposal/dismiss_proposal act on them.
 
@@ -127,6 +129,7 @@ class Assistant:
         meal_store=None,
         file_tools: bool = False,
         proposal_store=None,
+        google_client=None,
     ):
         spotify = None
         if spotify_client is not None and getattr(spotify_client, "is_authenticated", lambda: True)():
@@ -156,6 +159,7 @@ class Assistant:
             file_tools=file_tools,
             file_summarizer=self._summarize if file_tools else None,
             proposal_store=proposal_store,
+            google_client=google_client,
         )
         if self.tools:
             self.tools[-1] = {**self.tools[-1], "cache_control": {"type": "ephemeral"}}

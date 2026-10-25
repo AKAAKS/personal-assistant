@@ -1,6 +1,6 @@
 """Tool registry — assembles definitions + handlers for the available clients."""
 
-from jarvisd.tools import ha, spotify, system, tv, memory, reminders, rules, meals, files, proposals
+from jarvisd.tools import ha, spotify, system, tv, memory, reminders, rules, meals, files, proposals, gmail, calendar
 
 
 def build_registry(
@@ -16,6 +16,7 @@ def build_registry(
     file_tools: bool = False,
     file_summarizer=None,
     proposal_store=None,
+    google_client=None,
 ):
     """Return (tools, handlers) for the clients that exist.
 
@@ -65,4 +66,8 @@ def build_registry(
             rules_store=rules_store,
             profile_store=profile_store,
         ))
+    if google_client is not None:
+        tools += list(gmail.TOOLS) + list(calendar.TOOLS)
+        handler_map.update(gmail.handlers(google_client))
+        handler_map.update(calendar.handlers(google_client))
     return tools, handler_map

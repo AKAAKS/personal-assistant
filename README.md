@@ -139,6 +139,22 @@ first; say "yes, run it" and JARVIS retries the same call to actually run it. A
 trigger rule (HA automation) can never get past this confirmation on its own — running
 scripts autonomously, without a person present to confirm, is not allowed.
 
+## Gmail & Calendar
+
+Optional Google integration (set `GOOGLE_CREDENTIALS_FILE`; see `.env.example` for
+the one-time OAuth setup). JARVIS can:
+
+- Search and read your mail — "any unread email from my landlord?", "read me the
+  last message from Alice".
+- **Draft** replies and new emails — "draft a reply saying noon works". JARVIS
+  **never sends**; it only creates a Gmail draft you review and send yourself
+  (the OAuth scope has no send permission).
+- Manage your calendar — "what's on today?", "add lunch with Sam tomorrow at
+  noon", "delete the 3pm" (deleting asks for confirmation).
+
+Scopes are deliberately minimal: `gmail.readonly` + `gmail.compose` (drafts only)
+and `calendar`. The token is cached locally at `data/google_token.json`.
+
 ## Meal tracking
 
 Log meals by voice or text and JARVIS estimates macros for trend tracking:

@@ -58,6 +58,15 @@ TOOL_PERMISSIONS = {
     "list_proposals": "read_only",
     "accept_proposal": "write",
     "dismiss_proposal": "write",
+    # Gmail (read + draft only; no send capability exists)
+    "gmail_search": "read_only",
+    "gmail_read": "read_only",
+    "gmail_draft": "write",
+    # Google Calendar
+    "calendar_list_events": "read_only",
+    "calendar_get_day": "read_only",
+    "calendar_create_event": "write",
+    "calendar_delete_event": "destructive",
 }
 
 DEFAULT_PERMISSION = "write"
