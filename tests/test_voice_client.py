@@ -7,6 +7,7 @@ never touched; only the pieces _capture_followup uses are faked.
 import io
 import time
 import wave
+import winsound
 
 import numpy as np
 
@@ -264,3 +265,56 @@ def test_watch_for_wake_returns_false_after_duration():
     start = time.monotonic()
     assert c._watch_for_wake(duration=0.05) is False
     assert time.monotonic() - start < 2.0  # exits near the deadline, doesn't hang
+
+
+# --- _play_and_watch() must actually run the watch ---------------------------
+# Regression: winsound cannot play SND_MEMORY|SND_ASYNC at all (Windows raises
+# RuntimeError: "Cannot play asynchronously from memory"). The original
+# _play_and_watch caught that and fell back to a BLOCKING play that never ran
+# the wake-word watch, so barge-in could never fire on a real machine.
+
+
+def _async_from_memory_unsupported(monkeypatch):
+    """Patch voice_client.winsound to mimic real Windows: async-from-memory
+    raises, every other PlaySound call is recorded. Returns the recorded flags."""
+    from clients import voice_client
+
+    recorded = []
+
+    def fake_playsound(data, flags):
+        if (flags & winsound.SND_MEMORY) and (flags & winsound.SND_ASYNC):
+            raise RuntimeError("Cannot play asynchronously from memory")
+        recorded.append(flags)
+
+    monkeypatch.setattr(voice_client.winsound, "PlaySound", fake_playsound)
+    return recorded
+
+
+def _valid_wav(seconds: float = 0.1, rate: int = 24000) -> bytes:
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(np.zeros(int(rate * seconds), dtype=np.int16).tobytes())
+    return buf.getvalue()
+
+
+def test_play_and_watch_runs_the_watch_despite_async_from_memory_limit(monkeypatch):
+    """The barge-in window must run even though SND_MEMORY|SND_ASYNC is
+    unsupported — the fix plays asynchronously another way, it does not skip
+    the watch."""
+    _async_from_memory_unsupported(monkeypatch)
+    c = VoiceClient.__new__(VoiceClient)
+    watched = {"called": False}
+
+    def fake_watch(duration):
+        watched["called"] = True
+        return True
+
+    c._watch_for_wake = fake_watch
+
+    result = c._play_and_watch(_valid_wav())
+
+    assert watched["called"] is True  # the barge-in watch actually ran
+    assert result is True             # and its result is propagated back

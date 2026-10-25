@@ -28,15 +28,18 @@ class FakeSpotify:
             raise RuntimeError("404 Client Error: Not Found for url: .../me/player/queue")
 
 
-def test_play_succeeds_directly_when_a_device_is_active():
-    sp = FakeSpotify()  # play() never fails
+def test_play_targets_the_active_device():
+    sp = FakeSpotify(devices=[{"id": "d1", "name": "Laptop", "is_active": True}])
     out = handlers(sp)["spotify_play"]({"uri": "spotify:track:x"})
     assert "Now playing spotify:track:x" in out
-    assert len(sp.play_calls) == 1  # no recovery attempt when the first play works
-    assert sp.play_calls[0]["device_id"] is None
+    assert "On: Laptop" in out
+    assert len(sp.play_calls) == 1                  # resolved up front — a single play
+    assert sp.play_calls[0]["device_id"] == "d1"    # targeted directly, never a bare None
 
 
-def test_play_recovers_by_targeting_an_available_device():
+def test_play_targets_an_available_device_when_none_is_active():
+    # A bare /me/player/play with no *active* device 204-no-ops silently, so the
+    # handler resolves a concrete device up front rather than firing blind.
     sp = FakeSpotify(
         devices=[{"id": "d1", "name": "Laptop", "is_active": False}],
         play_needs_device=True,
@@ -44,11 +47,11 @@ def test_play_recovers_by_targeting_an_available_device():
     out = handlers(sp)["spotify_play"]({"uri": "spotify:track:x"})
     assert "Now playing spotify:track:x" in out
     assert "On: Laptop" in out
-    assert sp.play_calls[0]["device_id"] is None   # first attempt failed
-    assert sp.play_calls[1]["device_id"] == "d1"   # retried against the device
+    assert len(sp.play_calls) == 1                  # one call, aimed at the device
+    assert sp.play_calls[0]["device_id"] == "d1"    # no failed None attempt first
 
 
-def test_play_recovery_prefers_the_active_device():
+def test_play_prefers_the_active_device():
     sp = FakeSpotify(
         devices=[
             {"id": "d1", "name": "Phone", "is_active": False},

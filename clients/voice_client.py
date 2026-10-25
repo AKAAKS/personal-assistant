@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import os
+import tempfile
 import time
 import wave
 import winsound
@@ -122,18 +123,29 @@ class VoiceClient:
     def _play_and_watch(self, wav: bytes) -> bool:
         """Play a reply WAV asynchronously while watching for the wake word.
         Returns True if the user interrupted, False if it finished on its own.
+
+        winsound cannot play asynchronously from a memory buffer -- it raises
+        "Cannot play asynchronously from memory" -- so async playback (the only
+        kind that lets the wake-word watch run concurrently) goes through a temp
+        file with SND_FILENAME | SND_ASYNC. The file is purged and removed once
+        the watch ends.
         """
         duration = self._wav_duration(wav)
-        self._play_buf = wav  # hold a reference alive for async playback
+        tmp_path = None
         try:
-            winsound.PlaySound(wav, winsound.SND_MEMORY | winsound.SND_ASYNC)
+            fd, tmp_path = tempfile.mkstemp(suffix=".wav", prefix="jarvis_reply_")
+            os.close(fd)
+            with open(tmp_path, "wb") as f:
+                f.write(wav)
+            winsound.PlaySound(tmp_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
         except Exception:
-            # Async playback unavailable: fall back to a plain blocking play
-            # (no barge-in this time, but the reply is still heard).
+            # Async playback unavailable: fall back to a plain blocking play from
+            # memory (no barge-in this time, but the reply is still heard).
             try:
                 winsound.PlaySound(wav, winsound.SND_MEMORY)
             except Exception:
                 pass
+            self._remove_tempfile(tmp_path)
             return False
         try:
             return self._watch_for_wake(duration)
@@ -142,6 +154,17 @@ class VoiceClient:
                 winsound.PlaySound(None, winsound.SND_PURGE)  # stop if still playing
             except Exception:
                 pass
+            self._remove_tempfile(tmp_path)
+
+    @staticmethod
+    def _remove_tempfile(path: str | None) -> None:
+        """Best-effort delete of a reply temp file; a stray clip never matters."""
+        if not path:
+            return
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
     async def _play_and_watch_reply(self, wav: bytes) -> bool:
         """Play a reply under the shared play-lock; return whether interrupted."""
