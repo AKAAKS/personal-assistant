@@ -2,9 +2,42 @@
 
 import logging
 import os
+import re
 import numpy as np
 
 log = logging.getLogger(__name__)
+
+# Phrases Whisper hallucinates from media bleed in the room — YouTube-style
+# outros no one says to an assistant. A whole utterance matching one is noise,
+# not a turn; rejecting it stops background audio from driving a hands-free loop.
+_HALLUCINATION_PHRASES = (
+    "see you in the next video",
+    "see you in the next one",
+    "see you next time",
+    "thanks for watching",
+    "thank you for watching",
+    "dont forget to subscribe",
+    "please subscribe",
+    "like and subscribe",
+    "subscribe to my channel",
+    "thanks for listening",
+)
+
+
+def _is_hallucination(text):
+    """True when the transcription is a stock Whisper hallucination (noise),
+    not something a user would actually say to JARVIS."""
+    norm = " ".join(re.sub(r"[^a-z0-9 ]+", " ", text.lower()).split())
+    if not norm:
+        return True
+    if any(p in norm for p in _HALLUCINATION_PHRASES):
+        return True
+    tokens = norm.split()
+    if all(t == "bye" for t in tokens):  # "bye", "bye bye bye"
+        return True
+    if norm == "you":  # Whisper's classic single-token invention on silence
+        return True
+    return False
 
 # Confidence gates: Whisper hallucinates words on noise / the tail of JARVIS's
 # own speech during the hands-free follow-up window. Drop any segment the model
@@ -75,4 +108,5 @@ class SpeechToText:
             # text; each capture is a fresh, standalone utterance.
             condition_on_previous_text=False,
         )
-        return _confident_text(segments)
+        text = _confident_text(segments)
+        return "" if _is_hallucination(text) else text
