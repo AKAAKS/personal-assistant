@@ -75,17 +75,13 @@ class VoiceClient:
             return self._record_utterance()
 
     def _record_utterance(self) -> bytes | None:
-        """Record one utterance NOW (no wake word): beep, capture until silence.
+        """Record one utterance NOW (no wake word): capture until silence.
 
         Returns PCM bytes, or None if nothing was said. Used both right after a
         wake-word detection and right after a barge-in interrupt.
         """
         self.mic.clear()  # drop the wake phrase / anything said while JARVIS talked
         self._wake_buf = np.array([], dtype=np.int16)
-        try:
-            winsound.Beep(800, 200)
-        except Exception:
-            pass
         print("  Listening...")
         audio = self.vad.record_until_silence(
             self.mic, max_seconds=15.0, silence_ms=800, speech_timeout_sec=5.0,
@@ -180,10 +176,6 @@ class VoiceClient:
         the conversation is over and we should re-arm the wake word).
         """
         self.mic.clear()  # discard whatever was captured while JARVIS was talking
-        try:
-            winsound.Beep(1000, 120)  # soft, higher cue: "still listening"
-        except Exception:
-            pass
         audio = self.vad.record_until_silence(
             self.mic, max_seconds=15.0, silence_ms=800,
             speech_timeout_sec=FOLLOWUP_WINDOW_SEC,
