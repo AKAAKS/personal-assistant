@@ -6,6 +6,7 @@ import sys
 from dotenv import load_dotenv
 
 from ha_client import HomeAssistantClient
+from location_provider import LocationProvider
 from jarvisd import db
 from jarvisd.core import HAIKU_MODEL, Assistant
 from jarvisd.habit_pipeline import run_habit_scan
@@ -119,6 +120,11 @@ def create_assistant():
 
     search_cap = int(os.getenv("SEARCH_MONTHLY_CAP", "100"))
 
+    # Current location (Windows GPS + home fallback), refreshed in the background
+    # so weather / "near me" queries work without the user stating where they are.
+    location_provider = LocationProvider.from_env()
+    location_provider.start()
+
     ai = Assistant(
         ha, anthropic_key,
         spotify_client=spotify,
@@ -135,6 +141,7 @@ def create_assistant():
         file_tools=True,
         proposal_store=proposal_store,
         google_client=google,
+        location_provider=location_provider,
     )
 
     features = ["Home Assistant", "PC Control"]
@@ -150,6 +157,7 @@ def create_assistant():
     if reminder_store and rules_store:
         features.append("Proactivity")
     features.append("Web Search")
+    features.append("Weather")
     features.append("File Tools")
     if meal_store:
         features.append("Meals")

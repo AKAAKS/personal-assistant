@@ -105,11 +105,25 @@ Env vars:
   are always queued instead of spoken/pushed immediately (handles overnight
   wraparound; set to an empty string to disable quiet hours entirely).
 
+## Location & weather
+
+JARVIS knows where you are, so it never asks. It reads your location from the
+**Windows Location API** (precise GPS) on a background thread, caches it, and
+reverse-geocodes it to a city name. Turn it on once at **Settings → Privacy &
+security → Location → "Let desktop apps access your location"**. If location is
+off or unavailable, it falls back to a home location you set (`JARVIS_HOME_LAT`/
+`LON`/`NAME` in `.env`).
+
+Weather uses a dedicated `get_weather` tool backed by **Open-Meteo** (free, no API
+key) — so "what's the weather?", "do I need a jacket?", and the briefing are instant
+and **don't touch your web-search budget**. Ask about anywhere by name too ("weather
+in Tokyo"). Units follow `JARVIS_UNITS` (`metric` default, or `imperial`).
+
 ## Web search & briefing
 
 JARVIS can search the web (server-side, with citations) for anything that needs
-current information — weather, news, sports scores, prices. Ask directly ("What's
-the weather in Seattle right now?") or ask for everything at once:
+current information — news, sports scores, prices. Ask directly, or ask for
+everything at once:
 
 - "Give me my briefing" — weather + top headlines (web search) + today's reminders
   + today's meals, in one reply.

@@ -41,6 +41,8 @@ TOOL_PERMISSIONS = {
     "run_command": "destructive",
     "scan_unsaved_work": "read_only",
     "system_power": "destructive",
+    # Weather
+    "get_weather": "read_only",
     # Memory
     "remember": "write",
     "recall": "read_only",
