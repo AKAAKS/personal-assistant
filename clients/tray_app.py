@@ -158,7 +158,11 @@ _STATE_LABEL = {
     STOPPED: "JARVIS — stopped",
 }
 
-TICK_INTERVAL_SEC = 3.0
+# How often the watchdog re-checks the daemon port + voice-client process. Each
+# daemon-port check is a short TCP connect; keep it infrequent so it neither
+# churns the event loop nor spams the daemon log (a crashed voice client is still
+# relaunched within this window, which is fine for a rare event).
+TICK_INTERVAL_SEC = 15.0
 
 
 def _pythonw() -> str:

@@ -26,6 +26,11 @@ def setup_logging(verbose: bool):
     )
     if not verbose:
         logging.getLogger("faster_whisper").setLevel(logging.WARNING)
+        # A loopback WS server gets bare TCP probes (the tray's liveness check,
+        # port scanners); each logs a full "opening handshake failed" traceback.
+        # These are benign — a real client's failures surface client-side — so
+        # don't let them flood the log.
+        logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
 
 
 def main():

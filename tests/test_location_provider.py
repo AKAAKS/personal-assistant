@@ -4,7 +4,7 @@ The real GPS read (winsdk) and reverse-geocode (HTTP) are injected, so these
 tests use fakes and need neither Windows location nor the network.
 """
 
-from location_provider import Location, LocationProvider
+from location_provider import Location, LocationProvider, _format_osm_address
 
 
 def _provider(gps=None, geocode=None, home=None, raise_gps=False, raise_geo=False):
@@ -56,3 +56,45 @@ def test_refresh_survives_reverse_geocode_failure():
 
 def test_current_is_none_before_first_refresh():
     assert _provider(gps=(1.0, 2.0, 10.0)).current() is None
+
+
+# --- street-level reverse-geocode parsing (OpenStreetMap / Nominatim) ---
+
+def test_format_osm_address_full_street():
+    data = {"address": {
+        "house_number": "123", "road": "Main St",
+        "neighbourhood": "Downtown", "city": "State College", "state": "Pennsylvania",
+    }}
+    assert _format_osm_address(data) == "123 Main St, Downtown, State College"
+
+
+def test_format_osm_address_road_without_number():
+    data = {"address": {"road": "Main St", "town": "State College"}}
+    assert _format_osm_address(data) == "Main St, State College"
+
+
+def test_format_osm_address_falls_back_to_display_name():
+    data = {"address": {}, "display_name": "Ferguson Township, Centre County, PA"}
+    assert _format_osm_address(data) == "Ferguson Township"
+
+
+def test_format_osm_address_empty():
+    assert _format_osm_address({}) is None
+
+
+# --- explicit home from env ---
+
+def test_from_env_reads_home(monkeypatch):
+    monkeypatch.setenv("JARVIS_HOME_LAT", "40.80")
+    monkeypatch.setenv("JARVIS_HOME_LON", "-77.86")
+    monkeypatch.setenv("JARVIS_HOME_NAME", "123 Main St, State College")
+    p = LocationProvider.from_env()
+    assert p.home is not None
+    assert p.home.place == "123 Main St, State College"
+    assert p.home.source == "home"
+
+
+def test_from_env_without_home(monkeypatch):
+    monkeypatch.delenv("JARVIS_HOME_LAT", raising=False)
+    monkeypatch.delenv("JARVIS_HOME_LON", raising=False)
+    assert LocationProvider.from_env().home is None

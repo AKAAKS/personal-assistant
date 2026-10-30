@@ -246,6 +246,14 @@ class Assistant:
                         "instead of asking where they are."
                     ),
                 })
+            # Explicit, always-known home base (set via JARVIS_HOME_*), so "home"
+            # is right regardless of where the laptop currently is.
+            home = getattr(self.location_provider, "home", None)
+            if home is not None and home.place:
+                blocks.append({
+                    "type": "text",
+                    "text": f"The user's home base is {home.place}.",
+                })
         return blocks
 
     def _record_turn(self, role: str, text: str) -> None:

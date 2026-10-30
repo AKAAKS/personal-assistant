@@ -6,6 +6,27 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
+# Confidence gates: Whisper hallucinates words on noise / the tail of JARVIS's
+# own speech during the hands-free follow-up window. Drop any segment the model
+# isn't confident is speech, so noise -> "" (no reply) instead of invented text.
+NO_SPEECH_THRESHOLD = float(os.getenv("WHISPER_NO_SPEECH_THRESHOLD", "0.6"))
+LOGPROB_THRESHOLD = float(os.getenv("WHISPER_LOGPROB_THRESHOLD", "-1.0"))
+
+
+def _confident_text(segments, no_speech_threshold=NO_SPEECH_THRESHOLD,
+                    logprob_threshold=LOGPROB_THRESHOLD):
+    """Join only the segments Whisper is confident are real speech."""
+    kept = []
+    for seg in segments:
+        if getattr(seg, "no_speech_prob", 0.0) > no_speech_threshold:
+            continue
+        if getattr(seg, "avg_logprob", 0.0) < logprob_threshold:
+            continue
+        text = seg.text.strip()
+        if text:
+            kept.append(text)
+    return " ".join(kept).strip()
+
 
 def _load_nvidia_dlls():
     """Add pip-installed NVIDIA DLL directories to the DLL search path."""
@@ -50,5 +71,8 @@ class SpeechToText:
             language="en",
             beam_size=5,
             vad_filter=True,
+            # Don't let a hallucinated segment seed the next one into more invented
+            # text; each capture is a fresh, standalone utterance.
+            condition_on_previous_text=False,
         )
-        return " ".join(seg.text.strip() for seg in segments).strip()
+        return _confident_text(segments)

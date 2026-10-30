@@ -35,7 +35,7 @@ class LocationProvider:
         """
         self._read_gps = read_gps
         self._reverse_geocode = reverse_geocode or (lambda lat, lon: None)
-        self._home = home
+        self.home = home
         self._cached = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -55,8 +55,8 @@ class LocationProvider:
             except Exception:
                 place = None
             loc = Location(lat, lon, place, accuracy, "gps")
-        elif self._home is not None:
-            loc = self._home
+        elif self.home is not None:
+            loc = self.home
 
         with self._lock:
             self._cached = loc
@@ -114,7 +114,7 @@ def _read_windows_gps():
         if await Geolocator.request_access_async() != GeolocationAccessStatus.ALLOWED:
             return None
         geo = Geolocator()
-        geo.desired_accuracy = PositionAccuracy.DEFAULT
+        geo.desired_accuracy = PositionAccuracy.HIGH  # ask for the finest the device can do
         pos = await geo.get_geoposition_async()
         p = pos.coordinate.point.position
         return (p.latitude, p.longitude, pos.coordinate.accuracy)
@@ -122,15 +122,53 @@ def _read_windows_gps():
     return asyncio.run(_go())
 
 
+def _format_osm_address(data):
+    """Turn a Nominatim reverse-geocode response into a short place string:
+    '<house> <road>, <neighbourhood>, <city>'. None if nothing usable."""
+    addr = data.get("address") or {}
+    road = addr.get("road")
+    house = addr.get("house_number")
+    area = (addr.get("neighbourhood") or addr.get("suburb")
+            or addr.get("quarter") or addr.get("hamlet"))
+    city = (addr.get("city") or addr.get("town") or addr.get("village")
+            or addr.get("municipality") or addr.get("county"))
+    street = f"{house} {road}" if (road and house) else road
+    parts = [p for p in (street, area, city) if p]
+    if parts:
+        return ", ".join(parts)
+    display = data.get("display_name")
+    return display.split(",")[0].strip() if display else None
+
+
 def _reverse_geocode(lat, lon):
-    """Best-effort city name from coordinates (keyless, free). None on failure."""
+    """Street-level place name from coordinates via OpenStreetMap/Nominatim
+    (keyless, free). Falls back to a coarse city name. None on total failure."""
     import requests
 
-    r = requests.get(
-        "https://api.bigdatacloud.net/data/reverse-geocode-client",
-        params={"latitude": lat, "longitude": lon, "localityLanguage": "en"},
-        timeout=5,
-    )
-    r.raise_for_status()
-    d = r.json()
-    return d.get("city") or d.get("locality") or d.get("principalSubdivision") or None
+    try:
+        r = requests.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={"lat": lat, "lon": lon, "format": "jsonv2", "zoom": 18,
+                    "addressdetails": 1},
+            headers={"User-Agent": "jarvis-personal-assistant/1.0"},
+            timeout=6,
+        )
+        r.raise_for_status()
+        place = _format_osm_address(r.json())
+        if place:
+            return place
+    except Exception:
+        pass
+
+    # Fallback: coarse city/locality (BigDataCloud, keyless).
+    try:
+        r = requests.get(
+            "https://api.bigdatacloud.net/data/reverse-geocode-client",
+            params={"latitude": lat, "longitude": lon, "localityLanguage": "en"},
+            timeout=5,
+        )
+        r.raise_for_status()
+        d = r.json()
+        return d.get("city") or d.get("locality") or d.get("principalSubdivision") or None
+    except Exception:
+        return None
