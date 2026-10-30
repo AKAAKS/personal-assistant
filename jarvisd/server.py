@@ -50,6 +50,7 @@ class JarvisServer:
         assistant,
         stt=None,
         tts=None,
+        speaker_verifier=None,
         host="127.0.0.1",
         port=8765,
         notifier=None,
@@ -63,6 +64,9 @@ class JarvisServer:
         self.assistant = assistant
         self.stt = stt
         self.tts = tts
+        # Optional SpeakerVerifier; when set, utterances that aren't the enrolled
+        # voice are dropped before transcription (silently, like empty speech).
+        self.speaker_verifier = speaker_verifier
         self.host = host
         self.port = port
         self.notifier = notifier
@@ -263,6 +267,16 @@ class JarvisServer:
         import numpy as np
         audio = np.frombuffer(pcm, dtype=np.int16)
         log.info("Audio in: %.1fs (%d bytes)", len(audio) / 16000, len(pcm))
+        # Reject anyone but the enrolled speaker before spending STT on it. This
+        # also drops JARVIS's own TTS echoing back through a room speaker, which
+        # is what otherwise drives a hands-free feedback loop.
+        if self.speaker_verifier is not None:
+            if not await asyncio.to_thread(self.speaker_verifier.accepts, audio):
+                log.info("Utterance rejected — not the enrolled speaker")
+                await self._safe_send(
+                    ws, json.dumps({"type": "reply", "text": "", "heard": "", "audio_follows": False})
+                )
+                return
         heard = await asyncio.to_thread(self.stt.transcribe, audio)
         if not heard.strip():
             log.info("Transcription empty — no reply generated")

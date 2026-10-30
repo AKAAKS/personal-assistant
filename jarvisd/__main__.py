@@ -90,6 +90,12 @@ def run(args, log):
             voice_id=os.getenv("TTS_VOICE_ID") or None,
         )
         features.append(f"TTS ({tts_backend})")
+        from voice.speaker_verify import from_env as build_speaker_verifier
+        speaker_verifier = build_speaker_verifier()
+        if speaker_verifier is not None:
+            features.append("Voice ID")
+    else:
+        speaker_verifier = None
 
     # Proactivity (reminders/notifier/HA rule triggers) needs a working DB conn;
     # bootstrap builds reminder_store/rules_store on that same conn all-or-nothing,
@@ -99,7 +105,7 @@ def run(args, log):
         notifier = Notifier(conn, ha_client=ha, quiet_hours=os.getenv("QUIET_HOURS", "23:00-08:00"))
 
     server = JarvisServer(
-        ai, stt=stt, tts=tts,
+        ai, stt=stt, tts=tts, speaker_verifier=speaker_verifier,
         host=os.getenv("JARVIS_HOST", "127.0.0.1"),
         port=int(os.getenv("JARVIS_PORT", "8765")),
         notifier=notifier,

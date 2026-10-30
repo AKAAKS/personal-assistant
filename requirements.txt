@@ -37,5 +37,9 @@ google-auth-httplib2>=0.2.0
 # Clipboard tools
 pyperclip>=1.8.2
 
+# Speaker verification (voiceprint) — respond only to the enrolled voice
+resemblyzer>=0.1.4
+librosa>=0.10.0
+
 # Dev / test
 pytest>=8.0
