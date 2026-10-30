@@ -39,6 +39,7 @@ Capabilities:
 - Spotify: search, play on any device, control playback
 - Android TV: launch/navigate apps, type in search fields, remote control
 - PC control: launch/close apps, list processes, open URLs, system info
+- Weather: get_weather gives current conditions and today's forecast for the user's location (known automatically) or any place they name. Use it for weather — do NOT web-search weather.
 - Web search: current information from the web, with citations. Each search costs money — only search when the answer needs current information.
 - Habit suggestions: when the user asks about suggestions, use list_proposals; accept_proposal/dismiss_proposal act on them.
 
@@ -53,7 +54,7 @@ How you work:
 - Chain multiple actions when it makes sense (e.g. "movie night" = dim the lights and open Netflix).
 - Spotify: search for the URI first, then play. Target a specific device only if asked.
 - TV: launch the app first, then open its search, then type the query.
-- "Give me my briefing" = weather plus top headlines (web search), today's reminders (list_reminders), and today's meals (meal_summary), delivered as a short spoken rundown.
+- "Give me my briefing" = weather (get_weather) plus top headlines (web search), today's reminders (list_reminders), and today's meals (meal_summary), delivered as a short spoken rundown.
 """
 
 INTERRUPTION_NOTE = "(The user interrupted and cut off this reply before I finished.)"
@@ -127,6 +128,7 @@ class Assistant:
         meal_store=None,
         file_tools: bool = False,
         proposal_store=None,
+        location_provider=None,
     ):
         spotify = None
         if spotify_client is not None and getattr(spotify_client, "is_authenticated", lambda: True)():
@@ -142,6 +144,7 @@ class Assistant:
         self.ollama = OllamaBackend(model=ollama_model)
         self.profile_store = profile_store
         self.memory_store = memory_store
+        self.location_provider = location_provider
 
         self.tools, self._handlers = build_registry(
             ha_client,
@@ -156,6 +159,7 @@ class Assistant:
             file_tools=file_tools,
             file_summarizer=self._summarize if file_tools else None,
             proposal_store=proposal_store,
+            location_provider=location_provider,
         )
         if self.tools:
             self.tools[-1] = {**self.tools[-1], "cache_control": {"type": "ephemeral"}}
@@ -219,6 +223,22 @@ class Assistant:
                 "'tomorrow at 8am') into absolute times when setting reminders."
             ),
         })
+        # Current location (uncached, like the time block — it can change on a
+        # laptop). Lets the model answer weather / time-zone / "near me" questions
+        # without asking the user where they are.
+        if self.location_provider is not None:
+            loc = self.location_provider.current()
+            if loc is not None:
+                where = loc.place or f"{loc.latitude:.3f}, {loc.longitude:.3f}"
+                blocks.append({
+                    "type": "text",
+                    "text": (
+                        f"The user is currently in {where} "
+                        f"(latitude {loc.latitude:.4f}, longitude {loc.longitude:.4f}). "
+                        "Use this for weather, time zones, travel, and 'near me' questions "
+                        "instead of asking where they are."
+                    ),
+                })
         return blocks
 
     def _record_turn(self, role: str, text: str) -> None:
