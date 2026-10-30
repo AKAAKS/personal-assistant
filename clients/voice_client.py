@@ -89,8 +89,7 @@ class VoiceClient:
         if audio is None or len(audio) < 1600:
             log.info("No speech captured")
             print("  (no speech detected)\n")
-            self._failure_beep()
-            return None
+            return None  # the run loop beeps once when it re-arms the wake word
         log.info("Captured %.1fs of audio", len(audio) / 16000)
         return audio.tobytes()
 
@@ -186,7 +185,9 @@ class VoiceClient:
         return audio.tobytes()
 
     @staticmethod
-    def _failure_beep():
+    def _stopped_beep():
+        """The one and only beep: JARVIS has stopped listening and re-armed the
+        wake word. No beep means it heard you and is thinking (a reply follows)."""
         try:
             winsound.Beep(400, 250)
         except Exception:
@@ -249,17 +250,24 @@ class VoiceClient:
                 in_conversation = False  # True during a hands-free back-and-forth
                 misfires = 0             # consecutive non-productive follow-ups
                 pending_barge_in = False  # user interrupted; record their new turn next
+                active = False           # woken and engaged, vs waiting for wake word
 
                 def advance(productive: bool):
-                    """Apply the follow-up state transition; announce an ending."""
+                    """Apply the follow-up state transition."""
                     nonlocal in_conversation, misfires
-                    was = in_conversation
                     in_conversation, misfires = self._followup_next(
                         in_conversation=in_conversation, misfires=misfires,
                         productive=productive,
                     )
-                    if was and not in_conversation:
-                        print("  (conversation ended — say 'hey jarvis' to start again)\n")
+
+                def rearm():
+                    """Back to wake-word-gated idle: beep ONCE so the user knows
+                    JARVIS stopped listening (no beep = it's thinking)."""
+                    nonlocal active
+                    if active:
+                        print("  (stopped listening — say 'hey jarvis' to start again)\n")
+                        self._stopped_beep()
+                        active = False
 
                 try:
                     while True:
@@ -269,6 +277,8 @@ class VoiceClient:
                             pcm = await asyncio.to_thread(self._record_utterance)
                             if pcm is None:
                                 advance(productive=False)
+                                if not in_conversation:
+                                    rearm()
                                 continue
                         elif in_conversation:
                             print("  Listening for follow-up... (or stay quiet to end)")
@@ -276,24 +286,30 @@ class VoiceClient:
                             if pcm is None:
                                 misfires = MAX_FOLLOWUP_MISFIRES  # silent window ends it
                                 advance(productive=False)
+                                if not in_conversation:
+                                    rearm()
                                 continue
                         else:
                             pcm = await asyncio.to_thread(self._capture_utterance)
+                            active = True  # the wake word fired
                             if pcm is None:
+                                rearm()
                                 continue
                         await ws.send(pcm)
                         item = await receiver.get_reply(recv_task)
                         reply = item["data"]
                         if reply.get("type") == "error":
                             print(f"  [error] {reply.get('error')}\n")
-                            self._failure_beep()
                             misfires = MAX_FOLLOWUP_MISFIRES
                             advance(productive=False)
+                            if not in_conversation:
+                                rearm()
                             continue
                         if not reply.get("heard") and not reply.get("text"):
                             print("  (didn't catch that)\n")
-                            self._failure_beep()
                             advance(productive=False)
+                            if not in_conversation:
+                                rearm()
                             continue
                         if reply.get("heard"):
                             print(f"  You: {reply['heard']}")
