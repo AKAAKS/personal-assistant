@@ -184,14 +184,20 @@ class VoiceClient:
         log.info("Captured %.1fs follow-up", len(audio) / 16000)
         return audio.tobytes()
 
+    _STOPPED_SOUND = os.path.join(os.path.dirname(__file__), "sounds", "stopped_listening.wav")
+
     @staticmethod
     def _stopped_beep():
-        """The one and only beep: JARVIS has stopped listening and re-armed the
-        wake word. No beep means it heard you and is thinking (a reply follows)."""
+        """The one and only cue: JARVIS has stopped listening and re-armed the
+        wake word. No cue means it heard you and is thinking (a reply follows).
+        A soft mallet note; falls back to a plain beep if the clip is missing."""
         try:
-            winsound.Beep(400, 250)
+            winsound.PlaySound(VoiceClient._STOPPED_SOUND, winsound.SND_FILENAME)
         except Exception:
-            pass
+            try:
+                winsound.Beep(400, 250)
+            except Exception:
+                pass
 
     @staticmethod
     def _wav_duration(wav: bytes) -> float:
