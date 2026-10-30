@@ -1,0 +1,16 @@
+{
+  "code": "0000000000000",
+  "status": 1,
+  "status_verbose": "product found",
+  "product": {
+    "code": "0000000000000",
+    "product_name": "Sample Kilojoule Snack",
+    "nutriments": {
+      "energy-kj_100g": 1000,
+      "energy_unit": "kJ",
+      "proteins_100g": 5,
+      "carbohydrates_100g": 40,
+      "fat_100g": 2
+    }
+  }
+}

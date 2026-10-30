@@ -1,0 +1,14 @@
+{
+  "code": "111111111111",
+  "status": 1,
+  "status_verbose": "product found",
+  "product": {
+    "code": "111111111111",
+    "product_name": "Sample Product Without Energy Data",
+    "nutriments": {
+      "proteins_100g": 3,
+      "carbohydrates_100g": 10,
+      "fat_100g": 1
+    }
+  }
+}
