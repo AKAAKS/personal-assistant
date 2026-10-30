@@ -18,6 +18,17 @@ class TestAssessDay:
         # 4*120 + 4*0 + 9*0 = 480 kcal minimum, only 300 left -> impossible
         assert assess_day(Macros(300, 120, 0, 0)).status == "cornered"
 
-    def test_boundary_ok_just_above_min_kcal(self):
-        # min = 480; 480 + tolerance margin -> ok
-        assert assess_day(Macros(520, 120, 0, 0)).status == "ok"
+    def test_cornered_boundary_exact_is_ok(self):
+        # floor = 4*120 = 480; 430 + 50 == 480, not < 480 -> ok
+        assert assess_day(Macros(430, 120, 0, 0)).status == "ok"
+
+    def test_cornered_just_below_boundary(self):
+        # 429 + 50 == 479 < 480 -> cornered
+        assert assess_day(Macros(429, 120, 0, 0)).status == "cornered"
+
+    def test_exactly_minus_tolerance_is_not_over(self):
+        # kcal check is strict: -50 is not < -50
+        assert assess_day(Macros(-50, 10, 10, 5)).status != "over"
+
+    def test_just_past_minus_tolerance_is_over(self):
+        assert assess_day(Macros(-51, 10, 10, 5)).status == "over"
