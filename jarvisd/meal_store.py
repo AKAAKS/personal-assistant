@@ -3,7 +3,7 @@
 import csv
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 _VALID_FORMATS = {"csv", "json"}
@@ -86,6 +86,37 @@ class MealStore:
             bool: True if at least one meal was logged that day.
         """
         return len(self.today_summary(now=now)["meals"]) > 0
+
+    def set_targets(self, calories: int, protein_g: float, carbs_g: float, fat_g: float) -> None:
+        """Set (or replace) the user's daily nutrition targets. Single row."""
+        self._conn.execute(
+            "INSERT INTO nutrition_targets (id, calories, protein_g, carbs_g, fat_g) "
+            "VALUES (1, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET calories=excluded.calories, "
+            "protein_g=excluded.protein_g, carbs_g=excluded.carbs_g, fat_g=excluded.fat_g",
+            (calories, protein_g, carbs_g, fat_g),
+        )
+        self._conn.commit()
+
+    def get_targets(self) -> dict | None:
+        """Return the daily nutrition targets dict, or None if unset."""
+        row = self._conn.execute(
+            "SELECT calories, protein_g, carbs_g, fat_g FROM nutrition_targets WHERE id = 1"
+        ).fetchone()
+        return dict(row) if row else None
+
+    def range_summary(self, days: int = 7, now: datetime | None = None) -> list[dict]:
+        """Per-day totals over the last `days` days (most recent last). Days with
+        no meals are omitted."""
+        end = (now or datetime.now()).date()
+        start = end - timedelta(days=days - 1)
+        rows = self._conn.execute(
+            "SELECT substr(ts, 1, 10) AS day, COUNT(*) AS meals, SUM(calories) AS calories, "
+            "SUM(protein_g) AS protein_g, SUM(carbs_g) AS carbs_g, SUM(fat_g) AS fat_g "
+            "FROM meals WHERE substr(ts, 1, 10) >= ? GROUP BY day ORDER BY day",
+            (start.isoformat(),),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def export(self, fmt: str, out_dir: str = "data/exports") -> str:
         """Export all logged meals to a CSV or JSON file.

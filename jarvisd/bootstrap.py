@@ -76,6 +76,18 @@ def create_assistant():
             print(f"Android TV failed: {e}")
             tv = None
 
+    google = None
+    google_creds = os.getenv("GOOGLE_CREDENTIALS_FILE")
+    if google_creds:
+        from google_client import GoogleClient
+        google = GoogleClient(google_creds)
+        try:
+            google.ensure_authorized()
+            print("Google connected (Gmail + Calendar)!")
+        except Exception as e:
+            print(f"Google auth failed: {e}")
+            google = None
+
     budget = float(os.getenv("MONTHLY_BUDGET", "20"))
     ollama_model = os.getenv("OLLAMA_MODEL", "qwen2.5:3b-instruct-q4_K_M")
 
@@ -122,6 +134,7 @@ def create_assistant():
         meal_store=meal_store,
         file_tools=True,
         proposal_store=proposal_store,
+        google_client=google,
     )
 
     features = ["Home Assistant", "PC Control"]
@@ -129,6 +142,9 @@ def create_assistant():
         features.append("Spotify")
     if tv:
         features.append("Android TV")
+    if google:
+        features.append("Gmail")
+        features.append("Calendar")
     if memory_store and profile_store:
         features.append("Memory")
     if reminder_store and rules_store:

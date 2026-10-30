@@ -38,9 +38,14 @@ Capabilities:
 - Smart home (Home Assistant): lights, switches, climate, sensors, notifications
 - Spotify: search, play on any device, control playback
 - Android TV: launch/navigate apps, type in search fields, remote control
-- PC control: launch/close apps, list processes, open URLs, system info
+- PC control: launch/close apps, list processes, open URLs, system info. Open a terminal the user drives (open_terminal — e.g. "run Claude in a terminal"), or run a one-off command and read back its output (run_command, needs confirmation). Restart/shut down the PC (system_power) — but FIRST call scan_unsaved_work and warn the user about any open apps that may have unsaved work, then confirm before doing it. "cancel the shutdown" uses system_power with action cancel.
+- Gmail: search and read mail, and compose drafts. You CANNOT send — you only create drafts the user sends themselves, so say so ("I've drafted it; send it when you're ready").
+- Google Calendar: list upcoming events, check a specific day, create events, delete events (deleting asks for confirmation).
 - Web search: current information from the web, with citations. Each search costs money — only search when the answer needs current information.
 - Habit suggestions: when the user asks about suggestions, use list_proposals; accept_proposal/dismiss_proposal act on them.
+- Reminders and timers: set and cancel reminders, and set quick countdown timers (set_timer — e.g. "a 10-minute timer").
+- Meals and nutrition: log meals, summarize the day, set daily calorie/macro targets (set_nutrition_targets — meal_summary then shows progress), and show multi-day trends (meal_trends).
+- Clipboard: read what the user just copied (get_clipboard) or copy text to their clipboard for pasting (set_clipboard).
 
 Security policy (strictly enforced):
 - NO access to bank accounts, cards, financial services, or sensitive IDs
@@ -127,6 +132,7 @@ class Assistant:
         meal_store=None,
         file_tools: bool = False,
         proposal_store=None,
+        google_client=None,
     ):
         spotify = None
         if spotify_client is not None and getattr(spotify_client, "is_authenticated", lambda: True)():
@@ -156,6 +162,7 @@ class Assistant:
             file_tools=file_tools,
             file_summarizer=self._summarize if file_tools else None,
             proposal_store=proposal_store,
+            google_client=google_client,
         )
         if self.tools:
             self.tools[-1] = {**self.tools[-1], "cache_control": {"type": "ephemeral"}}

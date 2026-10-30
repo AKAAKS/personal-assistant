@@ -80,6 +80,9 @@ otherwise it falls back to a Home Assistant phone push, and if that also fails (
 HA is down) it's queued and delivered as "While you were away: ..." the next time
 you chat.
 
+**Timers** — "set a 10-minute timer", "set a 5-minute timer for the tea". A timer is
+just a one-off reminder under the hood, so it fires the same way.
+
 **Trigger rules** — ask JARVIS to create an automation from an HA event. Two kinds:
 
 - *Direct* (runs a tool call immediately, no AI involved, $0 cost):
@@ -139,6 +142,51 @@ first; say "yes, run it" and JARVIS retries the same call to actually run it. A
 trigger rule (HA automation) can never get past this confirmation on its own — running
 scripts autonomously, without a person present to confirm, is not allowed.
 
+## Terminal & PC power
+
+Beyond launching apps, JARVIS can work with the terminal and power state:
+
+- **open_terminal** — open a visible terminal window you then drive yourself,
+  optionally running a command: "run Claude in a terminal", "open a terminal in my
+  project and start the dev server".
+- **run_command** — run a one-off command and read the output back: "what's my IP?",
+  "git status in my project". Destructive-tier, so it asks for confirmation first.
+- **system_power** — "restart my PC" / "shut down" / "cancel the shutdown". JARVIS
+  first scans open apps for likely unsaved work (**scan_unsaved_work**), warns you,
+  and on confirmation issues the shutdown **without force** so each app shows its own
+  save prompt (Windows' native, reliable path — no blind auto-saving).
+
+Safety: both `open_terminal` and `run_command` run every command through a
+denylist sanitizer (`security/command_sanitizer.py`) that blocks disk format/wipe,
+recursive mass-delete, registry deletion, download-and-execute cradles, and raw
+shutdown; `run_command`/`system_power` additionally require confirmation. Set
+`JARVIS_ALLOW_SHELL=0` to disable the terminal/command surface entirely.
+
+## Clipboard
+
+JARVIS can read and write your PC clipboard (via `pyperclip`):
+
+- "Summarize what I just copied" / "translate this" — reads the clipboard
+  (**get_clipboard**).
+- "Copy that command to my clipboard" — puts text on the clipboard so you can
+  paste it anywhere with Ctrl+V (**set_clipboard**).
+
+## Gmail & Calendar
+
+Optional Google integration (set `GOOGLE_CREDENTIALS_FILE`; see `.env.example` for
+the one-time OAuth setup). JARVIS can:
+
+- Search and read your mail — "any unread email from my landlord?", "read me the
+  last message from Alice".
+- **Draft** replies and new emails — "draft a reply saying noon works". JARVIS
+  **never sends**; it only creates a Gmail draft you review and send yourself
+  (the OAuth scope has no send permission).
+- Manage your calendar — "what's on today?", "add lunch with Sam tomorrow at
+  noon", "delete the 3pm" (deleting asks for confirmation).
+
+Scopes are deliberately minimal: `gmail.readonly` + `gmail.compose` (drafts only)
+and `calendar`. The token is cached locally at `data/google_token.json`.
+
 ## Meal tracking
 
 Log meals by voice or text and JARVIS estimates macros for trend tracking:
@@ -146,6 +194,10 @@ Log meals by voice or text and JARVIS estimates macros for trend tracking:
 - "Log a meal: two eggs and toast with butter" — logs with estimated calories/
   protein/carbs/fat, a stated confidence, and any portion assumptions made.
 - "How am I doing today?" — today's totals across everything logged.
+- "Set my daily targets to 2200 calories, 150g protein, 200g carbs, 70g fat" —
+  once set, the day's summary shows progress toward them (e.g. "1500/2200 kcal, 68%").
+- "What are my nutrition trends this week?" — per-day calories/macros over the last
+  N days (default 7) plus a daily average.
 - "Export my meal log" — writes a CSV or JSON file to `data/exports/`.
 
 Important: these are **LLM estimates, not a food database lookup**. JARVIS states

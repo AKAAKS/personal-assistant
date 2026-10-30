@@ -36,10 +36,16 @@ TOOL_PERMISSIONS = {
     "list_processes": "read_only",
     "open_url_browser": "write",
     "system_info": "read_only",
+    # PC terminal control (Tier A/B) + power
+    "open_terminal": "write",
+    "run_command": "destructive",
+    "scan_unsaved_work": "read_only",
+    "system_power": "destructive",
     # Memory
     "remember": "write",
     "recall": "read_only",
     # Proactivity
+    "set_timer": "write",
     "set_reminder": "write",
     "list_reminders": "read_only",
     "cancel_reminder": "write",
@@ -50,6 +56,8 @@ TOOL_PERMISSIONS = {
     "log_meal": "write",
     "meal_summary": "read_only",
     "export_meals": "write",
+    "set_nutrition_targets": "write",
+    "meal_trends": "read_only",
     # Files
     "search_files": "read_only",
     "read_document": "read_only",
@@ -58,6 +66,18 @@ TOOL_PERMISSIONS = {
     "list_proposals": "read_only",
     "accept_proposal": "write",
     "dismiss_proposal": "write",
+    # Gmail (read + draft only; no send capability exists)
+    "gmail_search": "read_only",
+    "gmail_read": "read_only",
+    "gmail_draft": "write",
+    # Google Calendar
+    "calendar_list_events": "read_only",
+    "calendar_get_day": "read_only",
+    "calendar_create_event": "write",
+    "calendar_delete_event": "destructive",
+    # Clipboard
+    "get_clipboard": "read_only",
+    "set_clipboard": "write",
 }
 
 DEFAULT_PERMISSION = "write"
