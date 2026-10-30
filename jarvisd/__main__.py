@@ -5,7 +5,13 @@ import asyncio
 import logging
 import os
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+# Keep jarvisd.log self-capping: ~2 MB per file, 3 old copies kept (.1/.2/.3),
+# so the daemon's log can never grow past ~8 MB however long it runs.
+LOG_MAX_BYTES = 2_000_000
+LOG_BACKUPS = 3
 
 from jarvisd.bootstrap import create_assistant
 from jarvisd.ha_events import HAEventListener
@@ -13,21 +19,50 @@ from jarvisd.notifier import Notifier
 from jarvisd.server import JarvisServer
 
 
+class _StreamToLogger:
+    """File-like object that forwards writes to a logger, line by line.
+
+    Used to capture print() under pythonw, where sys.stdout/stderr are None.
+    Routing through logging (rather than a second raw handle on jarvisd.log)
+    keeps the rotating file handler the sole writer of that file, so its
+    rollover rename can't hit a Windows sharing violation."""
+
+    def __init__(self, logger, level):
+        self._logger = logger
+        self._level = level
+        self._buf = ""
+
+    def write(self, msg):
+        self._buf += msg
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            if line.strip():
+                self._logger.log(self._level, line)
+
+    def flush(self):
+        if self._buf.strip():
+            self._logger.log(self._level, self._buf.strip())
+        self._buf = ""
+
+
 def _ensure_std_streams():
     """Under pythonw (the tray launches the daemon windowless) there is no
     console, so sys.stdout/stderr are None and the first print() in startup
-    would crash the daemon before it binds the port. Point them at the log file
-    so prints are captured instead of fatal."""
-    Path("logs").mkdir(exist_ok=True)
-    for name in ("stdout", "stderr"):
+    would crash the daemon before it binds the port. Route them through the
+    logging system (so prints land in the rotating log) instead of crashing.
+    Must run AFTER setup_logging so the logger already has its handlers."""
+    printer = logging.getLogger("jarvisd.print")
+    for name, level in (("stdout", logging.INFO), ("stderr", logging.ERROR)):
         if getattr(sys, name, None) is None:
-            setattr(sys, name, open("logs/jarvisd.log", "a", encoding="utf-8",
-                                    buffering=1))
+            setattr(sys, name, _StreamToLogger(printer, level))
 
 
 def setup_logging(verbose: bool):
     Path("logs").mkdir(exist_ok=True)
-    handlers = [logging.FileHandler("logs/jarvisd.log", encoding="utf-8")]
+    handlers = [RotatingFileHandler(
+        "logs/jarvisd.log", maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUPS,
+        encoding="utf-8",
+    )]
     if sys.stderr is not None:  # no console under pythonw
         handlers.append(logging.StreamHandler())
     logging.basicConfig(
