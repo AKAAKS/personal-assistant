@@ -189,15 +189,36 @@ instruction or correction.
 
 ## Always-on
 
+### Tray launcher (recommended — no terminal)
+
+    scripts\install_tray.bat          # start JARVIS automatically at logon
+    scripts\uninstall_tray.bat        # remove it from startup
+
+`install_tray.bat` drops a shortcut in your Startup folder that launches a small
+**system-tray app** (`clients/tray_app.py`) via `pythonw` — no console window, ever.
+At logon it brings up the brain if it isn't already running, starts the voice client,
+and keeps it alive. A JARVIS icon appears near the clock; right-click it for:
+
+- **Pause listening** — stops the voice client, releasing the mic and freeing the
+  Whisper model from your GPU. The brain keeps running (reminders/HA rules still fire).
+- **Resume listening**, **Restart**, **Open logs**, and **Quit**.
+
+So day to day there's nothing to launch: sign in and say "hey jarvis". Installing the
+tray also removes the older daemon-only logon task (below) so only one brain owns the
+port. To start it immediately without logging out, run the `start ... pythonw ...` line
+the installer prints.
+
+### Daemon-only logon task (no tray)
+
     scripts\install_autostart.bat     # registers a logon task (does NOT start it)
     scripts\start_jarvisd.bat         # start it now; logs -> logs/jarvisd.log
     scripts\stop_jarvisd.bat          # stop it (ends the task AND frees the port)
     scripts\uninstall_autostart.bat
 
-Only one daemon can hold the port: if `python -m jarvisd` reports "Cannot
-bind", the scheduled task's instance is already running — stop it first.
-Spotify auth opens a browser once; after that the refresh token is cached
-in `data/spotify_tokens.json` and startup is silent.
+This starts only the brain (you still launch a client yourself). Only one daemon can
+hold the port: if `python -m jarvisd` reports "Cannot bind", another instance (the task
+or the tray) is already running — stop it first. Spotify auth opens a browser once;
+after that the refresh token is cached in `data/spotify_tokens.json` and startup is silent.
 
 ## Tests
 
