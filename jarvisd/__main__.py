@@ -13,6 +13,18 @@ from jarvisd.notifier import Notifier
 from jarvisd.server import JarvisServer
 
 
+def _ensure_std_streams():
+    """Under pythonw (the tray launches the daemon windowless) there is no
+    console, so sys.stdout/stderr are None and the first print() in startup
+    would crash the daemon before it binds the port. Point them at the log file
+    so prints are captured instead of fatal."""
+    Path("logs").mkdir(exist_ok=True)
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name, None) is None:
+            setattr(sys, name, open("logs/jarvisd.log", "a", encoding="utf-8",
+                                    buffering=1))
+
+
 def setup_logging(verbose: bool):
     Path("logs").mkdir(exist_ok=True)
     handlers = [logging.FileHandler("logs/jarvisd.log", encoding="utf-8")]
@@ -38,7 +50,8 @@ def main():
     parser.add_argument("--no-speech", action="store_true", help="skip loading STT/TTS models")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
-    setup_logging(args.verbose)
+    setup_logging(args.verbose)  # must run while stderr is still None (no console)
+    _ensure_std_streams()        # then make print() safe under pythonw
     log = logging.getLogger("jarvisd")
 
     try:
