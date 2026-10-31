@@ -47,3 +47,38 @@ class TestOpenFoodFactsAdapter:
 
     def test_product_without_energy_returns_none(self, off_no_energy_payload):
         assert OpenFoodFactsAdapter(FakeTransport(off_no_energy_payload)).get_by_barcode("x") is None
+
+
+def _product(code, nutriments):
+    return {"code": code, "product_name": f"p{code}", "nutriments": nutriments}
+
+
+class TestOpenFoodFactsHardening:
+    @pytest.mark.parametrize("bad", ["nan", "inf", "-inf", float("nan"), float("inf")])
+    def test_non_finite_energy_treated_as_missing(self, bad):
+        payload = {"status": 1, "product": _product("1", {"energy-kcal_100g": bad})}
+        assert OpenFoodFactsAdapter(FakeTransport(payload)).get_by_barcode("1") is None
+
+    @pytest.mark.parametrize("bad", ["nan", "inf", float("nan")])
+    def test_non_finite_macro_defaults_to_zero(self, bad):
+        import math
+        payload = {"status": 1, "product": _product("2", {
+            "energy-kcal_100g": 100, "proteins_100g": bad, "fat_100g": bad, "carbohydrates_100g": bad})}
+        item = OpenFoodFactsAdapter(FakeTransport(payload)).get_by_barcode("2")
+        m = item.per100g
+        assert all(math.isfinite(v) for v in (m.kcal, m.protein_g, m.carbs_g, m.fat_g))
+        assert m.protein_g == 0.0 and m.fat_g == 0.0 and m.carbs_g == 0.0
+
+    def test_search_keeps_only_valid_and_respects_limit(self):
+        payload = {"products": [
+            _product("a", {"energy-kcal_100g": 100}),
+            _product("b", {}),
+            _product("c", {"energy-kcal_100g": 200}),
+        ]}
+        adapter = OpenFoodFactsAdapter(FakeTransport(payload))
+        items = adapter.search("x", limit=5)
+        assert [i.external_id for i in items] == ["a", "c"]
+        assert [i.external_id for i in adapter.search("x", limit=1)] == ["a"]
+
+    def test_barcode_not_found_status_zero_returns_none(self):
+        assert OpenFoodFactsAdapter(FakeTransport({"status": 0})).get_by_barcode("9") is None

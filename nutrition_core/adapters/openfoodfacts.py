@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from nutrition_core.adapters.base import Transport, macros_from_fields
 from nutrition_core.models import Confidence, FoodItem, FoodSource
 
@@ -84,6 +86,7 @@ def _number(value) -> float | None:
     if value is None or value == "":
         return None
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return None
+    return number if math.isfinite(number) else None
