@@ -1,0 +1,17 @@
+{
+  "code": "737628064502",
+  "status": 1,
+  "status_verbose": "product found",
+  "product": {
+    "code": "737628064502",
+    "product_name": "Sample Protein Bar",
+    "nutriments": {
+      "energy-kcal_100g": 250,
+      "energy-kj_100g": 1046,
+      "energy_unit": "kcal",
+      "proteins_100g": 12,
+      "carbohydrates_100g": 30,
+      "fat_100g": 9
+    }
+  }
+}

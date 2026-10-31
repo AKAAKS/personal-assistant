@@ -1,0 +1,39 @@
+{
+  "totalHits": 3,
+  "currentPage": 1,
+  "totalPages": 1,
+  "foods": [
+    {
+      "fdcId": 171477,
+      "description": "Chicken, broilers or fryers, breast, meat only, raw",
+      "dataType": "SR Legacy",
+      "foodNutrients": [
+        {"nutrientId": 1008, "nutrientName": "Energy", "unitName": "KCAL", "value": 165.0},
+        {"nutrientId": 1003, "nutrientName": "Protein", "unitName": "G", "value": 31.0},
+        {"nutrientId": 1005, "nutrientName": "Carbohydrate, by difference", "unitName": "G", "value": 0.0},
+        {"nutrientId": 1004, "nutrientName": "Total lipid (fat)", "unitName": "G", "value": 3.6}
+      ]
+    },
+    {
+      "fdcId": 171478,
+      "description": "Chicken, broilers or fryers, breast, skinless, boneless, meat only, cooked, roasted",
+      "dataType": "SR Legacy",
+      "foodNutrients": [
+        {"nutrientId": 1008, "nutrientName": "Energy", "unitName": "KCAL", "value": 173.0},
+        {"nutrientId": 1003, "nutrientName": "Protein", "unitName": "G", "value": 31.9},
+        {"nutrientId": 1005, "nutrientName": "Carbohydrate, by difference", "unitName": "G", "value": 0.0},
+        {"nutrientId": 1004, "nutrientName": "Total lipid (fat)", "unitName": "G", "value": 3.9}
+      ]
+    },
+    {
+      "fdcId": "NO_ENERGY_FDCID",
+      "description": "Chicken, no energy entry (test fixture)",
+      "dataType": "Branded",
+      "foodNutrients": [
+        {"nutrientId": 1003, "nutrientName": "Protein", "unitName": "G", "value": 20.0},
+        {"nutrientId": 1005, "nutrientName": "Carbohydrate, by difference", "unitName": "G", "value": 1.0},
+        {"nutrientId": 1004, "nutrientName": "Total lipid (fat)", "unitName": "G", "value": 5.0}
+      ]
+    }
+  ]
+}
