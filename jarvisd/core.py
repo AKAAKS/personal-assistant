@@ -135,6 +135,7 @@ class Assistant:
         proposal_store=None,
         google_client=None,
         location_provider=None,
+        food_service=None,
     ):
         spotify = None
         if spotify_client is not None and getattr(spotify_client, "is_authenticated", lambda: True)():
@@ -167,6 +168,7 @@ class Assistant:
             proposal_store=proposal_store,
             google_client=google_client,
             location_provider=location_provider,
+            food_service=food_service,
         )
         if self.tools:
             self.tools[-1] = {**self.tools[-1], "cache_control": {"type": "ephemeral"}}
