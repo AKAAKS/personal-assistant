@@ -55,3 +55,18 @@ class TestFoodService:
     def test_limit_truncates_combined(self):
         svc = FoodService(self.conn, usda=Fake([U]), off=Fake([O]))
         assert svc.lookup("rice", limit=1) == [U]
+
+    def test_cache_failure_still_returns_results(self, monkeypatch):
+        def boom(conn, item):
+            raise RuntimeError("db locked")
+
+        monkeypatch.setattr("nutrition_core.food_service.cache_food", boom)
+        svc = FoodService(self.conn, usda=Fake([U]), off=Fake([O]))
+        assert svc.lookup("rice") == [U, O]
+
+    def test_single_configured_adapter_raises(self):
+        with pytest.raises(FoodLookupError):
+            FoodService(self.conn, usda=Fake(exc=RuntimeError("x"))).lookup("rice")
+
+    def test_zero_adapters_returns_empty(self):
+        assert FoodService(self.conn).lookup("x") == []
