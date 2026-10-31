@@ -39,11 +39,11 @@ def test_migration_v4_adds_reminders_condition_column(tmp_path):
     conn.close()
 
 
-def test_migration_reaches_v6():
+def test_migration_reaches_current_version():
     conn = db.connect(":memory:")
     row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
-    assert row["v"] == 6
-    assert db.SCHEMA_VERSION == 6
+    assert row["v"] == db.SCHEMA_VERSION
+    assert db.SCHEMA_VERSION == 7
     conn.close()
 
 

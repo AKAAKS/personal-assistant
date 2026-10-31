@@ -1,8 +1,22 @@
 """Nutrition targets + trends: MealStore methods and the meals tools."""
 
+import pytest
+
 from jarvisd import db
 from jarvisd.meal_store import MealStore
 from jarvisd.tools.meals import handlers
+
+
+@pytest.fixture
+def conn():
+    c = db.connect(":memory:")
+    yield c
+    c.close()
+
+
+@pytest.fixture
+def store(conn):
+    return MealStore(conn)
 
 
 def _store():
@@ -59,3 +73,17 @@ def test_meal_trends_aggregates_recent_days():
 def test_meal_trends_empty():
     out = handlers(_store())["meal_trends"]({})
     assert "no" in out.lower()
+
+
+class TestMealStoreTargetsOnGoals:
+    def test_set_get_targets_roundtrip_via_goals(self, store, conn):
+        store.set_targets(2000, 150, 200, 60)
+        assert store.get_targets() == {"calories": 2000, "protein_g": 150.0, "carbs_g": 200.0, "fat_g": 60.0}
+        # backed by the goals table now
+        assert conn.execute("SELECT COUNT(*) c FROM goals WHERE active=1").fetchone()["c"] == 1
+
+    def test_updating_targets_keeps_single_active(self, store, conn):
+        store.set_targets(2000, 150, 200, 60)
+        store.set_targets(1800, 160, 150, 55)
+        assert store.get_targets()["calories"] == 1800
+        assert conn.execute("SELECT COUNT(*) c FROM goals WHERE active=1").fetchone()["c"] == 1

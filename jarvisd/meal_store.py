@@ -6,6 +6,9 @@ import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from nutrition_core.models import Macros
+from nutrition_core.store import goals
+
 _VALID_FORMATS = {"csv", "json"}
 _EXPORT_COLUMNS = [
     "date", "description", "quantity", "calories",
@@ -88,22 +91,20 @@ class MealStore:
         return len(self.today_summary(now=now)["meals"]) > 0
 
     def set_targets(self, calories: int, protein_g: float, carbs_g: float, fat_g: float) -> None:
-        """Set (or replace) the user's daily nutrition targets. Single row."""
-        self._conn.execute(
-            "INSERT INTO nutrition_targets (id, calories, protein_g, carbs_g, fat_g) "
-            "VALUES (1, ?, ?, ?, ?) "
-            "ON CONFLICT(id) DO UPDATE SET calories=excluded.calories, "
-            "protein_g=excluded.protein_g, carbs_g=excluded.carbs_g, fat_g=excluded.fat_g",
-            (calories, protein_g, carbs_g, fat_g),
-        )
-        self._conn.commit()
+        """Set (or replace) the user's daily nutrition targets (stored as the active goal)."""
+        goals.set_goals(self._conn, Macros(calories, protein_g, carbs_g, fat_g))
 
     def get_targets(self) -> dict | None:
         """Return the daily nutrition targets dict, or None if unset."""
-        row = self._conn.execute(
-            "SELECT calories, protein_g, carbs_g, fat_g FROM nutrition_targets WHERE id = 1"
-        ).fetchone()
-        return dict(row) if row else None
+        g = goals.active_goals(self._conn)
+        if g is None:
+            return None
+        return {
+            "calories": int(g.kcal),
+            "protein_g": g.protein_g,
+            "carbs_g": g.carbs_g,
+            "fat_g": g.fat_g,
+        }
 
     def range_summary(self, days: int = 7, now: datetime | None = None) -> list[dict]:
         """Per-day totals over the last `days` days (most recent last). Days with

@@ -3,7 +3,9 @@
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 6
+from nutrition_core.store.schema import NEW_TABLES_SQL, SEED_GOALS_FROM_TARGETS_SQL
+
+SCHEMA_VERSION = 7
 
 # version -> SQL script. Later phases append entries and bump SCHEMA_VERSION.
 MIGRATIONS = {
@@ -87,6 +89,8 @@ MIGRATIONS = {
           fat_g REAL NOT NULL
         );
     """,
+    # nutrition persistence: DDL is owned by nutrition_core, imported here.
+    7: NEW_TABLES_SQL + SEED_GOALS_FROM_TARGETS_SQL,
 }
 
 
