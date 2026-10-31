@@ -69,6 +69,29 @@ class TestMalformedPayloads:
         assert len(_search({"foods": [food]})) == 1
 
 
+class TestNumericExtremes:
+    def test_huge_int_value_overflow_dropped(self):
+        food = {"fdcId": 1, "description": "x",
+                "foodNutrients": [{"nutrientId": 1008, "value": 10**400}]}
+        assert _search({"foods": [food]}) == []
+
+    def test_huge_int_value_on_other_nutrient_skipped(self):
+        food = _good_food()
+        food["foodNutrients"].insert(0, {"nutrientId": 1005, "value": 10**400})
+        assert len(_search({"foods": [food]})) == 1
+
+    def test_infinite_nutrient_id_skipped(self):
+        food = _good_food()
+        food["foodNutrients"].insert(0, {"nutrientId": float("inf"), "value": 5})
+        assert len(_search({"foods": [food]})) == 1
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_energy_value_drops_food(self, bad):
+        food = {"fdcId": 1, "description": "x",
+                "foodNutrients": [{"nutrientId": 1008, "value": bad}]}
+        assert _search({"foods": [food]}) == []
+
+
 class TestValidPayload:
     def test_valid_payload_still_parsed(self):
         items = _search({"foods": [_good_food(42, "Chicken breast")]})

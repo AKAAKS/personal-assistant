@@ -71,7 +71,7 @@ def _nutrient_values(nutrients: object) -> dict[int, float]:
         try:
             key = int(number)
             amount = float(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
         if not math.isfinite(amount):
             continue
