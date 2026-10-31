@@ -73,6 +73,14 @@ class FoodItem:
 
 
 @dataclass(frozen=True)
+class MealIngredient:
+    name: str
+    grams: float
+    per100g: Macros
+    source: FoodSource
+
+
+@dataclass(frozen=True)
 class ComputedIngredient:
     name: str
     grams: float
