@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from nutrition_core.adapters.base import Transport, macros_from_fields
 from nutrition_core.models import Confidence, FoodItem, FoodSource
 
@@ -24,9 +26,16 @@ class USDAAdapter:
             SEARCH_URL,
             {"query": query, "pageSize": limit, "api_key": self._api_key},
         )
+        if not isinstance(payload, dict):
+            payload = {}
+        foods = payload.get("foods")
+        if not isinstance(foods, list):
+            foods = []
         items: list[FoodItem] = []
-        for food in payload.get("foods", []):
-            nutrients = _nutrient_values(food.get("foodNutrients", []))
+        for food in foods:
+            if not isinstance(food, dict):
+                continue
+            nutrients = _nutrient_values(food.get("foodNutrients"))
             macros = macros_from_fields(
                 nutrients.get(NUTRIENT_KCAL),
                 nutrients.get(NUTRIENT_PROTEIN),
@@ -35,9 +44,10 @@ class USDAAdapter:
             )
             if macros is None:
                 continue
+            description = food.get("description")
             items.append(
                 FoodItem(
-                    name=food.get("description", ""),
+                    name=description if isinstance(description, str) else "",
                     per100g=macros,
                     source=FoodSource.USDA,
                     external_id=str(food.get("fdcId")),
@@ -47,11 +57,23 @@ class USDAAdapter:
         return items[:limit]
 
 
-def _nutrient_values(nutrients: list[dict]) -> dict[int, float]:
+def _nutrient_values(nutrients: object) -> dict[int, float]:
     values: dict[int, float] = {}
+    if not isinstance(nutrients, list):
+        return values
     for entry in nutrients:
+        if not isinstance(entry, dict):
+            continue
         number = entry.get("nutrientId")
         value = entry.get("value")
-        if number is not None and value is not None:
-            values[int(number)] = float(value)
+        if number is None or value is None:
+            continue
+        try:
+            key = int(number)
+            amount = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(amount):
+            continue
+        values[key] = amount
     return values

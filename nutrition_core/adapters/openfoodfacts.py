@@ -28,8 +28,13 @@ class OpenFoodFactsAdapter:
                 "page_size": limit,
             },
         )
+        if not isinstance(payload, dict):
+            payload = {}
+        products = payload.get("products")
+        if not isinstance(products, list):
+            products = []
         items: list[FoodItem] = []
-        for product in payload.get("products", []):
+        for product in products:
             item = _to_food_item(product)
             if item is not None:
                 items.append(item)
@@ -37,16 +42,20 @@ class OpenFoodFactsAdapter:
 
     def get_by_barcode(self, barcode: str) -> FoodItem | None:
         payload = self._transport.get_json(PRODUCT_URL.format(barcode=barcode), None)
-        if payload.get("status") != 1:
+        if not isinstance(payload, dict) or payload.get("status") != 1:
             return None
         product = payload.get("product")
-        if not product:
+        if not product or not isinstance(product, dict):
             return None
         return _to_food_item(product, fallback_code=barcode)
 
 
 def _to_food_item(product: dict, fallback_code: str | None = None) -> FoodItem | None:
+    if not isinstance(product, dict):
+        return None
     nutriments = product.get("nutriments", {}) or {}
+    if not isinstance(nutriments, dict):
+        return None
     macros = macros_from_fields(
         _kcal(nutriments, product),
         _number(nutriments.get("proteins_100g")),
@@ -87,6 +96,6 @@ def _number(value) -> float | None:
         return None
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return number if math.isfinite(number) else None

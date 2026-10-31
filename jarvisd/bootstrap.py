@@ -7,6 +7,10 @@ from dotenv import load_dotenv
 
 from ha_client import HomeAssistantClient
 from location_provider import LocationProvider
+from nutrition_core.adapters.http import RequestsTransport
+from nutrition_core.adapters.openfoodfacts import OpenFoodFactsAdapter
+from nutrition_core.adapters.usda import USDAAdapter
+from nutrition_core.food_service import FoodService
 from jarvisd import db
 from jarvisd.core import HAIKU_MODEL, Assistant
 from jarvisd.habit_pipeline import run_habit_scan
@@ -100,6 +104,7 @@ def create_assistant():
     rules_store = None
     meal_store = None
     proposal_store = None
+    food_service = None
     try:
         conn = db.connect(os.getenv("JARVIS_DB", "data/jarvis.db"))
         memory_store = MemoryStore(conn)
@@ -108,6 +113,12 @@ def create_assistant():
         rules_store = RulesStore(conn)
         meal_store = MealStore(conn)
         proposal_store = ProposalStore(conn)
+        # Food lookup: USDA is optional (no key = Open Food Facts only).
+        usda_key = os.getenv("USDA_API_KEY")
+        transport = RequestsTransport()
+        usda = USDAAdapter(transport, usda_key) if usda_key else None
+        off = OpenFoodFactsAdapter(transport)
+        food_service = FoodService(conn, usda=usda, off=off)
     except Exception as e:
         print(f"Memory unavailable: {e}")
         conn = None
@@ -117,6 +128,7 @@ def create_assistant():
         rules_store = None
         meal_store = None
         proposal_store = None
+        food_service = None
 
     search_cap = int(os.getenv("SEARCH_MONTHLY_CAP", "100"))
 
@@ -142,6 +154,7 @@ def create_assistant():
         proposal_store=proposal_store,
         google_client=google,
         location_provider=location_provider,
+        food_service=food_service,
     )
 
     features = ["Home Assistant", "PC Control"]
