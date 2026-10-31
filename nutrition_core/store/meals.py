@@ -35,6 +35,17 @@ def log_verified_meal(
     ]
     total = compute_meal(computed).total
     legacy_kcal = int(Macros(total.kcal, 0, 0, 0).rounded(0).kcal)  # half-up
+    # Pre-assemble every ingredient row BEFORE the first write so a bad value
+    # (e.g. a non-enum source) raises before anything is persisted.
+    ing_rows = [
+        (
+            ing.name, ing.grams,
+            ing.per100g.kcal, ing.per100g.protein_g, ing.per100g.carbs_g, ing.per100g.fat_g,
+            ing.source.value,
+            comp.macros.kcal, comp.macros.protein_g, comp.macros.carbs_g, comp.macros.fat_g,
+        )
+        for ing, comp in zip(ingredients, computed)
+    ]
     cur = conn.execute(
         "INSERT INTO meals (ts, description, quantity, calories, protein_g, carbs_g, "
         "fat_g, confidence, assumptions, status, name) "
@@ -42,17 +53,12 @@ def log_verified_meal(
         (date, name, legacy_kcal, total.protein_g, total.carbs_g, total.fat_g, status, name),
     )
     meal_id = cur.lastrowid
-    for ing, comp in zip(ingredients, computed):
+    for row in ing_rows:
         conn.execute(
             "INSERT INTO meal_ingredients (meal_id, name, grams, per100_kcal, "
             "per100_protein_g, per100_carbs_g, per100_fat_g, source, kcal, protein_g, "
             "carbs_g, fat_g) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                meal_id, ing.name, ing.grams,
-                ing.per100g.kcal, ing.per100g.protein_g, ing.per100g.carbs_g, ing.per100g.fat_g,
-                ing.source.value,
-                comp.macros.kcal, comp.macros.protein_g, comp.macros.carbs_g, comp.macros.fat_g,
-            ),
+            (meal_id, *row),
         )
     conn.commit()
     return meal_id

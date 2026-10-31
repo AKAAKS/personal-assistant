@@ -70,3 +70,21 @@ class TestMealsRepoExtra:
                      "VALUES ('2026-10-31T08:00:00', 'toast', 100, 3, 18, 1)")
         conn.commit()
         assert day_totals(conn, "2026-10-31") == Macros(100, 3, 18, 1)
+
+    def test_mixed_day_counts_each_meal_once(self):
+        conn = connect(":memory:")
+        log_verified_meal(conn, name="chicken & rice", date="2026-10-31",
+            ingredients=[MealIngredient("chicken", 100, Macros(165,31,0,3.6), FoodSource.USDA),
+                         MealIngredient("rice", 100, Macros(130,2.7,28,0.3), FoodSource.USDA)])
+        conn.execute("INSERT INTO meals (ts, description, calories, protein_g, carbs_g, fat_g) "
+                     "VALUES ('2026-10-31T08:00:00', 'toast', 100, 3, 18, 1)")
+        conn.commit()
+        assert day_totals(conn, "2026-10-31") == Macros(395, 36.7, 46, 4.9)
+
+    def test_bad_source_writes_nothing(self):
+        import pytest
+        conn = connect(":memory:")
+        with pytest.raises(AttributeError):
+            log_verified_meal(conn, name="x", date="2026-10-31",
+                ingredients=[MealIngredient("egg", 50, Macros(155,13,1.1,11), "usda")])
+        assert conn.execute("SELECT COUNT(*) c FROM meals").fetchone()["c"] == 0
