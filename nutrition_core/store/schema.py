@@ -69,3 +69,13 @@ SELECT calories, protein_g, carbs_g, fat_g, datetime('now'), 1
 FROM nutrition_targets
 WHERE id = 1 AND NOT EXISTS (SELECT 1 FROM goals);
 """
+
+# Migration 8: per-100g snapshot on pantry rows. Nullable (SQLite cannot ADD
+# COLUMN NOT NULL without a default); the repo always populates them on insert.
+PANTRY_SNAPSHOT_SQL = """
+ALTER TABLE pantry ADD COLUMN per100_kcal REAL;
+ALTER TABLE pantry ADD COLUMN per100_protein_g REAL;
+ALTER TABLE pantry ADD COLUMN per100_carbs_g REAL;
+ALTER TABLE pantry ADD COLUMN per100_fat_g REAL;
+ALTER TABLE pantry ADD COLUMN confidence TEXT;
+"""
