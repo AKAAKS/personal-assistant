@@ -16,6 +16,7 @@ from jarvisd.core import HAIKU_MODEL, Assistant
 from jarvisd.habit_pipeline import run_habit_scan
 from jarvisd.meal_store import MealStore
 from jarvisd.memory_store import MemoryStore
+from jarvisd.pantry_store import PantryStore
 from jarvisd.profile_store import ProfileStore
 from jarvisd.proposal_store import ProposalStore
 from jarvisd.reminder_store import ReminderStore
@@ -105,6 +106,7 @@ def create_assistant():
     meal_store = None
     proposal_store = None
     food_service = None
+    pantry_store = None
     try:
         conn = db.connect(os.getenv("JARVIS_DB", "data/jarvis.db"))
         memory_store = MemoryStore(conn)
@@ -119,6 +121,7 @@ def create_assistant():
         usda = USDAAdapter(transport, usda_key) if usda_key else None
         off = OpenFoodFactsAdapter(transport)
         food_service = FoodService(conn, usda=usda, off=off)
+        pantry_store = PantryStore(conn)
     except Exception as e:
         print(f"Memory unavailable: {e}")
         conn = None
@@ -129,6 +132,7 @@ def create_assistant():
         meal_store = None
         proposal_store = None
         food_service = None
+        pantry_store = None
 
     search_cap = int(os.getenv("SEARCH_MONTHLY_CAP", "100"))
 
@@ -155,6 +159,7 @@ def create_assistant():
         google_client=google,
         location_provider=location_provider,
         food_service=food_service,
+        pantry_store=pantry_store,
     )
 
     features = ["Home Assistant", "PC Control"]

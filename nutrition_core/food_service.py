@@ -18,7 +18,27 @@ class FoodLookupError(Exception):
 class FoodService:
     def __init__(self, conn: DbConnection, *, usda=None, off=None):
         self._conn = conn
+        self._off = off
         self._adapters = [("usda", usda), ("open_food_facts", off)]
+
+    def by_barcode(self, barcode: str) -> FoodItem | None:
+        """Resolve a barcode via Open Food Facts (USDA has no barcode lookup).
+        Returns None on a miss or if OFF isn't configured; an adapter error is
+        total failure (single source) and raises FoodLookupError."""
+        if self._off is None:
+            return None
+        try:
+            item = self._off.get_by_barcode(barcode)
+        except Exception as exc:  # network/HTTP
+            log.warning("food adapter open_food_facts failed: %s", exc)
+            raise FoodLookupError("barcode lookup failed") from exc
+        if item is None:
+            return None
+        try:
+            cache_food(self._conn, item)
+        except Exception as exc:  # cache is best-effort; never fail a good lookup
+            log.warning("food cache write failed for %s: %s", item.external_id, exc)
+        return item
 
     def lookup(self, query: str, *, limit: int = 5) -> list[FoodItem]:
         """Query USDA then OFF. USDA results come first and can fill the truncated
