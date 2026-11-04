@@ -1,5 +1,6 @@
-from tests.test_tools_check_dish import Base
+from tests.test_tools_check_dish import Base, _item
 from jarvisd.tools import suggest
+from nutrition_core.models import Macros
 
 NOTHING = "Nothing in your pantry fits what's left today"
 
@@ -50,6 +51,16 @@ class TestSuggestMeals(Suggest):
                "ingredients": [{"name": "unobtainium", "grams": 50}]}
         out = self.run_tool({"dishes": [bad, self.dish("Chicken", "savory", 100)]})
         assert "Mystery" not in out and "Chicken" in out
+
+    def test_non_pantry_ingredient_excluded(self):
+        # Strictly pantry-constrained: a dish needing an item not in the pantry is
+        # dropped, even though its macros resolve from the food DB.
+        self.target()
+        self.foods.names["egg"] = [_item("Egg", Macros(143, 13, 1.1, 9.5), "e1")]
+        egg_dish = {"name": "Omelette", "slot": "breakfast",
+                    "ingredients": [{"name": "egg", "grams": 100}]}
+        out = self.run_tool({"dishes": [egg_dish, self.dish("Chicken", "savory", 100)]})
+        assert "Omelette" not in out and "Chicken" in out
 
     def test_nothing_fits(self):
         self.target(kcal=100, p=150, c=200, f=60)

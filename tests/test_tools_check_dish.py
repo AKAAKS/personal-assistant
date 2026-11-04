@@ -99,6 +99,21 @@ class TestValidate(Base):
         d = self.validate([{"name": "rice", "grams": 250}])
         assert d.ok and not d.pantry_ok
 
+    def test_non_pantry_ingredient_not_ready(self):
+        # Resolves from the food DB but is NOT tracked in the pantry → strictly
+        # not ready to cook (you don't have it), even though macros compute fine.
+        self.target()
+        foods = FakeFoods({"egg": [_item("Egg", Macros(143, 13, 1.1, 9.5), "e1")]})
+        ings = [{"name": "egg", "grams": 100}]
+        d = suggest.validate_dish("Omelette", ings, conn=self.conn,
+                                  food_service=foods, pantry_store=self.pantry)
+        assert d.ok and d.macros is not None
+        assert not d.pantry_ok
+        assert any("not in your pantry" in s.lower() for s in d.shortfalls)
+        out = suggest.handlers(self.conn, foods, self.pantry)["check_dish"](
+            {"name": "Omelette", "ingredients": ings})
+        assert "short" in out.lower() and "not in your pantry" in out.lower()
+
     def test_no_target(self):
         d = self.validate([{"pantry_id": self.chicken_id, "grams": 100}])
         assert d.ok and d.fit == "no-target" and d.macros is not None

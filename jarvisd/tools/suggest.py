@@ -123,11 +123,14 @@ def validate_dish(name, ingredients, *, conn, food_service, pantry_store) -> Dis
                            r.meal_ingredient.per100g, r.meal_ingredient.source)
         for r in resolved]).total
 
-    # Pantry availability (reads only).
+    # Pantry availability (reads only). Suggestions are strictly pantry-constrained:
+    # an ingredient that resolves but is NOT tracked in the pantry makes the dish
+    # not-ready (you can't cook it with what you have), not silently "available".
     items = pantry_store.list_items()
     by_id = {row["id"]: row for row in items}
     need_by_row: dict[int, float] = {}
     rows: dict[int, dict] = {}
+    not_in_pantry: list[str] = []
     for r in resolved:
         if r.pantry_id is not None:
             row = by_id.get(r.pantry_id)
@@ -138,12 +141,18 @@ def validate_dish(name, ingredients, *, conn, food_service, pantry_store) -> Dis
         if row is not None:
             rows[row["id"]] = row
             need_by_row[row["id"]] = need_by_row.get(row["id"], 0.0) + r.meal_ingredient.grams
+        else:
+            label = r.meal_ingredient.name
+            if label not in not_in_pantry:
+                not_in_pantry.append(label)
     shortfalls = []
     for rid, need in need_by_row.items():
         row = rows[rid]
         if row["grams_available"] < need:
             shortfalls.append(f"needs {_g(need)} g of {row['name']}, "
                               f"have {_g(row['grams_available'])} g")
+    for label in not_in_pantry:
+        shortfalls.append(f"{label} is not in your pantry")
 
     rem = day_status_repo(conn, date.today().isoformat())["remaining"]
     if rem is None:
