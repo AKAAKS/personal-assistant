@@ -71,7 +71,10 @@ class TestReminderTools:
         })
         assert "Reminder" in result
         assert "set for" in result
-        assert due in result
+        # The echo is the NORMALIZED stored time (local naive, seconds
+        # precision), not the raw input -- so the confirmation always names the
+        # time that will actually fire.
+        assert due[:19] in result
 
     def test_set_reminder_handler_no_recurrence(self, reminder_handlers, reminder_store):
         """Test set_reminder defaults recurrence to 'none'."""
