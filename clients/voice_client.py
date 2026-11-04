@@ -4,6 +4,7 @@ Run: python -m clients.voice_client
 """
 
 import asyncio
+import collections
 import io
 import json
 import logging
@@ -81,8 +82,21 @@ MIN_UTTERANCE_SAMPLES = int(os.getenv("MIN_UTTERANCE_SAMPLES", "8000"))  # 0.5s
 PLAYBACK_WAKE_THRESHOLD = float(os.getenv("WAKE_WORD_THRESHOLD_PLAYBACK",
                                           os.getenv("WAKE_WORD_THRESHOLD", "0.5")))
 PLAYBACK_WAKE_CONSECUTIVE = int(os.getenv("WAKE_WORD_CONSECUTIVE_PLAYBACK", "1"))
-PLAYBACK_LEVEL_RATIO = float(os.getenv("PLAYBACK_LEVEL_RATIO", "1.2"))
+
+# OFF by default. Measured (logs/voice_client.log 15:17): the gate rejected
+# EVERY genuine barge-in attempt, at scores of 0.97-1.00. A score that high is
+# unambiguous, the self-fire the gate guarded against was never once observed in
+# any log, and a self-fire is now harmless -- it purges, records the echo, and
+# has it dropped as `unverified` without ending the conversation. So the gate
+# costs real functionality to insure against a hypothetical.
+# Set to ~1.2 to re-enable it; it now measures over the right window (below).
+PLAYBACK_LEVEL_RATIO = float(os.getenv("PLAYBACK_LEVEL_RATIO", "0"))
 PLAYBACK_MIN_LEVEL = float(os.getenv("PLAYBACK_MIN_LEVEL", "200"))
+
+# openwakeword's score covers roughly the last 1.5s of audio, not the 80ms
+# chunk it is returned for, so the level it gets compared against has to span
+# the same window. 1.5s / 80ms per chunk.
+RECEPTIVE_FIELD_CHUNKS = int(os.getenv("PLAYBACK_LEVEL_WINDOW_CHUNKS", "19"))
 
 # Log any chunk that scored at least this much but did NOT barge in, with the
 # gate that stopped it. Without this there was no way to tell a missing
@@ -123,7 +137,8 @@ class PlaybackWakePolicy:
     def __init__(self, *, threshold: float = PLAYBACK_WAKE_THRESHOLD,
                  consecutive: int = PLAYBACK_WAKE_CONSECUTIVE,
                  level_ratio: float = PLAYBACK_LEVEL_RATIO,
-                 min_level: float = PLAYBACK_MIN_LEVEL):
+                 min_level: float = PLAYBACK_MIN_LEVEL,
+                 window_chunks: int = RECEPTIVE_FIELD_CHUNKS):
         self.threshold = threshold
         self.consecutive = max(1, consecutive)
         self.level_ratio = level_ratio
@@ -131,15 +146,28 @@ class PlaybackWakePolicy:
         self.echo_floor = 0.0
         self.streak = 0
         self.last_reason = "idle"
+        self.recent_levels = collections.deque(maxlen=max(1, window_chunks))
 
     def reset(self):
         self.echo_floor = 0.0
         self.streak = 0
         self.last_reason = "idle"
+        self.recent_levels.clear()
+
+    @property
+    def candidate_level(self) -> float:
+        """Loudest chunk within the score's receptive field.
+
+        The peak, not the latest chunk: the wake phrase itself is the loud part
+        and the detection fires on the quiet pause just after it.
+        """
+        return max(self.recent_levels, default=0.0)
 
     @property
     def required_level(self) -> float:
-        """The level a candidate chunk has to beat right now."""
+        """The level a candidate has to beat right now. 0.0 = gate disabled."""
+        if self.level_ratio <= 0:
+            return 0.0
         return max(self.echo_floor * self.level_ratio, self.min_level)
 
     def observe(self, *, score: float, level: float) -> bool:
@@ -147,6 +175,7 @@ class PlaybackWakePolicy:
 
         `last_reason` records which gate decided, for the diagnostic log.
         """
+        self.recent_levels.append(level)
         if score < self.threshold:
             # Not a candidate, so this chunk is a sample of the echo itself.
             self.echo_floor += self.ALPHA * (level - self.echo_floor)
@@ -155,7 +184,7 @@ class PlaybackWakePolicy:
             return False
         # A candidate: never let it raise the floor, or a long sentence would
         # gradually gate itself out.
-        if level < self.required_level:
+        if self.candidate_level < self.required_level:
             self.streak = 0
             self.last_reason = "below_echo_floor"
             return False
@@ -260,8 +289,9 @@ class VoiceClient:
                 policy = self._playback_policy
                 if policy.observe(score=score, level=level):
                     log.info(
-                        "Barge-in accepted: score %.2f, level %.0f, echo floor %.0f",
-                        score, level, policy.echo_floor,
+                        "Barge-in accepted: score %.2f, chunk level %.0f, "
+                        "window peak %.0f, echo floor %.0f",
+                        score, level, policy.candidate_level, policy.echo_floor,
                     )
                     self.wake_word.reset()
                     return True
@@ -271,10 +301,11 @@ class VoiceClient:
                     # policy rejected -- and tuned from numbers, not guesses.
                     log.info(
                         "Barge-in rejected [%s]: score %.2f (need %.2f), "
-                        "level %.0f (need %.0f), echo floor %.0f, streak %d/%d",
+                        "chunk level %.0f, window peak %.0f (need %.0f), "
+                        "echo floor %.0f, streak %d/%d",
                         policy.last_reason, score, policy.threshold,
-                        level, policy.required_level, policy.echo_floor,
-                        policy.streak, policy.consecutive,
+                        level, policy.candidate_level, policy.required_level,
+                        policy.echo_floor, policy.streak, policy.consecutive,
                     )
         return False
 
