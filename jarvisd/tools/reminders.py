@@ -2,6 +2,8 @@
 
 from datetime import datetime, timedelta
 
+from jarvisd.reminder_store import BAD_DUE_TS, normalize_due_ts
+
 TOOLS = [
     {
         "name": "set_timer",
@@ -102,7 +104,7 @@ def handlers(reminder_store):
         due = (datetime.now() + timedelta(minutes=float(minutes))).isoformat(timespec="seconds")
         try:
             reminder_store.add(text, due, "none")
-        except ValueError as exc:
+        except (ValueError, OSError, OverflowError) as exc:
             return f"Error: {exc}"
         pretty = int(minutes) if float(minutes).is_integer() else minutes
         return f"Timer set for {pretty} minute(s)" + (f" — {label}." if label else ".")
@@ -120,8 +122,14 @@ def handlers(reminder_store):
             return "Error: due datetime is required."
 
         try:
+            # Echo the NORMALIZED time, not the raw input: add() rewrites an
+            # offset-aware due to local naive, so echoing `due` would confirm a
+            # different time than the one that actually fires.
+            due = normalize_due_ts(due)
             reminder_id = reminder_store.add(text, due, recurrence, condition=condition)
             return f"Reminder #{reminder_id} set for {due}"
+        except BAD_DUE_TS as exc:
+            return f"Error: due is not a valid ISO datetime: {due!r} ({exc})"
         except ValueError as exc:
             return f"Error: {exc}"
 

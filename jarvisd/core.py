@@ -433,9 +433,36 @@ class Assistant:
 
             self.conversation.append({"role": "user", "content": tool_results})
 
+    @staticmethod
+    def _starts_clean(msg) -> bool:
+        """True if `msg` is a valid first message for a request: a user turn
+        that does not open with a tool_result."""
+        if msg.get("role") != "user":
+            return False
+        content = msg.get("content")
+        if isinstance(content, str):
+            return True
+        return not any(
+            (b.get("type") if isinstance(b, dict) else getattr(b, "type", None)) == "tool_result"
+            for b in content
+        )
+
     def _compact_history(self):
+        """Trim history to MAX_HISTORY, never cutting a tool_use from its result.
+
+        A tool-using turn adds four or more entries (user text, assistant
+        tool_use, user tool_result, assistant text), so a plain slice often
+        lands between a tool_use and its result. The window then starts with
+        tool_result blocks whose tool_use_id is gone and the Messages API
+        rejects the request with a 400 ("unexpected tool_use_id found in
+        tool_result blocks") -- and because the window advances only an entry
+        or two per turn, the next command can fail the same way. Drop entries
+        from the front until the history starts clean.
+        """
         if len(self.conversation) > self.MAX_HISTORY:
             self.conversation = self.conversation[-self.MAX_HISTORY:]
+        while self.conversation and not self._starts_clean(self.conversation[0]):
+            self.conversation.pop(0)
 
     def reset_conversation(self):
         """Clear conversation history."""
