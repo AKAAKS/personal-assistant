@@ -13,6 +13,7 @@ from datetime import date
 from nutrition_core.engine import compute_ingredient, compute_meal
 from nutrition_core.food_service import FoodLookupError
 from nutrition_core.models import FoodSource, Macros, MealIngredient
+from nutrition_core.store.meals import day_status as day_status_repo
 from nutrition_core.store.meals import log_verified_meal
 
 _KEYS = ("barcode", "name", "pantry_id")
@@ -50,6 +51,50 @@ TOOLS = [
             "required": ["name", "ingredients"],
         },
     },
+    {
+        "name": "log_estimated_meal",
+        "description": (
+            "Log a meal eaten OUT (restaurant/takeaway) where portions are eyeballed. "
+            "Same ingredient shape as log_meal ('grams' + one of 'barcode'/'name'/"
+            "'pantry_id'). Macros come from the food database but are flagged as "
+            "ESTIMATES. Never changes pantry stock. Optional 'confidence': low (default) "
+            "or medium."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "description": {"type": "string", "description": "What was eaten."},
+                "ingredients": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "grams": {"type": "number", "description": "Estimated grams (> 0)."},
+                            "barcode": {"type": "string"},
+                            "name": {"type": "string"},
+                            "pantry_id": {"type": "integer"},
+                        },
+                        "required": ["grams"],
+                    },
+                },
+                "confidence": {"type": "string", "enum": ["low", "medium"]},
+            },
+            "required": ["description", "ingredients"],
+        },
+    },
+    {
+        "name": "day_status",
+        "description": (
+            "Today's nutrition status: daily target, consumed (split into verified vs "
+            "estimated), remaining, and an honest over/cornered warning. Optional "
+            "'date' (YYYY-MM-DD, default today)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"date": {"type": "string", "description": "YYYY-MM-DD."}},
+        },
+    },
 ]
 
 
@@ -78,6 +123,11 @@ def _present(v) -> bool:
     if isinstance(v, str):
         return v.strip() != ""
     return True
+
+
+def _macro_line(m) -> str:
+    return (f"{m.kcal:,.0f} kcal, {m.protein_g:.0f}g protein, "
+            f"{m.carbs_g:.0f}g carbs, {m.fat_g:.0f}g fat.")
 
 
 def resolve_ingredient(spec, *, food_service, pantry_store):
@@ -194,4 +244,74 @@ def handlers(conn, food_service, pantry_store):
         except Exception as exc:
             return f"Error: couldn't log the meal ({exc})"
 
-    return {"log_meal": log_meal}
+    def log_estimated_meal(ti):
+        try:
+            if not isinstance(ti, dict):
+                return "Error: invalid input; nothing logged."
+            desc = ti.get("description")
+            if not isinstance(desc, str) or not desc.strip():
+                return "Error: 'description' is required; nothing logged."
+            ings = ti.get("ingredients")
+            if not isinstance(ings, list) or not ings:
+                return "Error: 'ingredients' must be a non-empty list; nothing logged."
+            conf = ti.get("confidence")
+            if conf not in ("low", "medium"):
+                conf = "low"
+
+            resolved = []
+            for spec in ings:
+                r = resolve_ingredient(spec, food_service=food_service,
+                                       pantry_store=pantry_store)
+                if isinstance(r, str):
+                    return r
+                resolved.append(r)
+
+            # Estimated meals NEVER touch the pantry: no deplete calls here.
+            log_verified_meal(
+                conn, name=desc.strip(), date=date.today().isoformat(),
+                ingredients=[r.meal_ingredient for r in resolved],
+                status="estimated", confidence=conf,
+                assumptions="estimated portions")
+            total = compute_meal([
+                compute_ingredient(r.meal_ingredient.name, r.meal_ingredient.grams,
+                                   r.meal_ingredient.per100g, r.meal_ingredient.source)
+                for r in resolved]).total
+            return (f"Logged '{desc.strip()}' as an ESTIMATE ({conf} confidence): "
+                    f"~{total.kcal:.0f} kcal, {total.protein_g:.1f}g protein, "
+                    f"{total.carbs_g:.1f}g carbs, {total.fat_g:.1f}g fat. These macros are "
+                    "estimates, not verified. Pantry not changed.")
+        except Exception as exc:
+            return f"Error: couldn't log the estimated meal ({exc})"
+
+    def day_status(ti):
+        try:
+            d = ti.get("date") if isinstance(ti, dict) else None
+            if not isinstance(d, str) or not d.strip():
+                d = date.today().isoformat()
+            d = d.strip()
+            st = day_status_repo(conn, d)
+            target, ver, est, con = st["target"], st["verified"], st["estimated"], st["consumed"]
+            rem, assess = st["remaining"], st["assessment"]
+            if target is None and con.kcal == 0 and con.protein_g == 0                     and con.carbs_g == 0 and con.fat_g == 0:
+                return "No daily target set. Nothing logged yet today."
+            lines = []
+            if target is None:
+                lines.append("No daily target set.")
+            else:
+                lines.append(f"Target: {_macro_line(target)}")
+            lines.append(f"Consumed: {con.kcal:,.0f} kcal "
+                         f"({ver.kcal:,.0f} verified + {est.kcal:,.0f} estimated); "
+                         f"{con.protein_g:.0f}g protein, {con.carbs_g:.0f}g carbs, "
+                         f"{con.fat_g:.0f}g fat.")
+            if est.kcal > 0:
+                lines.append("Note: the estimated part comes from eyeballed portions.")
+            if rem is not None:
+                lines.append(f"Remaining: {_macro_line(rem)}")
+            if assess is not None and assess.status != "ok":
+                lines.append(f"Heads up ({assess.status}): " + "; ".join(assess.messages))
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Error: couldn't get the day status ({exc})"
+
+    return {"log_meal": log_meal, "log_estimated_meal": log_estimated_meal,
+            "day_status": day_status}
