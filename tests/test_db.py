@@ -43,7 +43,7 @@ def test_migration_reaches_current_version():
     conn = db.connect(":memory:")
     row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
     assert row["v"] == db.SCHEMA_VERSION
-    assert db.SCHEMA_VERSION == 8
+    assert db.SCHEMA_VERSION == 9
     conn.close()
 
 
