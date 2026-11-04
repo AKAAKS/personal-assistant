@@ -1,10 +1,45 @@
 """Local system control — launch/close apps, system info, clipboard."""
 
 import os
+import shlex
 import subprocess
 
 # How long a headless run_command may run before it is killed.
 COMMAND_TIMEOUT_SEC = 60
+
+# Anthropic credentials stripped from any child process JARVIS spawns to run
+# Claude Code, so Claude Code uses the user's subscription login instead of
+# JARVIS's API key. JARVIS's own brain uses the key IN-PROCESS (never via a
+# spawned child), so scrubbing a child's env never affects the assistant itself.
+_ANTHROPIC_CRED_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+
+
+def _scrubbed_env() -> dict:
+    """A copy of the current environment with JARVIS's Anthropic creds removed."""
+    env = os.environ.copy()
+    for var in _ANTHROPIC_CRED_VARS:
+        env.pop(var, None)
+    return env
+
+
+def _launches_claude(command: "str | None") -> bool:
+    """True when `command`'s program is the Claude Code CLI (`claude`).
+
+    Only these spawns get Anthropic credentials scrubbed; an empty terminal or
+    any other command keeps JARVIS's inherited environment. Matches `claude`,
+    `claude --resume`, and a full/quoted path ending in `claude[.exe|.cmd|...]`,
+    but not an unrelated program that merely starts with "claude".
+    """
+    if not command or not command.strip():
+        return False
+    try:
+        tokens = shlex.split(command, posix=False)
+    except ValueError:
+        tokens = command.split()
+    if not tokens:
+        return False
+    prog = os.path.basename(tokens[0].strip().strip('"').strip("'")).lower()
+    return prog == "claude" or prog.startswith("claude.")
 
 
 class SystemClient:
@@ -94,6 +129,14 @@ class SystemClient:
             return f"{target} is already running."
         cmd = app_map.get(target_lower, target)
 
+        # Claude Code is a CLI, not a GUI app, and os.startfile (below) has no
+        # way to scrub the inherited environment. Route any claude launch through
+        # open_terminal, which strips JARVIS's Anthropic creds so Claude Code uses
+        # the user's subscription login instead of the API key.
+        if _launches_claude(cmd):
+            self.open_terminal(cmd)
+            return f"Launched {target} in a terminal."
+
         # os.startfile -> ShellExecute, which resolves protocols, paths, PATH,
         # and the App Paths registry (how the Run dialog finds browsers).
         # Popen(shell=True) only searched PATH and reported success even when
@@ -134,10 +177,15 @@ class SystemClient:
         The caller (tools/terminal.py) sanitizes the command and the security
         guard requires confirmation first — this method is the raw executor.
         """
+        # If the command invokes Claude Code, run it without JARVIS's Anthropic
+        # creds so it uses the user's subscription login, not the API key. Every
+        # other command inherits the daemon env (env=None -> "inherit").
+        env = _scrubbed_env() if _launches_claude(command) else None
         try:
             result = subprocess.run(
                 command, shell=True, capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=COMMAND_TIMEOUT_SEC,
+                env=env,
             )
         except subprocess.TimeoutExpired:
             return 124, "", f"command timed out after {COMMAND_TIMEOUT_SEC}s"
@@ -151,6 +199,20 @@ class SystemClient:
         """
         creationflags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
         inner = ["cmd", "/k", command] if command else ["cmd"]
+
+        if _launches_claude(command):
+            # Claude Code must use the user's subscription login, not JARVIS's
+            # API key, so strip the Anthropic credentials from the child's env.
+            # Spawn cmd.exe DIRECTLY rather than through `wt`: Windows Terminal's
+            # single-instance (monarch/peasant) model can route a new `wt` call
+            # into an existing WindowsTerminal.exe whose environment still holds
+            # the key, so an env= passed to `wt` is NOT guaranteed to reach the
+            # shell. A direct CREATE_NEW_CONSOLE cmd.exe always gets this env.
+            subprocess.Popen(inner, creationflags=creationflags, env=_scrubbed_env())
+            return
+
+        # Normal terminals inherit the daemon env (env defaults to "inherit").
+        # Prefer Windows Terminal, fall back to a new cmd console.
         try:
             subprocess.Popen(["wt", *inner])
             return
