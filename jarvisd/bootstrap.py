@@ -160,6 +160,7 @@ def create_assistant():
         location_provider=location_provider,
         food_service=food_service,
         pantry_store=pantry_store,
+        meal_log_conn=conn,
     )
 
     features = ["Home Assistant", "PC Control"]

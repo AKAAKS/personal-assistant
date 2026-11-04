@@ -1,49 +1,6 @@
-"""Meal tracking tools: log_meal / meal_summary / export_meals."""
+"""Meal tracking tools: meal_summary / export_meals."""
 
 TOOLS = [
-    {
-        "name": "log_meal",
-        "description": "Log a meal with estimated macronutrients. Estimate the macros yourself from the description; state portion assumptions in `assumptions` and your confidence honestly. These are estimates for trend tracking, not a food database.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "description": {
-                    "type": "string",
-                    "description": "What was eaten (e.g., 'Grilled chicken with rice and broccoli').",
-                },
-                "calories": {
-                    "type": "integer",
-                    "description": "Estimated total calories.",
-                },
-                "protein_g": {
-                    "type": "number",
-                    "description": "Estimated protein in grams.",
-                },
-                "carbs_g": {
-                    "type": "number",
-                    "description": "Estimated carbohydrates in grams.",
-                },
-                "fat_g": {
-                    "type": "number",
-                    "description": "Estimated fat in grams.",
-                },
-                "confidence": {
-                    "type": "string",
-                    "enum": ["low", "medium", "high"],
-                    "description": "Your confidence in the estimate (low/medium/high).",
-                },
-                "quantity": {
-                    "type": "string",
-                    "description": "Portion size or quantity (e.g., '1 plate', '2 cups'). Optional.",
-                },
-                "assumptions": {
-                    "type": "string",
-                    "description": "Notes on assumptions made (e.g., 'estimated from visual inspection'). Optional.",
-                },
-            },
-            "required": ["description", "calories", "protein_g", "carbs_g", "fat_g", "confidence"],
-        },
-    },
     {
         "name": "meal_summary",
         "description": "Get today's meal summary: total meals, calories, and macros.",
@@ -112,45 +69,6 @@ def handlers(meal_store):
     def _is_number(value):
         """True for int/float but NOT bool (isinstance(True, int) is True in Python)."""
         return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-    def log_meal(ti):
-        """Log a meal with macronutrient estimates."""
-        description = ti.get("description")
-        calories = ti.get("calories")
-        protein_g = ti.get("protein_g")
-        carbs_g = ti.get("carbs_g")
-        fat_g = ti.get("fat_g")
-        confidence = ti.get("confidence")
-        quantity = ti.get("quantity", "")
-        assumptions = ti.get("assumptions", "")
-
-        # Validate types before touching the store — bad values must never persist.
-        if not isinstance(description, str) or not description.strip():
-            return "Error: description is required and must be a non-empty string."
-        if not _is_number(calories):
-            return "Error: calories is required and must be a number."
-        if not _is_number(protein_g):
-            return "Error: protein_g is required and must be a number."
-        if not _is_number(carbs_g):
-            return "Error: carbs_g is required and must be a number."
-        if not _is_number(fat_g):
-            return "Error: fat_g is required and must be a number."
-
-        # Validate confidence enum
-        if confidence not in ("low", "medium", "high"):
-            return f"Error: confidence must be 'low', 'medium', or 'high', got {confidence!r}."
-
-        description = description.strip()
-        quantity = quantity.strip() if isinstance(quantity, str) else ""
-        assumptions = assumptions.strip() if isinstance(assumptions, str) else ""
-
-        try:
-            meal_id = meal_store.add(
-                description, quantity, calories, protein_g, carbs_g, fat_g, confidence, assumptions
-            )
-            return f"Meal logged (#{meal_id}): {description} — {calories} kcal"
-        except Exception as exc:
-            return f"Error: {exc}"
 
     def meal_summary(ti):
         """Summarize today's meal log."""
@@ -259,7 +177,6 @@ def handlers(meal_store):
         return "\n".join(lines)
 
     return {
-        "log_meal": log_meal,
         "meal_summary": meal_summary,
         "export_meals": export_meals,
         "set_nutrition_targets": set_nutrition_targets,

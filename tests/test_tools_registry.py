@@ -289,10 +289,11 @@ def test_registry_with_meal_store():
     )
 
     tool_names = [t["name"] for t in tools]
-    assert "log_meal" in tool_names
+    assert "meal_summary" in tool_names
+    assert "log_meal" not in tool_names
     assert "meal_summary" in tool_names
     assert "export_meals" in tool_names
-    assert all(callable(handlers[name]) for name in ["log_meal", "meal_summary", "export_meals"])
+    assert all(callable(handlers[name]) for name in ["meal_summary", "export_meals"])
 
 
 def test_registry_meal_tools_after_rules():
@@ -315,7 +316,7 @@ def test_registry_meal_tools_after_rules():
 
     # Find positions
     rule_tools = [n for n in tool_names if n.startswith("add_trigger_rule") or n.startswith("list_trigger_rules") or n.startswith("delete_trigger_rule")]
-    meal_tools = [n for n in tool_names if n.startswith("log_meal") or n.startswith("meal_summary") or n.startswith("export_meals")]
+    meal_tools = [n for n in tool_names if n.startswith("meal_summary") or n.startswith("export_meals")]
 
     if rule_tools and meal_tools:
         last_rule_idx = max(tool_names.index(n) for n in rule_tools)
@@ -408,7 +409,7 @@ def test_registry_file_tools_after_meals():
     )
     tool_names = [t["name"] for t in tools]
 
-    meal_tools = [n for n in tool_names if n in ("log_meal", "meal_summary", "export_meals")]
+    meal_tools = [n for n in tool_names if n in ("meal_summary", "export_meals")]
     file_tool_names = [n for n in tool_names if n in ("search_files", "read_document")]
 
     last_meal_idx = max(tool_names.index(n) for n in meal_tools)

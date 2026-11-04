@@ -89,7 +89,7 @@ def test_assistant_with_file_tools_exposes_file_and_meal_handlers():
     assert "run_script" in ai._handlers
     assert "search_files" in ai._handlers
     assert "read_document" in ai._handlers
-    assert "log_meal" in ai._handlers
+    assert "meal_summary" in ai._handlers
 
     conn.close()
 
