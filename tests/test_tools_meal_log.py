@@ -69,6 +69,23 @@ class TestLogMeal:
         assert t.kcal == 260 and abs(t.protein_g - 5.4) < 1e-9
         assert day_status(self.conn, _today())["verified"].kcal == 260
 
+    def test_no_fallible_compute_after_meal_persists(self, monkeypatch):
+        # Once the meal row exists, nothing may raise: a post-persist compute
+        # failure would return "Error" and invite a duplicate-logging retry.
+        real = meal_log.compute_meal
+
+        def guarded(*a, **k):
+            if self._meals():
+                raise RuntimeError("compute after persist")
+            return real(*a, **k)
+
+        monkeypatch.setattr(meal_log, "compute_meal", guarded)
+        out = self._log({"name": "Rice bowl",
+                         "ingredients": [{"name": "rice", "grams": 200}]})
+        assert not out.startswith("Error"), out
+        assert out.startswith("Logged 'Rice bowl': 260 kcal")
+        assert len(self._meals()) == 1
+
     def test_pantry_id_logs_and_depletes(self):
         pid = self.pantry.add_or_topup(name="Chicken", grams=500, per100g=CHICKEN,
                                        source="usda", external_id="c1", confidence="high")
