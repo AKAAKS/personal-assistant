@@ -8,6 +8,9 @@ from pathlib import Path
 
 from nutrition_core.models import Macros
 from nutrition_core.store import goals
+from nutrition_core.store.meals import CONSUMED_STATUSES
+
+_CONSUMED_SQL = "(" + ", ".join("'" + x + "'" for x in sorted(CONSUMED_STATUSES)) + ")"
 
 _VALID_FORMATS = {"csv", "json"}
 _EXPORT_COLUMNS = [
@@ -69,7 +72,7 @@ class MealStore:
         """
         date_prefix = (now or datetime.now()).date().isoformat()
         rows = self._conn.execute(
-            "SELECT * FROM meals WHERE ts LIKE ? ORDER BY ts", (date_prefix + "%",)
+            f"SELECT * FROM meals WHERE ts LIKE ? AND status IN {_CONSUMED_SQL} ORDER BY ts", (date_prefix + "%",)
         ).fetchall()
         return {
             "meals": rows,
@@ -114,7 +117,8 @@ class MealStore:
         rows = self._conn.execute(
             "SELECT substr(ts, 1, 10) AS day, COUNT(*) AS meals, SUM(calories) AS calories, "
             "SUM(protein_g) AS protein_g, SUM(carbs_g) AS carbs_g, SUM(fat_g) AS fat_g "
-            "FROM meals WHERE substr(ts, 1, 10) >= ? GROUP BY day ORDER BY day",
+            f"FROM meals WHERE substr(ts, 1, 10) >= ? AND status IN {_CONSUMED_SQL} "
+            "GROUP BY day ORDER BY day",
             (start.isoformat(),),
         ).fetchall()
         return [dict(r) for r in rows]
