@@ -4,12 +4,13 @@ import sqlite3
 from pathlib import Path
 
 from nutrition_core.store.schema import (
+    MEAL_INGREDIENT_LINK_SQL,
     NEW_TABLES_SQL,
     PANTRY_SNAPSHOT_SQL,
     SEED_GOALS_FROM_TARGETS_SQL,
 )
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # version -> SQL script. Later phases append entries and bump SCHEMA_VERSION.
 MIGRATIONS = {
@@ -97,6 +98,7 @@ MIGRATIONS = {
     7: NEW_TABLES_SQL + SEED_GOALS_FROM_TARGETS_SQL,
     # pantry per-100g snapshot columns (DDL owned by nutrition_core).
     8: PANTRY_SNAPSHOT_SQL,
+    9: MEAL_INGREDIENT_LINK_SQL,
 }
 
 

@@ -5,11 +5,11 @@ NEW_COLS = {"per100_kcal", "per100_protein_g", "per100_carbs_g", "per100_fat_g",
 
 
 class TestPantryMigration8:
-    def test_fresh_db_reaches_version_8(self):
+    def test_fresh_db_reaches_version_9(self):
         conn = connect(":memory:")
         row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
-        assert db.SCHEMA_VERSION == 8
-        assert row["v"] == 8
+        assert db.SCHEMA_VERSION == 9
+        assert row["v"] == 9
 
     def test_pantry_has_snapshot_columns(self):
         conn = connect(":memory:")

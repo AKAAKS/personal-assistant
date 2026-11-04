@@ -79,3 +79,10 @@ ALTER TABLE pantry ADD COLUMN per100_carbs_g REAL;
 ALTER TABLE pantry ADD COLUMN per100_fat_g REAL;
 ALTER TABLE pantry ADD COLUMN confidence TEXT;
 """
+
+# Migration 9: per-ingredient provenance so a planned meal can deplete the right
+# pantry row (and carry its food id) when cooked days later. Nullable.
+MEAL_INGREDIENT_LINK_SQL = """
+ALTER TABLE meal_ingredients ADD COLUMN external_id TEXT;
+ALTER TABLE meal_ingredients ADD COLUMN pantry_id INTEGER;
+"""

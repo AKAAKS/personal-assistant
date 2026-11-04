@@ -14,6 +14,9 @@ from nutrition_core.models import Macros, MealIngredient
 from nutrition_core.store.connection import DbConnection
 from nutrition_core.store.goals import active_goals
 
+# Statuses a day actually ate. `planned` (locked for a future day) is deliberately absent.
+CONSUMED_STATUSES: frozenset[str] = frozenset({"verified", "estimated", "eaten"})
+
 
 def log_verified_meal(
     conn: DbConnection,
@@ -24,14 +27,19 @@ def log_verified_meal(
     status: str = "eaten",
     confidence: str = "high",
     assumptions: str = "",
+    links: Sequence[tuple[str | None, int | None]] | None = None,
 ) -> int:
     """Persist a meal whose macros are computed from ingredient grams x per-100g.
 
     The legacy calories/protein_g/carbs_g/fat_g columns receive the computed
     total (calories rounded half-up to an integer) so MealStore summaries keep
     working. Each ingredient row stores the per-100g snapshot and the computed
-    contribution. One transaction, one commit.
+    contribution. `links` is an optional per-ingredient (external_id, pantry_id)
+    aligned by index with `ingredients` (NULL/NULL when omitted). One transaction,
+    one commit.
     """
+    if links is not None and len(links) != len(ingredients):
+        raise ValueError("links must be the same length as ingredients")
     computed = [
         compute_ingredient(i.name, i.grams, i.per100g, i.source) for i in ingredients
     ]
@@ -39,14 +47,16 @@ def log_verified_meal(
     legacy_kcal = int(Macros(total.kcal, 0, 0, 0).rounded(0).kcal)  # half-up
     # Pre-assemble every ingredient row BEFORE the first write so a bad value
     # (e.g. a non-enum source) raises before anything is persisted.
+    link_list = list(links) if links is not None else [(None, None)] * len(ingredients)
     ing_rows = [
         (
             ing.name, ing.grams,
             ing.per100g.kcal, ing.per100g.protein_g, ing.per100g.carbs_g, ing.per100g.fat_g,
             ing.source.value,
             comp.macros.kcal, comp.macros.protein_g, comp.macros.carbs_g, comp.macros.fat_g,
+            lk[0], lk[1],
         )
-        for ing, comp in zip(ingredients, computed)
+        for ing, comp, lk in zip(ingredients, computed, link_list)
     ]
     cur = conn.execute(
         "INSERT INTO meals (ts, description, quantity, calories, protein_g, carbs_g, "
@@ -60,7 +70,8 @@ def log_verified_meal(
         conn.execute(
             "INSERT INTO meal_ingredients (meal_id, name, grams, per100_kcal, "
             "per100_protein_g, per100_carbs_g, per100_fat_g, source, kcal, protein_g, "
-            "carbs_g, fat_g) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "carbs_g, fat_g, external_id, pantry_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (meal_id, *row),
         )
     conn.commit()
@@ -81,25 +92,31 @@ def _day_meal_totals(conn: DbConnection, date: str) -> list[tuple[str, Macros]]:
         (date + "%",),
     ).fetchall()
     for m in meals:
-        ings = conn.execute(
-            "SELECT kcal, protein_g, carbs_g, fat_g FROM meal_ingredients "
-            "WHERE meal_id=? ORDER BY id",
-            (m["id"],),
-        ).fetchall()
-        total = Macros(0, 0, 0, 0)
-        if ings:
-            for r in ings:
-                total = total + Macros(r["kcal"], r["protein_g"], r["carbs_g"], r["fat_g"])
-        else:
-            total = Macros(m["calories"], m["protein_g"], m["carbs_g"], m["fat_g"])
-        out.append((m["status"], total))
+        out.append((m["status"], _meal_macros(conn, m)))
     return out
 
 
-def day_totals(conn: DbConnection, date: str) -> Macros:
-    """Sum of all meals (any status) whose ts starts with `date`."""
+def _meal_macros(conn: DbConnection, m) -> Macros:
+    """Exact ingredient total for a meal row (needs id, calories, protein_g, carbs_g, fat_g)."""
+    ings = conn.execute(
+        "SELECT kcal, protein_g, carbs_g, fat_g FROM meal_ingredients "
+        "WHERE meal_id=? ORDER BY id",
+        (m["id"],),
+    ).fetchall()
+    if not ings:
+        return Macros(m["calories"], m["protein_g"], m["carbs_g"], m["fat_g"])
     total = Macros(0, 0, 0, 0)
-    for _status, macros in _day_meal_totals(conn, date):
+    for r in ings:
+        total = total + Macros(r["kcal"], r["protein_g"], r["carbs_g"], r["fat_g"])
+    return total
+
+
+def day_totals(conn: DbConnection, date: str) -> Macros:
+    """Sum of consumed meals (CONSUMED_STATUSES; not `planned`) whose ts starts with `date`."""
+    total = Macros(0, 0, 0, 0)
+    for status, macros in _day_meal_totals(conn, date):
+        if status not in CONSUMED_STATUSES:
+            continue
         total = total + macros
     return total
 
@@ -109,6 +126,8 @@ def day_status(conn: DbConnection, date: str) -> dict:
     verified = Macros(0, 0, 0, 0)
     estimated = Macros(0, 0, 0, 0)
     for status, macros in _day_meal_totals(conn, date):
+        if status not in CONSUMED_STATUSES:
+            continue
         if status == "estimated":
             estimated = estimated + macros
         else:
@@ -132,3 +151,42 @@ def remaining_today(conn: DbConnection, date: str) -> Macros | None:
     if goal is None:
         return None
     return remaining(goal, day_totals(conn, date))
+
+
+def cook_planned_meal(conn: DbConnection, meal_id: int) -> dict:
+    """Flip a `planned` meal to `verified` in place; return its ingredients with
+    provenance. Does not touch the pantry. Anything else changes nothing."""
+    row = conn.execute("SELECT status, name, ts FROM meals WHERE id=?", (meal_id,)).fetchone()
+    if row is None or row["status"] != "planned":
+        return {"ok": False, "reason": f"meal {meal_id} is not a planned meal (or not found)"}
+    conn.execute("UPDATE meals SET status='verified' WHERE id=? AND status='planned'", (meal_id,))
+    ings = conn.execute(
+        "SELECT name, grams, source, external_id, pantry_id FROM meal_ingredients "
+        "WHERE meal_id=? ORDER BY id",
+        (meal_id,),
+    ).fetchall()
+    conn.commit()
+    return {
+        "ok": True,
+        "name": row["name"],
+        "date": row["ts"],
+        "ingredients": [
+            {k: r[k] for k in ("name", "grams", "source", "external_id", "pantry_id")}
+            for r in ings
+        ],
+    }
+
+
+def list_planned(conn: DbConnection, *, from_date: str | None = None) -> list[dict]:
+    """Planned meals (optionally ts >= from_date), ordered by ts, id."""
+    sql = ("SELECT id, name, ts, calories, protein_g, carbs_g, fat_g FROM meals "
+           "WHERE status='planned'")
+    params: tuple = ()
+    if from_date is not None:
+        sql += " AND ts >= ?"
+        params = (from_date,)
+    sql += " ORDER BY ts, id"
+    return [
+        {"id": m["id"], "name": m["name"], "date": m["ts"], "macros": _meal_macros(conn, m)}
+        for m in conn.execute(sql, params).fetchall()
+    ]
