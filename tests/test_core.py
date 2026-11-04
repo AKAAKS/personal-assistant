@@ -107,3 +107,91 @@ def test_system_prompt_carries_spoken_persona_rules():
     assert "read aloud" in p
     # never the butler honorific — check the actual prohibition, not just that "sir" appears
     assert 'never use "sir"' in SYSTEM_PROMPT
+
+
+# --- Issue #3: _compact_history must not orphan a tool_result -------------
+
+def _tool_turn(i):
+    """One tool-using turn: user text, assistant tool_use, user tool_result,
+    assistant text -- the 4-entry shape that makes the slice land badly."""
+    return [
+        {"role": "user", "content": f"turn {i}"},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": f"t{i}", "name": "x", "input": {}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{i}", "content": "ok"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+    ]
+
+
+def _first_is_plain_user(conv):
+    msg = conv[0]
+    if msg["role"] != "user":
+        return False
+    c = msg["content"]
+    if isinstance(c, str):
+        return True
+    return not any(
+        (b.get("type") if isinstance(b, dict) else getattr(b, "type", None)) == "tool_result"
+        for b in c
+    )
+
+
+def test_compact_history_drops_orphaned_tool_result():
+    """The naive slice can start on a user message holding only tool_result
+    blocks whose tool_use is gone -- the API rejects that with a 400."""
+    ai = make_assistant()
+    # 42 entries, arranged so the last-40 slice starts on the orphaned result.
+    ai.conversation = []
+    for i in range(12):
+        ai.conversation.extend(_tool_turn(i))
+    ai.conversation = ai.conversation[:42]
+    assert len(ai.conversation) == 42
+
+    ai._compact_history()
+
+    assert len(ai.conversation) <= ai.MAX_HISTORY
+    assert _first_is_plain_user(ai.conversation)
+    ids = {
+        b["id"]
+        for m in ai.conversation
+        if m["role"] == "assistant" and not isinstance(m["content"], str)
+        for b in m["content"]
+        if b.get("type") == "tool_use"
+    }
+    orphans = [
+        b["tool_use_id"]
+        for m in ai.conversation
+        if m["role"] == "user" and not isinstance(m["content"], str)
+        for b in m["content"]
+        if b.get("type") == "tool_result" and b["tool_use_id"] not in ids
+    ]
+    assert orphans == []
+
+
+def test_compact_history_drops_leading_assistant_turn():
+    """A slice starting on an assistant message is also invalid as a request."""
+    ai = make_assistant()
+    ai.conversation = (
+        [{"role": "assistant", "content": [{"type": "text", "text": "hi"}]}]
+        + [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}] * 25
+    )
+    ai._compact_history()
+    assert _first_is_plain_user(ai.conversation)
+
+
+def test_compact_history_leaves_short_history_untouched():
+    ai = make_assistant()
+    original = _tool_turn(0) + _tool_turn(1)
+    ai.conversation = list(original)
+    ai._compact_history()
+    assert ai.conversation == original
+
+
+def test_compact_history_handles_all_tool_result_history():
+    """Degenerate case: nothing in the window starts clean. Clearing is the
+    only valid outcome -- it must not raise or leave an orphan behind."""
+    ai = make_assistant()
+    ai.conversation = [
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": "ok"}]}
+    ] * 45
+    ai._compact_history()
+    assert ai.conversation == []

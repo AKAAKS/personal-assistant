@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -228,3 +228,90 @@ def test_add_default_condition_is_none(tmp_path):
     rid = store.add("x", "2026-07-05T10:00:00")
     row = conn.execute("SELECT condition FROM reminders WHERE id=?", (rid,)).fetchone()
     assert row["condition"] is None
+
+
+def test_add_normalizes_offset_aware_due_ts_to_local_naive(tmp_path):
+    """An offset-aware due_ts (the model is told the local zone with %Z, so it
+    can easily send one) must be stored as local naive time. Issue #2: a single
+    aware row made due() raise TypeError, which killed every reminder."""
+    store, conn = make_store(tmp_path)
+    aware = datetime(2026, 1, 1, 8, 0, tzinfo=timezone(timedelta(hours=-5)))
+    rid = store.add("aware", aware.isoformat())
+
+    stored = conn.execute("SELECT due_ts FROM reminders WHERE id = ?", (rid,)).fetchone()["due_ts"]
+    assert datetime.fromisoformat(stored).tzinfo is None
+    assert datetime.fromisoformat(stored) == aware.astimezone().replace(tzinfo=None)
+
+
+def test_add_accepts_z_suffix_due_ts(tmp_path):
+    store, conn = make_store(tmp_path)
+    rid = store.add("zulu", "2026-01-01T12:00:00Z")
+    stored = conn.execute("SELECT due_ts FROM reminders WHERE id = ?", (rid,)).fetchone()["due_ts"]
+    assert datetime.fromisoformat(stored).tzinfo is None
+    expected = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
+    assert datetime.fromisoformat(stored) == expected
+
+
+def test_due_returns_mixed_aware_and_naive_rows(tmp_path):
+    """Issue #2 repro: an aware row alongside a naive one must not break the scan."""
+    store, _ = make_store(tmp_path)
+    store.add("a", "2026-01-01T08:00:00-05:00")
+    store.add("b", "2026-01-01T08:00")
+
+    rows = store.due(datetime(2026, 1, 2))
+    assert sorted(r["text"] for r in rows) == ["a", "b"]
+
+
+def test_due_reads_legacy_aware_row_written_before_the_fix(tmp_path):
+    """Rows an older build already stored in an aware format are normalized on
+    read, so an existing database keeps firing after the upgrade."""
+    store, conn = make_store(tmp_path)
+    store.add("good", "2026-01-01T08:00")
+    conn.execute(
+        "INSERT INTO reminders (text, due_ts, recurrence, status, created_ts) "
+        "VALUES ('legacy', '2026-01-01T08:00:00-05:00', 'none', 'active', '2026-01-01T00:00:00')"
+    )
+    conn.commit()
+
+    rows = store.due(datetime(2026, 1, 2))
+    assert sorted(r["text"] for r in rows) == ["good", "legacy"]
+
+
+def test_due_skips_unusable_row_instead_of_failing(tmp_path):
+    """Second guard: one junk due_ts must not abort the scan and stop every
+    other reminder from firing."""
+    store, conn = make_store(tmp_path)
+    store.add("good", "2026-01-01T08:00")
+    conn.execute(
+        "INSERT INTO reminders (text, due_ts, recurrence, status, created_ts) "
+        "VALUES ('junk', 'tomorrow morning', 'none', 'active', '2026-01-01T00:00:00')"
+    )
+    conn.commit()
+
+    rows = store.due(datetime(2026, 1, 2))
+    assert [r["text"] for r in rows] == ["good"]
+
+
+def test_list_active_sorts_mixed_formats_chronologically(tmp_path):
+    """due_ts is sorted as a string in SQL, so normalizing at write time is what
+    keeps the order right."""
+    store, _ = make_store(tmp_path)
+    store.add("later", "2026-01-01T23:00")
+    store.add("earlier", "2026-01-01T09:00:00+00:00")
+
+    texts = [r["text"] for r in store.list_active()]
+    naive_earlier = datetime(2026, 1, 1, 9, 0, tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
+    expected = ["earlier", "later"] if naive_earlier.hour < 23 else ["later", "earlier"]
+    assert texts == expected
+
+
+def test_mark_fired_recurring_aware_row_reschedules(tmp_path):
+    """mark_fired compares due_ts against a naive now too -- normalizing in
+    add() has to cover the recurrence path as well."""
+    store, conn = make_store(tmp_path)
+    rid = store.add("daily", "2026-01-01T08:00:00-05:00", recurrence="daily")
+    store.mark_fired(rid, datetime(2026, 1, 3, 12, 0))
+
+    row = conn.execute("SELECT due_ts, status FROM reminders WHERE id = ?", (rid,)).fetchone()
+    assert row["status"] == "active"
+    assert datetime.fromisoformat(row["due_ts"]) > datetime(2026, 1, 3, 12, 0)
