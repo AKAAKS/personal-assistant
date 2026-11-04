@@ -9,7 +9,12 @@ and get written to disk.
 
 import pytest
 
-from voice.speaker_verify import DEFAULT_MARGIN, calibrate
+from voice.speaker_verify import (
+    DEFAULT_MARGIN,
+    THRESHOLD_MAX,
+    THRESHOLD_MIN,
+    calibrate,
+)
 
 
 def test_threshold_lands_in_the_gap_between_the_bands():
@@ -61,10 +66,25 @@ def test_a_tiny_gap_still_yields_a_non_zero_margin():
 def test_threshold_is_clamped_to_a_sane_range():
     # Absurdly low user scores must not drive the threshold to zero.
     low = calibrate(user_sims=[0.10], user_gaps=[0.01], impostor_sims=[])
-    assert low["threshold"] >= 0.40
+    assert low["threshold"] >= THRESHOLD_MIN
     # Nor may a perfect enrollment push it to 1.0, which nothing could clear.
     high = calibrate(user_sims=[1.0], user_gaps=[0.9], impostor_sims=[0.99])
-    assert high["threshold"] <= 0.95
+    assert high["threshold"] <= THRESHOLD_MAX
+
+
+def test_the_floor_suits_the_ecapa_score_scale():
+    """ECAPA puts same-speaker at ~0.3-0.8 and different-speaker at or below
+    zero; the d-vector this was first written for put same-speaker at 0.7-0.9.
+    A 0.40 floor clamped a correctly-derived 0.24 upward and then rejected
+    genuine 1-2s utterances scoring 0.29."""
+    assert THRESHOLD_MIN <= 0.25
+
+    # The user's real enrollment numbers must derive something that accepts
+    # their weakest measured utterance (0.290) rather than clamping above it.
+    cal = calibrate(user_sims=[0.594, 0.72], user_gaps=[0.602, 0.70],
+                    impostor_sims=[0.002])
+    assert cal["threshold"] < 0.290
+    assert cal["margin"] < 0.285  # their weakest real gap
 
 
 def test_rejects_an_empty_user_band():

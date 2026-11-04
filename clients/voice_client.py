@@ -65,10 +65,28 @@ ECHO_DRAIN_SEC = float(os.getenv("ECHO_DRAIN_MS", "250")) / 1000.0
 MIN_UTTERANCE_SAMPLES = int(os.getenv("MIN_UTTERANCE_SAMPLES", "8000"))  # 0.5s
 
 # Barge-in policy while a reply is playing (see PlaybackWakePolicy).
-PLAYBACK_WAKE_THRESHOLD = float(os.getenv("WAKE_WORD_THRESHOLD_PLAYBACK", "0.7"))
-PLAYBACK_WAKE_CONSECUTIVE = int(os.getenv("WAKE_WORD_CONSECUTIVE_PLAYBACK", "2"))
-PLAYBACK_LEVEL_RATIO = float(os.getenv("PLAYBACK_LEVEL_RATIO", "2.0"))
+#
+# These default to the SAME score and streak as idle listening on purpose. The
+# first version demanded 0.7 over two consecutive chunks, which made barge-in
+# strictly harder than waking JARVIS from idle and stopped it firing at all.
+# That strictness was guarding against the wake model tripping on JARVIS's own
+# speech -- a hypothesis no log ever supported, and one that is no longer
+# load-bearing: a self-fire now just purges, records the echo, and has it
+# rejected as `unverified` without ending the conversation.
+#
+# The level gate is the one genuinely physical discriminator, so it stays: a
+# candidate quieter than the echo it is competing with cannot be someone
+# talking over the speaker. Set PLAYBACK_LEVEL_RATIO=0 to disable even that.
+PLAYBACK_WAKE_THRESHOLD = float(os.getenv("WAKE_WORD_THRESHOLD_PLAYBACK",
+                                          os.getenv("WAKE_WORD_THRESHOLD", "0.5")))
+PLAYBACK_WAKE_CONSECUTIVE = int(os.getenv("WAKE_WORD_CONSECUTIVE_PLAYBACK", "1"))
+PLAYBACK_LEVEL_RATIO = float(os.getenv("PLAYBACK_LEVEL_RATIO", "1.2"))
 PLAYBACK_MIN_LEVEL = float(os.getenv("PLAYBACK_MIN_LEVEL", "200"))
+
+# Log any chunk that scored at least this much but did NOT barge in, with the
+# gate that stopped it. Without this there was no way to tell a missing
+# detection from a rejected one.
+PLAYBACK_DIAG_SCORE = float(os.getenv("PLAYBACK_DIAG_SCORE", "0.3"))
 
 
 class PlaybackWakePolicy:
@@ -111,27 +129,41 @@ class PlaybackWakePolicy:
         self.min_level = min_level
         self.echo_floor = 0.0
         self.streak = 0
+        self.last_reason = "idle"
 
     def reset(self):
         self.echo_floor = 0.0
         self.streak = 0
+        self.last_reason = "idle"
+
+    @property
+    def required_level(self) -> float:
+        """The level a candidate chunk has to beat right now."""
+        return max(self.echo_floor * self.level_ratio, self.min_level)
 
     def observe(self, *, score: float, level: float) -> bool:
-        """Feed one chunk's wake-word score and RMS level. True = barge in."""
+        """Feed one chunk's wake-word score and RMS level. True = barge in.
+
+        `last_reason` records which gate decided, for the diagnostic log.
+        """
         if score < self.threshold:
             # Not a candidate, so this chunk is a sample of the echo itself.
             self.echo_floor += self.ALPHA * (level - self.echo_floor)
             self.streak = 0
+            self.last_reason = "low_score"
             return False
         # A candidate: never let it raise the floor, or a long sentence would
         # gradually gate itself out.
-        if level < max(self.echo_floor * self.level_ratio, self.min_level):
+        if level < self.required_level:
             self.streak = 0
+            self.last_reason = "below_echo_floor"
             return False
         self.streak += 1
         if self.streak >= self.consecutive:
             self.streak = 0
+            self.last_reason = "fire"
             return True
+        self.last_reason = "need_more_chunks"
         return False
 
 
@@ -223,13 +255,26 @@ class VoiceClient:
                 chunk = self._wake_buf[:WAKE_WORD_CHUNK]
                 self._wake_buf = self._wake_buf[WAKE_WORD_CHUNK:]
                 score = self.wake_word.score(chunk)
-                if self._playback_policy.observe(score=score, level=rms(chunk)):
+                level = rms(chunk)
+                policy = self._playback_policy
+                if policy.observe(score=score, level=level):
                     log.info(
                         "Barge-in accepted: score %.2f, level %.0f, echo floor %.0f",
-                        score, rms(chunk), self._playback_policy.echo_floor,
+                        score, level, policy.echo_floor,
                     )
                     self.wake_word.reset()
                     return True
+                if score >= PLAYBACK_DIAG_SCORE:
+                    # A near miss. Says exactly which gate stopped it, so a
+                    # barge-in that never fires can be told apart from one the
+                    # policy rejected -- and tuned from numbers, not guesses.
+                    log.info(
+                        "Barge-in rejected [%s]: score %.2f (need %.2f), "
+                        "level %.0f (need %.0f), echo floor %.0f, streak %d/%d",
+                        policy.last_reason, score, policy.threshold,
+                        level, policy.required_level, policy.echo_floor,
+                        policy.streak, policy.consecutive,
+                    )
         return False
 
     def _drain_mic(self, seconds: float = ECHO_DRAIN_SEC):

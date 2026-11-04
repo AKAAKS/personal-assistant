@@ -48,7 +48,7 @@ DEFAULT_BACKEND = "ecapa"
 # (it is why short commands scored 0.37-0.62 while the same voice scored
 # 0.70-0.87 on a 3s clip). We still trust the *relative* comparison, so a short
 # clip is decided by the margin rule alone.
-DEFAULT_MIN_DURATION_SEC = 1.2
+DEFAULT_MIN_DURATION_SEC = 2.0
 DEFAULT_MARGIN = 0.10
 DEFAULT_THRESHOLD = 0.75
 
@@ -74,15 +74,25 @@ def make_voiceprint(embeddings) -> np.ndarray:
 
 # Bounds for a derived threshold. Below MIN nothing is really being verified;
 # above MAX a normal utterance could never clear it.
-THRESHOLD_MIN = 0.40
+#
+# MIN is 0.20 because ECAPA's cosine scale is NOT the d-vector scale these were
+# first written for: same-speaker lands ~0.3-0.8 and different-speaker sits at
+# or below zero, where Resemblyzer put same-speaker at 0.7-0.9. A 0.40 floor
+# clamped a correctly-derived 0.24 upward and then rejected genuine 1-2s
+# utterances scoring 0.29. Measured from live logs: genuine speech >= 0.290,
+# JARVIS-mixed audio <= 0.242.
+THRESHOLD_MIN = 0.20
 THRESHOLD_MAX = 0.95
 # Where in the gap between the impostor band and the user band to place the
 # threshold. Below 0.5 biases toward the impostor side, i.e. toward accepting
 # the user -- deliberate, because the margin rule is the real guard against the
 # echo and a false reject is the symptom we are fixing.
 GAP_BIAS = 0.4
-# Keep the required margin strictly inside the worst gap actually observed.
-MARGIN_HEADROOM = 0.5
+# Keep the required margin well inside the worst gap actually observed.
+# Enrollment phrases are spoken deliberately and score a much wider gap than
+# real commands do: measured min gap was ~0.60 at enrollment but 0.285 in use,
+# so half the enrollment gap was still too strict.
+MARGIN_HEADROOM = 0.33
 MARGIN_MIN = 0.05
 MARGIN_MAX = 0.40
 
