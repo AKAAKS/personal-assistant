@@ -42,6 +42,16 @@ class PantryStore:
     def adjust_quantity(self, pantry_id: int, delta: float) -> float:
         return pantry.adjust_quantity(self._conn, pantry_id, delta)
 
+    def deplete(self, *, source: str, external_id: str, grams: float) -> float | None:
+        """Deplete a tracked food by grams; None if it is not in the pantry."""
+        row = pantry.find_by_food(self._conn, source=source, external_id=external_id)
+        if row is None:
+            return None
+        return pantry.adjust_quantity(self._conn, row["id"], -grams)
+
+    def deplete_by_id(self, pantry_id: int, grams: float) -> float:
+        return pantry.adjust_quantity(self._conn, pantry_id, -grams)
+
     def find_by_food(self, source: str, external_id: str) -> dict | None:
         return pantry.find_by_food(self._conn, source=source, external_id=external_id)
 

@@ -84,7 +84,8 @@ def adjust_quantity(conn: DbConnection, pantry_id: int, delta_grams: float) -> f
     if row is None:
         return 0.0
     remaining = max(0.0, row["grams_available"] + delta_grams)
-    if remaining == 0.0:
+    if remaining <= 1e-9:  # epsilon: repeated fractional depletions leave float dust
+        remaining = 0.0
         conn.execute("DELETE FROM pantry WHERE id=?", (pantry_id,))
     else:
         conn.execute(
