@@ -290,8 +290,8 @@ def handlers(conn, food_service, pantry_store):
                 else:
                     depleted.append(f"- {ing['name']}: -{_g(float(ing['grams']))} g "
                                     f"({_g(rem)} g left)")
-            lines = [f"Cooked {res['name']} (planned for {str(res['date'])[:10]}): it is now "
-                     "logged as verified and counts toward today."]
+            lines = [f"Cooked {res['name']}: it is now logged (verified) and counts toward "
+                     f"{str(res['date'])[:10]}."]
             if depleted:
                 lines.append("Pantry depleted:")
                 lines += depleted

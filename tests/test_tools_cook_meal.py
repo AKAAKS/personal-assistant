@@ -39,6 +39,14 @@ class TestCook(CookBase):
         assert self.grams()[self.rice_id] == 60
         assert "Rice" in out or "rice" in out
 
+    def test_future_dated_cook_reports_planned_date(self):
+        mid = self.lock("Ahead", [self.chicken(200)])  # TOMORROW
+        out = self.cook(mid)
+        assert TOMORROW in out and "today" not in out.lower()
+        assert self.grams()[self.chicken_id] == 300
+        assert day_totals(self.conn, date.today().isoformat()).kcal == 0
+        assert day_totals(self.conn, TOMORROW).kcal > 0
+
     def test_second_cook_is_safe_no_double_deplete(self):
         mid = self.lock("Bowl", [self.chicken(200)])
         self.cook(mid)
