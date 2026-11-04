@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from nutrition_core.adapters.base import Transport, macros_from_fields
+from nutrition_core.adapters.base import UNTRUSTWORTHY, Transport, macros_from_fields
 from nutrition_core.models import Confidence, FoodItem, FoodSource
 
 PRODUCT_URL = "https://world.openfoodfacts.org/api/v2/product/{barcode}"
@@ -58,9 +58,9 @@ def _to_food_item(product: dict, fallback_code: str | None = None) -> FoodItem |
         return None
     macros = macros_from_fields(
         _kcal(nutriments, product),
-        _number(nutriments.get("proteins_100g")),
-        _number(nutriments.get("carbohydrates_100g")),
-        _number(nutriments.get("fat_100g")),
+        _macro(nutriments, "proteins_100g"),
+        _macro(nutriments, "carbohydrates_100g"),
+        _macro(nutriments, "fat_100g"),
     )
     if macros is None:
         return None
@@ -84,6 +84,14 @@ def _kcal(nutriments: dict, product: dict) -> float | None:
     if kj is None:
         return None
     return kj / KJ_PER_KCAL
+
+
+def _macro(nutriments: dict, key: str) -> float | None:
+    """None if the key is absent; UNTRUSTWORTHY if present but unreadable."""
+    if key not in nutriments:
+        return None
+    number = _number(nutriments[key])
+    return UNTRUSTWORTHY if number is None else number
 
 
 def _energy_unit(nutriments: dict, product: dict) -> str:

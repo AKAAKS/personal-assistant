@@ -203,7 +203,13 @@ def handlers(conn, food_service, pantry_store):
                     return r
                 resolved.append(r)
 
-            # 2. log (engine-computed totals).
+            # 2. compute the displayed total BEFORE persisting, so no fallible
+            #    work remains after the row exists (no error -> no retry -> no
+            #    duplicate log), then log (engine-computed totals).
+            total = compute_meal([
+                compute_ingredient(r.meal_ingredient.name, r.meal_ingredient.grams,
+                                   r.meal_ingredient.per100g, r.meal_ingredient.source)
+                for r in resolved]).total
             today = date.today().isoformat()
             log_verified_meal(
                 conn, name=name.strip(), date=today,
@@ -229,10 +235,6 @@ def handlers(conn, food_service, pantry_store):
             except Exception as exc:
                 warnings.append(f"pantry update failed ({exc})")
 
-            total = compute_meal([
-                compute_ingredient(r.meal_ingredient.name, r.meal_ingredient.grams,
-                                   r.meal_ingredient.per100g, r.meal_ingredient.source)
-                for r in resolved]).total
             msg = (f"Logged '{name.strip()}': {total.kcal:.0f} kcal, "
                    f"{total.protein_g:.1f}g protein, {total.carbs_g:.1f}g carbs, "
                    f"{total.fat_g:.1f}g fat.")

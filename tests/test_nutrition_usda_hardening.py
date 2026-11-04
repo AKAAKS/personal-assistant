@@ -51,11 +51,12 @@ class TestMalformedPayloads:
         food["foodNutrients"] = ["junk", None] + food["foodNutrients"]
         assert len(_search({"foods": [food]})) == 1
 
-    def test_nutrient_value_non_numeric_skipped(self):
+    def test_nutrient_value_non_numeric_drops_food(self):
+        # Present-but-unparseable macro is untrustworthy -> food dropped (was: kept at 0.0).
         food = _good_food()
         food["foodNutrients"].append({"nutrientId": 1003, "value": "abc"})
         food["foodNutrients"].insert(0, {"nutrientId": 1005, "value": "abc"})
-        assert len(_search({"foods": [food]})) == 1
+        assert _search({"foods": [food]}) == []
 
     def test_energy_value_non_numeric_drops_food(self):
         food = {"fdcId": 1, "description": "x",
@@ -75,10 +76,10 @@ class TestNumericExtremes:
                 "foodNutrients": [{"nutrientId": 1008, "value": 10**400}]}
         assert _search({"foods": [food]}) == []
 
-    def test_huge_int_value_on_other_nutrient_skipped(self):
+    def test_huge_int_value_on_other_nutrient_drops_food(self):
         food = _good_food()
         food["foodNutrients"].insert(0, {"nutrientId": 1005, "value": 10**400})
-        assert len(_search({"foods": [food]})) == 1
+        assert _search({"foods": [food]}) == []
 
     def test_infinite_nutrient_id_skipped(self):
         food = _good_food()

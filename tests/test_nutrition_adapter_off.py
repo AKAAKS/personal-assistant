@@ -60,14 +60,11 @@ class TestOpenFoodFactsHardening:
         assert OpenFoodFactsAdapter(FakeTransport(payload)).get_by_barcode("1") is None
 
     @pytest.mark.parametrize("bad", ["nan", "inf", float("nan")])
-    def test_non_finite_macro_defaults_to_zero(self, bad):
-        import math
+    def test_non_finite_macro_drops_food(self, bad):
+        # Present-but-non-finite macro is untrustworthy -> food dropped (was: kept at 0.0).
         payload = {"status": 1, "product": _product("2", {
             "energy-kcal_100g": 100, "proteins_100g": bad, "fat_100g": bad, "carbohydrates_100g": bad})}
-        item = OpenFoodFactsAdapter(FakeTransport(payload)).get_by_barcode("2")
-        m = item.per100g
-        assert all(math.isfinite(v) for v in (m.kcal, m.protein_g, m.carbs_g, m.fat_g))
-        assert m.protein_g == 0.0 and m.fat_g == 0.0 and m.carbs_g == 0.0
+        assert OpenFoodFactsAdapter(FakeTransport(payload)).get_by_barcode("2") is None
 
     def test_search_keeps_only_valid_and_respects_limit(self):
         payload = {"products": [

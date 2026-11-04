@@ -56,6 +56,8 @@ TOOL_PERMISSIONS = {
     "delete_trigger_rule": "write",
     # Meals
     "log_meal": "write",
+    "log_estimated_meal": "write",
+    "day_status": "read_only",
     "meal_summary": "read_only",
     "export_meals": "write",
     "set_nutrition_targets": "write",
