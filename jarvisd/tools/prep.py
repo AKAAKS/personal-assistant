@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from jarvisd.reminder_store import ReminderStore
 from jarvisd.tools.meal_log import resolve_ingredient
 from nutrition_core.engine import compute_ingredient, compute_meal
-from nutrition_core.store.meals import log_verified_meal
+from nutrition_core.store.meals import cook_planned_meal, list_planned, log_verified_meal
 
 TOOLS = [
     {
@@ -56,6 +56,31 @@ TOOLS = [
                 },
             },
             "required": ["dishes"],
+        },
+    },
+    {
+        "name": "cook_meal",
+        "description": (
+            "Mark a locked (planned) meal as actually COOKED: it becomes a logged, verified "
+            "meal that counts toward today, and its ingredients are deducted from the pantry. "
+            "Takes the meal's integer 'meal_id' (see list_planned_meals). Works once per meal."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"meal_id": {"type": "integer"}},
+            "required": ["meal_id"],
+        },
+    },
+    {
+        "name": "list_planned_meals",
+        "description": (
+            "List upcoming locked (planned, not yet cooked) meals with id, name, date and "
+            "macros, so one can be cooked with cook_meal. Optional 'from_date' (YYYY-MM-DD, "
+            "default today)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"from_date": {"type": "string", "description": "YYYY-MM-DD."}},
         },
     },
 ]
@@ -227,4 +252,78 @@ def handlers(conn, food_service, pantry_store):
         except Exception as exc:
             return f"Error: couldn't plan the prep ({exc})"
 
-    return {"plan_prep": plan_prep}
+    def _deplete_one(ing):
+        """Best-effort deplete. Returns (remaining_or_None, note_or_None)."""
+        grams = float(ing["grams"])
+        pid = ing.get("pantry_id")
+        if pid is not None:
+            try:
+                if any(r["id"] == pid for r in pantry_store.list_items()):
+                    return pantry_store.deplete_by_id(pid, grams), None
+            except Exception:
+                pass  # fall through to the food link
+        if ing.get("external_id"):
+            rem = pantry_store.deplete(source=ing.get("source"),
+                                       external_id=ing["external_id"], grams=grams)
+            if rem is None:
+                return None, f"couldn't deplete {ing['name']} (not in pantry)"
+            return rem, None
+        return None, f"couldn't match {ing['name']} to a pantry item"
+
+    def cook_meal(ti):
+        try:
+            mid = ti.get("meal_id") if isinstance(ti, dict) else None
+            if isinstance(mid, bool) or not isinstance(mid, int):
+                return "Error: 'meal_id' must be an integer."
+            res = cook_planned_meal(conn, mid)
+            if not res.get("ok"):
+                return ("That meal isn't a locked plan (maybe already cooked or doesn't "
+                        "exist) — nothing was depleted.")
+            depleted, misses = [], []
+            for ing in res["ingredients"]:
+                try:
+                    rem, note = _deplete_one(ing)
+                except Exception as exc:
+                    rem, note = None, f"couldn't deplete {ing['name']} ({exc})"
+                if note:
+                    misses.append(note)
+                else:
+                    depleted.append(f"- {ing['name']}: -{_g(float(ing['grams']))} g "
+                                    f"({_g(rem)} g left)")
+            lines = [f"Cooked {res['name']} (planned for {str(res['date'])[:10]}): it is now "
+                     "logged as verified and counts toward today."]
+            if depleted:
+                lines.append("Pantry depleted:")
+                lines += depleted
+            if misses:
+                lines.append("Not depleted:")
+                lines += [f"- {m}" for m in misses]
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Error: couldn't cook the meal ({exc})"
+
+    def list_planned_meals(ti):
+        try:
+            frm = ti.get("from_date") if isinstance(ti, dict) else None
+            if frm is None or frm == "":
+                frm = _date.today().isoformat()
+            else:
+                try:
+                    _date.fromisoformat(frm)
+                except (ValueError, TypeError):
+                    return f"Error: from_date {frm!r} is not YYYY-MM-DD."
+            meals = list_planned(conn, from_date=frm)
+            if not meals:
+                return f"No planned meals from {frm}."
+            lines = [f"Planned meals from {frm}:"]
+            for m in meals:
+                x = m["macros"]
+                lines.append(f"- #{m['id']} {m['name']} on {str(m['date'])[:10]}: "
+                             f"{x.kcal:.0f} kcal, {x.protein_g:.1f}P / {x.carbs_g:.1f}C / "
+                             f"{x.fat_g:.1f}F")
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Error: couldn't list planned meals ({exc})"
+
+    return {"plan_prep": plan_prep, "cook_meal": cook_meal,
+            "list_planned_meals": list_planned_meals}

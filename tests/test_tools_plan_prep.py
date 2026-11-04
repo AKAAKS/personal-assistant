@@ -27,7 +27,7 @@ class PrepBase(Base):
 
 
 def test_exports():
-    assert [t["name"] for t in prep.TOOLS] == ["plan_prep"]
+    assert [t["name"] for t in prep.TOOLS] == ["plan_prep", "cook_meal", "list_planned_meals"]
 
 
 class TestLock(PrepBase):
