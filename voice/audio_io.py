@@ -1,6 +1,7 @@
 """Microphone capture and voice activity detection."""
 
 import collections
+import os
 import queue
 import numpy as np
 import sounddevice as sd
@@ -21,6 +22,14 @@ FRAME_SIZE = int(SAMPLE_RATE * FRAME_DURATION_MS / 1000)
 # hold audio from after the caller's mic.clear() -- it cannot resurrect the wake
 # phrase or the tail of JARVIS's own reply.
 PRE_ROLL_MS = 300
+
+# A capture must hold at least this much VAD-positive audio to count as an
+# utterance. Total length cannot tell a real command from a noise blip: with
+# silence_ms of trailing silence appended, a 1.0s "utterance" can be ~0.2s of
+# room noise. Live log 15:18 shipped two such clips to the server, which scored
+# them near zero against both voiceprints -- noise, not a voice. Rejecting them
+# here saves the round trip and keeps the follow-up window quiet.
+MIN_SPEECH_MS = int(os.getenv("MIN_SPEECH_MS", "300"))
 
 
 class MicrophoneStream:
@@ -82,12 +91,17 @@ class VoiceActivityDetector:
         silence_ms: int = 800,
         speech_timeout_sec: float = 5.0,
         pre_roll_ms: int = PRE_ROLL_MS,
+        min_speech_ms: int = MIN_SPEECH_MS,
     ) -> np.ndarray | None:
         """Record from mic until speech stops. Returns audio array or None.
 
         The last `pre_roll_ms` of pre-speech audio is kept and prepended once
         speech latches, so the onset of the first word is not clipped. Pass
         `pre_roll_ms=0` for the old discard-everything-before-speech behaviour.
+
+        Returns None unless at least `min_speech_ms` of the capture was actually
+        flagged as speech, so a VAD blip on room noise is dropped here instead
+        of becoming a wasted turn. Pass `min_speech_ms=0` to disable.
         """
         frames = list(pre_buffer) if pre_buffer else []
         max_frames = int(max_seconds * 1000 / FRAME_DURATION_MS)
@@ -97,6 +111,10 @@ class VoiceActivityDetector:
         speech_started = bool(pre_buffer)
         silent_count = 0
         no_speech_count = 0
+        # Caller-supplied pre_buffer is already known to be speech (the
+        # barge-in path), so it counts toward the requirement.
+        speech_frames = len(pre_buffer) if pre_buffer else 0
+        min_speech_frames = int(min_speech_ms / FRAME_DURATION_MS)
         # Rolling window of the frames read while still waiting for speech.
         pre_roll = collections.deque(maxlen=max(0, int(pre_roll_ms / FRAME_DURATION_MS)))
 
@@ -111,13 +129,25 @@ class VoiceActivityDetector:
                     pre_roll.clear()
                 speech_started = True
                 silent_count = 0
-                no_speech_count = 0
+                speech_frames += 1
                 frames.append(frame)
             elif speech_started:
                 silent_count += 1
                 frames.append(frame)
                 if silent_count >= silence_needed:
-                    break
+                    if speech_frames >= min_speech_frames:
+                        break  # a real utterance, properly ended
+                    # A blip on room noise. Discard it and keep waiting rather
+                    # than returning None: in the follow-up branch None means
+                    # "the window closed in silence" and ENDS the hands-free
+                    # conversation, so one cough would cut the user's thinking
+                    # time short. `no_speech_count` is deliberately not reset
+                    # by speech, so overall patience stays bounded.
+                    frames = list(pre_buffer) if pre_buffer else []
+                    speech_started = bool(pre_buffer)
+                    speech_frames = len(pre_buffer) if pre_buffer else 0
+                    silent_count = 0
+                    pre_roll.clear()
             else:
                 pre_roll.append(frame)
                 no_speech_count += 1
@@ -125,5 +155,8 @@ class VoiceActivityDetector:
                     return None
 
         if not frames:
+            return None
+        if speech_frames < min_speech_frames:
+            # A blip, not an utterance: mostly trailing silence.
             return None
         return np.concatenate(frames)

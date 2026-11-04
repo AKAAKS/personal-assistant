@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import os
+import sys
 import tempfile
 import time
 import wave
@@ -550,8 +551,39 @@ class VoiceClient:
             self.mic.stop()
 
 
+def _setup_logging():
+    """Log to logs/voice_client.log AND the console, mirroring the daemon.
+
+    Previously this was console-only, and the file of that name existed solely
+    because the tray redirects the child's stdout into it. So running the client
+    from a terminal -- the normal way to test it -- threw every wake-word and
+    barge-in diagnostic away with the scrollback, which is exactly the data
+    needed to tune the barge-in gate. Rotating, so an always-on client can't
+    grow it without bound.
+    """
+    from logging.handlers import RotatingFileHandler
+
+    handlers: list[logging.Handler] = []
+    try:
+        os.makedirs("logs", exist_ok=True)
+        handlers.append(RotatingFileHandler(
+            os.path.join("logs", "voice_client.log"),
+            maxBytes=2_000_000, backupCount=3, encoding="utf-8",
+        ))
+    except OSError:
+        pass  # unwritable logs dir must not stop the client from running
+    if sys.stderr is not None:  # no console under pythonw
+        handlers.append(logging.StreamHandler())
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+        handlers=handlers,
+    )
+
+
 def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s", datefmt="%H:%M:%S")
+    _setup_logging()
     url = os.getenv("JARVIS_URL", "ws://127.0.0.1:8765")
     try:
         asyncio.run(VoiceClient(url).run())

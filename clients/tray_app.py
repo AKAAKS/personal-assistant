@@ -201,8 +201,14 @@ def _spawn_daemon():
 
 
 def _spawn_client():
+    # The client now configures its own rotating file logging
+    # (logs/voice_client.log), so its PIPES go to a SEPARATE file. Pointing
+    # both at one path would give that file two writers, and a second raw
+    # handle blocks the rotation rename on Windows. The pipes still matter:
+    # the client's user-facing print()s ("You: ...", "JARVIS: ...") have
+    # nowhere else to go under pythonw.
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    out = _log_file("voice_client.log")
+    out = _log_file("voice_client.out.log")
     return subprocess.Popen(
         [_pythonw(), "-m", "clients.voice_client"],
         cwd=ROOT, stdout=out, stderr=subprocess.STDOUT, creationflags=flags,
