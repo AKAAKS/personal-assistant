@@ -85,6 +85,15 @@ class TestValidate(Base):
         out = self.tool({"name": "R", "ingredients": [{"pantry_id": self.rice_id, "grams": 250}]})
         assert "short" in out.lower()
 
+    def test_duplicate_rows_aggregated(self):
+        self.target()
+        ings = [{"pantry_id": self.rice_id, "grams": 60}, {"pantry_id": self.rice_id, "grams": 60}]
+        d = self.validate(ings)
+        assert not d.pantry_ok and len(d.shortfalls) == 1 and "120" in d.shortfalls[0]
+        d = self.validate([{"pantry_id": self.rice_id, "grams": 60}, {"name": "rice", "grams": 60}])
+        assert not d.pantry_ok and "120" in d.shortfalls[0]
+        assert self.validate([{"pantry_id": self.rice_id, "grams": 100}]).pantry_ok
+
     def test_shortfall_via_name_lookup(self):
         self.target()
         d = self.validate([{"name": "rice", "grams": 250}])

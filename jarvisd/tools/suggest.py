@@ -82,7 +82,8 @@ def validate_dish(name, ingredients, *, conn, food_service, pantry_store) -> Dis
     # Pantry availability (reads only).
     items = pantry_store.list_items()
     by_id = {row["id"]: row for row in items}
-    shortfalls = []
+    need_by_row: dict[int, float] = {}
+    rows: dict[int, dict] = {}
     for r in resolved:
         if r.pantry_id is not None:
             row = by_id.get(r.pantry_id)
@@ -90,9 +91,14 @@ def validate_dish(name, ingredients, *, conn, food_service, pantry_store) -> Dis
             row = pantry_store.find_by_food(r.source, r.external_id)
         else:
             row = None
-        need = r.meal_ingredient.grams
-        if row is not None and row["grams_available"] < need:
-            shortfalls.append(f"needs {_g(need)} g of {r.meal_ingredient.name}, "
+        if row is not None:
+            rows[row["id"]] = row
+            need_by_row[row["id"]] = need_by_row.get(row["id"], 0.0) + r.meal_ingredient.grams
+    shortfalls = []
+    for rid, need in need_by_row.items():
+        row = rows[rid]
+        if row["grams_available"] < need:
+            shortfalls.append(f"needs {_g(need)} g of {row['name']}, "
                               f"have {_g(row['grams_available'])} g")
 
     rem = day_status_repo(conn, date.today().isoformat())["remaining"]
