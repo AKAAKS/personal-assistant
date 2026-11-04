@@ -11,7 +11,8 @@ import winsound
 
 import numpy as np
 
-from clients.voice_client import VoiceClient
+import clients.voice_client as vc
+from clients.voice_client import PlaybackWakePolicy, VoiceClient
 
 
 class FakeMic:
@@ -224,40 +225,65 @@ WAKE_CHUNK = 1280  # WAKE_WORD_CHUNK
 
 
 class FrameMic:
-    """Mic that always has a full wake-word chunk ready."""
-    def __init__(self):
+    """Mic that always has a full wake-word chunk ready, at a given level."""
+    def __init__(self, level=0):
         self.clears = 0
+        self.reads = 0
+        self.level = level
 
     def clear(self):
         self.clears += 1
 
     def read_frame(self, timeout=1.0):
-        return np.zeros(WAKE_CHUNK, dtype=np.int16)
+        self.reads += 1
+        return np.full(WAKE_CHUNK, self.level, dtype=np.int16)
 
 
 class FakeWake:
-    """process_frame returns True on the Nth call (0 = never)."""
-    def __init__(self, fire_on=0):
+    """score() is high for calls in [fire_on, fire_until] (fire_on=0 = never).
+
+    fire_until models a TRANSIENT high score -- the realistic shape of both a
+    real barge-in and a self-fire on JARVIS's own speech, where surrounding
+    chunks score low and so teach the policy its echo floor.
+    """
+    def __init__(self, fire_on=0, fire_until=None):
         self.fire_on = fire_on
+        self.fire_until = fire_until
         self.calls = 0
+        self.resets = 0
+
+    def score(self, chunk):
+        self.calls += 1
+        if not self.fire_on or self.calls < self.fire_on:
+            return 0.0
+        if self.fire_until is not None and self.calls > self.fire_until:
+            return 0.0
+        return 0.95
 
     def process_frame(self, chunk):
-        self.calls += 1
-        return self.fire_on and self.calls >= self.fire_on
+        return self.score(chunk) >= 0.5
+
+    def reset(self):
+        self.resets += 1
 
 
-def _watch_client(wake):
+def _watch_client(wake, level=8000, policy=None):
     c = VoiceClient.__new__(VoiceClient)
-    c.mic = FrameMic()
+    c.mic = FrameMic(level=level)
     c.wake_word = wake
     c._wake_buf = np.array([], dtype=np.int16)
+    c._playback_policy = policy or PlaybackWakePolicy(
+        threshold=0.7, consecutive=2, level_ratio=2.0, min_level=200.0
+    )
     return c
 
 
 def test_watch_for_wake_returns_true_when_word_fires():
-    c = _watch_client(FakeWake(fire_on=2))
+    # Loud, confident and sustained: the user really did cut in.
+    c = _watch_client(FakeWake(fire_on=2), level=8000)
     assert c._watch_for_wake(duration=5.0) is True
     assert c.mic.clears == 1
+    assert c.wake_word.resets == 1
 
 
 def test_watch_for_wake_returns_false_after_duration():
@@ -265,6 +291,61 @@ def test_watch_for_wake_returns_false_after_duration():
     start = time.monotonic()
     assert c._watch_for_wake(duration=0.05) is False
     assert time.monotonic() - start < 2.0  # exits near the deadline, doesn't hang
+
+
+# --- Bluetooth latency: the watch must cover the whole physical playout ------
+
+
+def test_watch_waits_past_the_clip_for_output_latency():
+    """The reply is still coming out of the speaker after the WAV's own
+    duration. Ending the watch there is what purged mid-sentence."""
+    c = _watch_client(FakeWake(fire_on=0))
+    start = time.monotonic()
+    c._watch_for_wake(duration=0.2)
+    elapsed = time.monotonic() - start
+    assert elapsed >= 0.2 + vc.OUTPUT_LATENCY_SEC, (
+        f"watch ended after {elapsed:.2f}s, before the clip had played out"
+    )
+
+
+def test_quiet_self_fire_during_playback_is_not_a_barge_in():
+    """JARVIS's own voice can briefly score high, but it is no louder than the
+    echo floor the surrounding chunks established, so it must not interrupt."""
+    # Chunks 1-14 score 0 at level 400 and teach the floor; 15-18 score 0.95 at
+    # that same level -- a transient self-fire, not someone talking over it.
+    c = _watch_client(FakeWake(fire_on=15, fire_until=18), level=400)
+    assert c._watch_for_wake(duration=0.5) is False
+
+
+def test_a_loud_barge_in_still_wins_at_the_same_echo_level():
+    """Same transient, but the chunk is loud: that is a person, not the echo.
+    Guards against the gate above being so strict it kills real barge-in."""
+    c = _watch_client(FakeWake(fire_on=15, fire_until=25), level=400)
+    # Hand the policy a loud candidate once the floor has settled on 400.
+    for _ in range(20):
+        c._playback_policy.observe(score=0.0, level=400.0)
+    assert c._playback_policy.observe(score=0.95, level=6000.0) is False  # 1 of 2
+    assert c._playback_policy.observe(score=0.95, level=6000.0) is True
+
+
+# --- the echo drain ---------------------------------------------------------
+
+
+def test_drain_mic_consumes_frames_for_the_window_then_clears():
+    c = _watch_client(FakeWake(fire_on=0))
+    c.mic.reads = 0
+    start = time.monotonic()
+    c._drain_mic(0.15)
+    assert time.monotonic() - start >= 0.15
+    assert c.mic.reads > 0, "drain must actually read (and discard) frames"
+    assert c.mic.clears == 1
+
+
+def test_drain_mic_is_a_noop_for_a_zero_window():
+    c = _watch_client(FakeWake(fire_on=0))
+    c.mic.reads = 0
+    c._drain_mic(0)
+    assert c.mic.reads == 0
 
 
 # --- _play_and_watch() must actually run the watch ---------------------------

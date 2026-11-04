@@ -1,4 +1,10 @@
-"""Wake word detection using openwakeword."""
+"""Wake word detection using openwakeword.
+
+This stays deliberately thin: it reports the model's raw score and nothing more.
+The *policy* -- which threshold applies, how many consecutive hits are needed,
+whether the audio is loud enough to be the user rather than the room speaker --
+lives in the client, where it can be unit-tested without openwakeword.
+"""
 
 import logging
 import numpy as np
@@ -25,15 +31,25 @@ class WakeWordDetector:
             self.model = Model(wakeword_models=["hey_mycroft_v0.1"], inference_framework="onnx")
 
         self.threshold = threshold
+        self.last_score = 0.0
         log.info(f"Wake word detector ready (threshold={threshold})")
+
+    def score(self, frame: np.ndarray) -> float:
+        """Feed an audio frame (int16, 16kHz) and return the best model score.
+
+        No threshold, no reset -- for callers that apply their own policy (the
+        barge-in watch needs a stricter one than idle listening, because during
+        playback the mic is also hearing JARVIS).
+        """
+        prediction = self.model.predict(frame)
+        self.last_score = max(prediction.values(), default=0.0)
+        return self.last_score
 
     def process_frame(self, frame: np.ndarray) -> bool:
         """Feed an audio frame (int16, 16kHz). Returns True if wake word detected."""
-        prediction = self.model.predict(frame)
-        for score in prediction.values():
-            if score >= self.threshold:
-                self.model.reset()
-                return True
+        if self.score(frame) >= self.threshold:
+            self.model.reset()
+            return True
         return False
 
     def reset(self):
