@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from nutrition_core.budget import remaining
+from nutrition_core.budget import FitAssessment, assess_day, remaining
 from nutrition_core.engine import compute_ingredient, compute_meal
 from nutrition_core.models import Macros, MealIngredient
 from nutrition_core.store.connection import DbConnection
@@ -22,6 +22,8 @@ def log_verified_meal(
     date: str,
     ingredients: Sequence[MealIngredient],
     status: str = "eaten",
+    confidence: str = "high",
+    assumptions: str = "",
 ) -> int:
     """Persist a meal whose macros are computed from ingredient grams x per-100g.
 
@@ -49,8 +51,9 @@ def log_verified_meal(
     cur = conn.execute(
         "INSERT INTO meals (ts, description, quantity, calories, protein_g, carbs_g, "
         "fat_g, confidence, assumptions, status, name) "
-        "VALUES (?, ?, '', ?, ?, ?, ?, 'high', '', ?, ?)",
-        (date, name, legacy_kcal, total.protein_g, total.carbs_g, total.fat_g, status, name),
+        "VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)",
+        (date, name, legacy_kcal, total.protein_g, total.carbs_g, total.fat_g,
+         confidence, assumptions, status, name),
     )
     meal_id = cur.lastrowid
     for row in ing_rows:
@@ -64,16 +67,17 @@ def log_verified_meal(
     return meal_id
 
 
-def day_totals(conn: DbConnection, date: str) -> Macros:
-    """Sum of all meals (any status) whose ts starts with `date`.
+def _day_meal_totals(conn: DbConnection, date: str) -> list[tuple[str, Macros]]:
+    """(status, exact macros) per meal whose ts starts with `date`.
 
-    Verified meals are summed from their exact per-ingredient contributions
-    (the legacy calories column is integer-rounded); meals without ingredient
-    rows (legacy estimates) use their legacy columns.
+    A meal's macros are the sum of its exact per-ingredient contributions (the
+    legacy calories column is integer-rounded); meals without ingredient rows
+    (legacy estimates) use their legacy columns.
     """
-    total = Macros(0, 0, 0, 0)
+    out: list[tuple[str, Macros]] = []
     meals = conn.execute(
-        "SELECT id, calories, protein_g, carbs_g, fat_g FROM meals WHERE ts LIKE ? ORDER BY id",
+        "SELECT id, status, calories, protein_g, carbs_g, fat_g FROM meals "
+        "WHERE ts LIKE ? ORDER BY id",
         (date + "%",),
     ).fetchall()
     for m in meals:
@@ -82,11 +86,45 @@ def day_totals(conn: DbConnection, date: str) -> Macros:
             "WHERE meal_id=? ORDER BY id",
             (m["id"],),
         ).fetchall()
-        rows = ings if ings else [m]
-        for r in rows:
-            total = total + Macros(r["calories" if not ings else "kcal"],
-                                   r["protein_g"], r["carbs_g"], r["fat_g"])
+        total = Macros(0, 0, 0, 0)
+        if ings:
+            for r in ings:
+                total = total + Macros(r["kcal"], r["protein_g"], r["carbs_g"], r["fat_g"])
+        else:
+            total = Macros(m["calories"], m["protein_g"], m["carbs_g"], m["fat_g"])
+        out.append((m["status"], total))
+    return out
+
+
+def day_totals(conn: DbConnection, date: str) -> Macros:
+    """Sum of all meals (any status) whose ts starts with `date`."""
+    total = Macros(0, 0, 0, 0)
+    for _status, macros in _day_meal_totals(conn, date):
+        total = total + macros
     return total
+
+
+def day_status(conn: DbConnection, date: str) -> dict:
+    """Day's intake split into verified vs estimated, against the active target."""
+    verified = Macros(0, 0, 0, 0)
+    estimated = Macros(0, 0, 0, 0)
+    for status, macros in _day_meal_totals(conn, date):
+        if status == "estimated":
+            estimated = estimated + macros
+        else:
+            verified = verified + macros
+    consumed = verified + estimated
+    target = active_goals(conn)
+    rem = remaining(target, consumed) if target is not None else None
+    assessment: FitAssessment | None = assess_day(rem) if rem is not None else None
+    return {
+        "target": target,
+        "verified": verified,
+        "estimated": estimated,
+        "consumed": consumed,
+        "remaining": rem,
+        "assessment": assessment,
+    }
 
 
 def remaining_today(conn: DbConnection, date: str) -> Macros | None:
