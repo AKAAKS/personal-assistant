@@ -77,29 +77,40 @@ def _shopping_delta(resolved_dishes, pantry_store) -> list[dict]:
     `resolved_dishes` is a list of lists of ResolvedIngredient. Only items with
     a positive shortfall are returned: {"name","need_g","have_g","buy_g"}.
     """
-    need: dict[tuple, float] = {}
-    sample: dict[tuple, object] = {}
-    for dish in resolved_dishes:
-        for r in dish:
-            k = _key(r)
-            need[k] = need.get(k, 0.0) + r.meal_ingredient.grams
-            sample.setdefault(k, r)
-
     items = pantry_store.list_items()
     by_id = {row["id"]: row for row in items}
+    need: dict[tuple, float] = {}
+    rows: dict[tuple, dict | None] = {}
+    label: dict[tuple, str] = {}
+    for dish in resolved_dishes:
+        for r in dish:
+            # Normalize to the pantry row when one exists, so every identifier
+            # form (pantry_id / barcode / name) of the same food shares a bucket.
+            row = None
+            if r.pantry_id is not None:
+                row = by_id.get(r.pantry_id)
+            elif r.external_id:
+                row = pantry_store.find_by_food(r.source, r.external_id)
+            if row is not None:
+                k = ("pid", row["id"])
+            elif r.external_id:
+                k = ("food", r.source, r.external_id)
+            else:
+                k = ("name", r.meal_ingredient.name.strip().lower())
+                row = next((i for i in items if i["name"].strip().lower() == k[1]), None)
+                if row is not None:
+                    k = ("pid", row["id"])
+            need[k] = need.get(k, 0.0) + r.meal_ingredient.grams
+            rows.setdefault(k, row)
+            label.setdefault(k, r.meal_ingredient.name)
+
     out = []
     for k, n in need.items():
-        r = sample[k]
-        if k[0] == "pid":
-            row = by_id.get(k[1])
-        elif k[0] == "food":
-            row = pantry_store.find_by_food(r.source, r.external_id)
-        else:
-            row = next((i for i in items if i["name"].strip().lower() == k[1]), None)
+        row = rows[k]
         have = float(row["grams_available"]) if row else 0.0
         buy = max(0.0, n - have)
         if buy > 0:
-            out.append({"name": row["name"] if row else r.meal_ingredient.name,
+            out.append({"name": row["name"] if row else label[k],
                         "need_g": n, "have_g": have, "buy_g": buy})
     return out
 

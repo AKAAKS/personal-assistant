@@ -101,3 +101,15 @@ class TestBadInput(PrepBase):
             out = self.run_tool(ti)
             assert isinstance(out, str) and out.startswith("Error")
         assert list_planned(self.conn) == []
+
+
+class TestSameRowAggregation(PrepBase):
+    def test_same_pantry_row_via_pantry_id_and_name_sums(self):
+        # rice row holds 100 g; bump to 150 g. Dish A by pantry_id, dish B by name.
+        self.pantry.adjust_quantity(self.rice_id, 50)
+        out = self.run_tool({"dishes": [
+            self.dish("A", [self.rice(100)]),
+            self.dish("B", [{"name": "rice", "grams": 100}])]})
+        assert len(list_planned(self.conn)) == 2
+        shopping = out.split("Shopping list:", 1)[1]
+        assert "Rice: buy 50 g (need 200 g, have 150 g)" in shopping
