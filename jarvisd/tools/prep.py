@@ -7,7 +7,9 @@ NEVER depletes the pantry; it only reports what is missing.
 """
 
 from datetime import date as _date
+from datetime import datetime, timedelta
 
+from jarvisd.reminder_store import ReminderStore
 from jarvisd.tools.meal_log import resolve_ingredient
 from nutrition_core.engine import compute_ingredient, compute_meal
 from nutrition_core.store.meals import log_verified_meal
@@ -115,6 +117,38 @@ def _shopping_delta(resolved_dishes, pantry_store) -> list[dict]:
     return out
 
 
+_HINT_TIME = "T18:00:00"
+
+
+def _day_before(date_iso: str, *, now: datetime) -> str:
+    """ISO due_ts for (date - 1 day) at 18:00; clamped to `now` if already past."""
+    due = datetime.fromisoformat(
+        (_date.fromisoformat(date_iso) - timedelta(days=1)).isoformat() + _HINT_TIME)
+    if due <= now:
+        return now.isoformat(timespec="seconds")
+    return due.isoformat(timespec="seconds")
+
+
+def _set_reminders(conn, locked, delta) -> list[str]:
+    """Add a prep reminder per distinct date + a shopping one if delta. Returns descriptions."""
+    store = ReminderStore(conn)
+    now = datetime.now()
+    by_date: dict[str, list[str]] = {}
+    for name, day, _m in locked:
+        by_date.setdefault(day, []).append(name)
+    done = []
+    for day in sorted(by_date):
+        due = _day_before(day, now=now)
+        store.add(f"Meal prep for {day}: {', '.join(by_date[day])}", due, recurrence="none")
+        done.append(f"prep for {day} at {due}")
+    if delta:
+        due = _day_before(min(by_date), now=now)
+        items = ", ".join(f"{it['name']} {_g(it['buy_g'])} g" for it in delta)
+        store.add(f"Shopping for meal prep: {items}", due, recurrence="none")
+        done.append(f"shopping at {due}")
+    return done
+
+
 def handlers(conn, food_service, pantry_store):
     def plan_prep(ti):
         try:
@@ -184,6 +218,11 @@ def handlers(conn, food_service, pantry_store):
                                      f"(need {_g(it['need_g'])} g, have {_g(it['have_g'])} g)")
                 else:
                     lines.append("Nothing to buy — your pantry covers this plan.")
+                try:
+                    done = _set_reminders(conn, locked, delta)
+                    lines.append("Reminders set: " + "; ".join(done) + ".")
+                except Exception as exc:
+                    lines.append(f"Plan stored, but couldn't set reminders ({exc}).")
             return "\n".join(lines)
         except Exception as exc:
             return f"Error: couldn't plan the prep ({exc})"
