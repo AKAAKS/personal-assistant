@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from nutrition_core.adapters.base import Transport, macros_from_fields
+from nutrition_core.adapters.base import UNTRUSTWORTHY, Transport, macros_from_fields
 from nutrition_core.models import Confidence, FoodItem, FoodSource
 
 SEARCH_URL = "https://api.nal.usda.gov/fdc/v1/foods/search"
@@ -58,6 +58,7 @@ class USDAAdapter:
 
 
 def _nutrient_values(nutrients: object) -> dict[int, float]:
+    """Map nutrient id -> amount; a present-but-unreadable amount is NaN (UNTRUSTWORTHY)."""
     values: dict[int, float] = {}
     if not isinstance(nutrients, list):
         return values
@@ -66,14 +67,20 @@ def _nutrient_values(nutrients: object) -> dict[int, float]:
             continue
         number = entry.get("nutrientId")
         value = entry.get("value")
-        if number is None or value is None:
+        if number is None:
             continue
         try:
             key = int(number)
-            amount = float(value)
         except (TypeError, ValueError, OverflowError):
             continue
+        # The nutrient id is present: an unreadable value is untrustworthy, not absent.
+        try:
+            amount = float(value)
+        except (TypeError, ValueError, OverflowError):
+            amount = UNTRUSTWORTHY
         if not math.isfinite(amount):
-            continue
+            amount = UNTRUSTWORTHY
+        if key in values and math.isnan(values[key]):
+            continue  # an unreadable duplicate stays untrustworthy
         values[key] = amount
     return values
