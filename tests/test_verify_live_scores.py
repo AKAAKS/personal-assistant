@@ -110,3 +110,70 @@ def test_the_measured_bands_do_not_overlap():
     assert mixed_max_gap < MARGIN < genuine_min_gap
     assert genuine_min_gap - MARGIN > 0.03
     assert MARGIN - mixed_max_gap > 0.03
+
+
+# --- the DEFAULTS must work on the backend's own scale ----------------------
+#
+# The original bug was a threshold on the wrong scale. Swapping Resemblyzer for
+# ECAPA moved the same trap into the fallback path: DEFAULT_THRESHOLD stayed at
+# 0.75, which is a normal same-speaker score for Resemblyzer and near the TOP of
+# ECAPA's measured genuine band (0.290-0.775). Anyone with a voiceprint but no
+# data/verify_config.json -- enrolled on an older build, or a wiped data dir --
+# therefore got the 63%-rejection bug back from the defaults alone.
+#
+# These tests tie the shipped defaults to the rows measured on real hardware, so
+# a future backend swap cannot quietly reintroduce a mismatched scale.
+
+from voice.speaker_verify import (
+    BACKEND_DEFAULT_MARGIN,
+    BACKEND_DEFAULT_THRESHOLD,
+    DEFAULT_BACKEND,
+)
+
+
+def _decide_with(sim_user, sim_jarvis, duration, threshold, margin):
+    emb = np.array([sim_user, sim_jarvis, 0.0], dtype=np.float64)
+    extra = 1.0 - (sim_user**2 + sim_jarvis**2)
+    emb[2] = np.sqrt(extra) if extra > 0 else 0.0
+    v = SpeakerVerifier(
+        embed_fn=lambda a: emb,
+        voiceprint=(1.0, 0.0, 0.0),
+        impostor=(0.0, 1.0, 0.0),
+        threshold=threshold,
+        margin=margin,
+        min_duration_sec=MIN_DURATION,
+    )
+    return v.decide(np.zeros(int(16000 * duration), dtype=np.int16))
+
+
+def test_the_default_backend_has_defaults_of_its_own():
+    assert DEFAULT_BACKEND in BACKEND_DEFAULT_THRESHOLD
+    assert DEFAULT_BACKEND in BACKEND_DEFAULT_MARGIN
+
+
+@pytest.mark.parametrize("sim_user,sim_jarvis,duration", GENUINE)
+def test_uncalibrated_defaults_still_accept_real_speech(sim_user, sim_jarvis, duration):
+    """No verify_config.json, no .env overrides -- the bare defaults must work."""
+    d = _decide_with(sim_user, sim_jarvis, duration,
+                     BACKEND_DEFAULT_THRESHOLD[DEFAULT_BACKEND],
+                     BACKEND_DEFAULT_MARGIN[DEFAULT_BACKEND])
+    assert d.ok, (
+        f"the shipped defaults reject real speech [{d.reason}]: sim {sim_user} "
+        f"vs jarvis {sim_jarvis} at {duration}s"
+    )
+
+
+@pytest.mark.parametrize("sim_user,sim_jarvis,duration", MIXED_WITH_JARVIS)
+def test_uncalibrated_defaults_still_reject_jarvis_mixed_audio(sim_user, sim_jarvis, duration):
+    d = _decide_with(sim_user, sim_jarvis, duration,
+                     BACKEND_DEFAULT_THRESHOLD[DEFAULT_BACKEND],
+                     BACKEND_DEFAULT_MARGIN[DEFAULT_BACKEND])
+    assert not d.ok, (
+        f"the shipped defaults accept JARVIS-mixed audio [{d.reason}]: sim "
+        f"{sim_user} vs jarvis {sim_jarvis} at {duration}s"
+    )
+
+
+def test_the_resemblyzer_default_is_not_reused_for_ecapa():
+    """The scales do not overlap; sharing one number is the original bug."""
+    assert BACKEND_DEFAULT_THRESHOLD["ecapa"] < BACKEND_DEFAULT_THRESHOLD["resemblyzer"]

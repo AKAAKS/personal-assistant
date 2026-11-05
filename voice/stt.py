@@ -114,9 +114,9 @@ class SpeechToText:
 
     def __init__(
         self,
-        model_size: str = "small",
+        model_size: str = "distil-large-v3",
         device: str = "cuda",
-        compute_type: str = "int8_float16",
+        compute_type: str = "float16",
         initial_prompt: str | None = None,
         vad_filter: bool | None = None,
         beam_size: int = 5,
@@ -138,6 +138,26 @@ class SpeechToText:
             self.model = WhisperModel(model_size, device="cpu", compute_type="int8")
         log.info("Whisper ready (vad_filter=%s, prompt=%s).",
                  self.vad_filter, "yes" if self.initial_prompt else "no")
+
+    @classmethod
+    def from_env(cls) -> "SpeechToText":
+        """Build from the WHISPER_* env vars, with the MEASURED fix as default.
+
+        distil-large-v3 at float16 is what stopped the live log producing
+        "...in a domino" and "run clored in a terminal"; shipping `small` as the
+        default while only documenting the fix meant a fresh install got the
+        mangling back. A machine without CUDA is not stranded -- __init__ falls
+        back to cpu/int8 -- and WHISPER_MODEL=small is the escape hatch for one
+        that would rather not pay for the bigger model.
+
+        Single source of truth: jarvisd/__main__ and scripts/mic_check both go
+        through here, so they cannot disagree about the default.
+        """
+        return cls(
+            model_size=os.getenv("WHISPER_MODEL", "distil-large-v3"),
+            device=os.getenv("WHISPER_DEVICE", "cuda"),
+            compute_type=os.getenv("WHISPER_COMPUTE_TYPE", "float16"),
+        )
 
     def transcribe(self, audio: np.ndarray) -> str:
         """Transcribe int16 16kHz audio to text."""
