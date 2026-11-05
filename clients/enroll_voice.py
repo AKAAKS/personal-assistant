@@ -36,7 +36,7 @@ from voice.speaker_verify import (
     load_encoder,
     make_voiceprint,
 )
-from voice.tts import make_tts
+from voice.tts import make_tts_from_env
 
 N_SAMPLES = 6
 MIN_SAMPLES = 4
@@ -220,7 +220,9 @@ def main():
 
         if len(embeddings) >= MIN_SAMPLES:
             print("\n--- Now JARVIS speaks. Stay quiet for a few seconds. ---")
-            tts = make_tts(rate=int(os.getenv("TTS_RATE", "180")))
+            # Must be the voice the DAEMON speaks with, or the negative
+            # print describes a voice JARVIS never uses.
+            tts = make_tts_from_env()
             jarvis_embs, recorded = _collect_jarvis(encoder, backend, mic, tts)
     except KeyboardInterrupt:
         print("\nCancelled.")

@@ -57,6 +57,21 @@ DEFAULT_MIN_DURATION_SEC = 2.0
 # rejected almost everything. The ECAPA numbers are the midpoints of the bands
 # measured live and pinned in tests/test_verify_live_scores.py, which also
 # asserts these defaults accept every genuine row and reject every mixed one.
+# A sub-min_duration clip is judged on the gap PLUS a relaxed absolute floor,
+# never on the gap alone. Dropping the floor entirely (what this used to do)
+# opened a real hole: another person, or the TV, is a human voice and therefore
+# far from JARVIS's TTS print, so sim_user ~0.10 against sim_imp ~-0.20 clears a
+# 0.24 margin and was accepted as the enrolled speaker while scoring far below
+# the threshold. Since captures close after 800ms of trailing silence, nearly
+# every real command is 1.0-1.8s, so that was the common path, not an edge case.
+#
+# 0.6 sits between the weakest genuine short clips measured (0.290 at 1.6s,
+# 0.350 at 1.2s -> floor 0.15) and a non-enrolled human voice (~0.05-0.10). The
+# point of the relaxation is that a 1-2s embedding is genuinely noisy; requiring
+# the FULL threshold here would reinstate the false rejections that started all
+# of this.
+SHORT_CLIP_FLOOR_RATIO = float(os.getenv("SPEAKER_VERIFY_SHORT_FLOOR_RATIO", "0.6"))
+
 BACKEND_DEFAULT_THRESHOLD = {"ecapa": 0.25, "resemblyzer": 0.75}
 BACKEND_DEFAULT_MARGIN = {"ecapa": 0.24, "resemblyzer": 0.10}
 
@@ -128,8 +143,8 @@ def calibrate(*, user_sims, user_gaps, impostor_sims) -> dict:
 
     lo = min(sims)
     hi = max((float(s) for s in impostor_sims), default=None)
-    separated = hi is not None and hi < lo - 0.02
-    if separated:
+    bands_apart = hi is not None and hi < lo - 0.02
+    if bands_apart:
         threshold = hi + (lo - hi) * GAP_BIAS
     else:
         # Overlapping (or unmeasured) bands: don't invent a gap, just sit under
@@ -142,6 +157,20 @@ def calibrate(*, user_sims, user_gaps, impostor_sims) -> dict:
         margin = min(max(min(gaps) * MARGIN_HEADROOM, MARGIN_MIN), MARGIN_MAX)
     else:
         margin = DEFAULT_MARGIN
+
+    # `separated` must describe the rule the RUNTIME applies, which is
+    # `sim >= threshold AND gap >= margin`. Judging only the sim bands missed a
+    # total-lockout case: a bad enrollment (noisy room, speaker playing during
+    # capture, negative print built from the wrong voice) puts the user's own
+    # samples as close to the JARVIS print as to their own, so min(gaps) <= 0.
+    # margin is then clamped UP to MARGIN_MIN, and the config was written with
+    # separated: true and no warning -- after which every utterance by the
+    # enrolled speaker rejected as closer_to_jarvis. Enrollment reported
+    # success while locking the user out of their own assistant.
+    accepts_own_enrollment = (
+        lo >= threshold and (not gaps or min(gaps) >= margin)
+    )
+    separated = bands_apart and accepts_own_enrollment
 
     return {
         "threshold": round(threshold, 3),
@@ -221,7 +250,14 @@ class SpeakerVerifier:
             return VerifyResult(False, sim_user, sim_imp, duration, "closer_to_jarvis")
 
         if duration < self.min_duration_sec and sim_imp is not None:
-            # Absolute score untrustworthy at this length; margin rule passed.
+            # Absolute score is noisy at this length, so the bar is lowered --
+            # but NOT removed. The gap alone cannot tell the enrolled speaker
+            # from any other human voice, because every human voice is far from
+            # the TTS print and so has a wide gap.
+            floor = self.threshold * SHORT_CLIP_FLOOR_RATIO
+            if sim_user < floor:
+                return VerifyResult(False, sim_user, sim_imp, duration,
+                                    "below_short_clip_floor")
             return VerifyResult(True, sim_user, sim_imp, duration, "accept_short_clip")
 
         if sim_user < self.threshold:

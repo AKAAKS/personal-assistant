@@ -197,9 +197,21 @@ def main():
             print("    python -m clients.enroll_voice")
             return
         cfg = load_config()
-        threshold = float(os.getenv("SPEAKER_VERIFY_THRESHOLD",
-                                    cfg.get("threshold", 0.75)))
-        margin = float(os.getenv("SPEAKER_VERIFY_MARGIN", cfg.get("margin", 0.10)))
+        # Resolve per backend. Hardcoding 0.75/0.10 here meant that with no
+        # verify_config.json this diagnostic judged ECAPA scores (band
+        # 0.29-0.78) against a resemblyzer threshold and printed REJECT for
+        # every genuine utterance -- the exact false alarm it exists to
+        # prevent, from the tool you reach for when verification misbehaves.
+        from voice.speaker_verify import (
+            BACKEND_DEFAULT_MARGIN,
+            BACKEND_DEFAULT_THRESHOLD,
+        )
+        threshold = float(os.getenv(
+            "SPEAKER_VERIFY_THRESHOLD",
+            cfg.get("threshold", BACKEND_DEFAULT_THRESHOLD.get(backend, 0.25))))
+        margin = float(os.getenv(
+            "SPEAKER_VERIFY_MARGIN",
+            cfg.get("margin", BACKEND_DEFAULT_MARGIN.get(backend, 0.24))))
         impostor = load_impostor(backend=backend)
 
         print(f"Loading the voice model ({backend})...")
@@ -229,8 +241,8 @@ def main():
         print("\n=== 3. JARVIS's score band (the echo) ===")
         jarvis_sims = []
         try:
-            from voice.tts import make_tts
-            tts = make_tts(rate=int(os.getenv("TTS_RATE", "180")))
+            from voice.tts import make_tts_from_env
+            tts = make_tts_from_env()
             print("JARVIS will speak — stay quiet...")
             for line in JARVIS_LINES:
                 wav = tts.synthesize(line)

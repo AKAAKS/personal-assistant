@@ -245,3 +245,51 @@ def test_the_floor_still_drops_a_single_frame_blip():
     vad = ScriptedVAD()
     mic = ScriptedMic(_speech(1) + _silence(30))   # 30ms -- not a word
     assert vad.record_until_silence(mic, silence_ms=300) is None
+
+
+# --- the speech timeout must stay reachable after a blip discard -----------
+#
+# The blip-discard branch re-seeds `speech_started = bool(pre_buffer)`. The
+# timeout escape lives in the final `else` of an `if is_speech / elif
+# speech_started / else` chain, so it only runs while speech_started is False.
+# With a caller-supplied pre_buffer, discarding a blip therefore pinned
+# speech_started True forever: no_speech_count stopped incrementing and
+# speech_timeout_sec (5s) could never fire, so the call spun on to max_seconds
+# (15s) in a quiet room. Latent today -- the barge-in path is the only intended
+# pre_buffer caller and does not pass one yet -- but it is wrong, and the fix is
+# to go back to "waiting for speech" after throwing a blip away.
+
+
+class CountingMic(ScriptedMic):
+    """Like ScriptedMic but yields silence forever and counts reads."""
+
+    def __init__(self, frames):
+        super().__init__(frames)
+        self.reads = 0
+
+    def read_frame(self, timeout=1.0):
+        self.reads += 1
+        return super().read_frame(timeout) if self._frames else _frame(0)
+
+
+def test_the_speech_timeout_fires_after_a_blip_with_a_pre_buffer():
+    vad = ScriptedVAD()
+    # 1 known-speech pre_buffer frame plus a 1-frame blip is 2 frames, under
+    # the 4-frame (120ms) floor, so the capture is discarded -- then a quiet
+    # room, where the 5s timeout is the only way out.
+    mic = CountingMic(_speech(1) + _silence(30))
+    audio = vad.record_until_silence(mic, pre_buffer=_speech(1))
+
+    assert audio is None
+    max_frames = int(15.0 * 1000 / 30)
+    assert mic.reads < max_frames, (
+        f"read {mic.reads} frames (max {max_frames}): the 5s speech timeout "
+        "never fired, so a quiet room blocks for the full 15s"
+    )
+
+
+def test_a_pre_buffer_capture_that_does_get_speech_still_works():
+    vad = ScriptedVAD()
+    mic = CountingMic(_speech(10) + _silence(30))
+    audio = vad.record_until_silence(mic, pre_buffer=_speech(4))
+    assert audio is not None, "a real utterance after a pre_buffer was lost"

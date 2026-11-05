@@ -214,3 +214,82 @@ def test_setting_precedence_env_then_config_then_default(monkeypatch):
 def test_setting_ignores_a_non_numeric_env_var(monkeypatch):
     monkeypatch.setenv("SPEAKER_VERIFY_THRESHOLD", "high")
     assert _setting({"threshold": 0.62}, "SPEAKER_VERIFY_THRESHOLD", "threshold", 0.75) == 0.62
+
+
+# --- a short clip must still clear SOME absolute floor ----------------------
+#
+# decide() used to return accept_short_clip for ANY clip under min_duration_sec
+# once the margin rule passed, skipping self.threshold entirely. Since
+# record_until_silence closes a capture after 800ms of trailing silence, almost
+# every real command ("lights off", "play music") is 1.0-1.8s -- so the absolute
+# check was bypassed for the COMMON case, not an edge case.
+#
+# The hole: another person, or the TV, is a human voice and therefore far from
+# JARVIS's TTS print. sim_user ~0.10 (not the enrolled speaker) with sim_imp
+# ~-0.20 gives a gap of 0.30, which clears a 0.24 margin -- accepted as the
+# enrolled speaker while scoring far BELOW the threshold. That directly
+# contradicts this module's promise to reject "random triggers from other
+# people or the TV".
+#
+# The live data hid this: every genuine row measured was short (1.2-1.6s) and
+# every impostor row was long (>= 2.2s), so no test ever drove a SHORT impostor
+# through decide().
+
+
+def _floor_verifier(**kw):
+    emb = kw.pop("emb")
+    opts = dict(
+        embed_fn=lambda a: emb,
+        voiceprint=(1.0, 0.0, 0.0),
+        impostor=(0.0, 1.0, 0.0),
+        threshold=0.25,
+        margin=0.24,
+        min_duration_sec=2.0,
+    )
+    opts.update(kw)
+    return SpeakerVerifier(**opts)
+
+
+def _floor_emb(sim_user, sim_imp):
+    e = np.array([sim_user, sim_imp, 0.0], dtype=np.float64)
+    extra = 1.0 - (sim_user**2 + sim_imp**2)
+    e[2] = np.sqrt(extra) if extra > 0 else 0.0
+    return e
+
+
+def _decide_short(sim_user, sim_imp, duration=1.4):
+    v = _floor_verifier(emb=_floor_emb(sim_user, sim_imp))
+    return v.decide(np.zeros(int(16000 * duration), dtype=np.int16))
+
+
+def test_a_short_clip_from_another_person_is_rejected():
+    """The regression this whole block exists for."""
+    d = _decide_short(0.10, -0.20)
+    assert not d.ok, (
+        f"accepted another speaker on a 1.4s clip [{d.reason}]: sim_user 0.10 "
+        "is far below the 0.25 threshold, it only passed on the gap"
+    )
+
+
+def test_a_short_clip_from_the_tv_is_rejected():
+    """Broadcast speech: not the user, nothing like the TTS voice."""
+    d = _decide_short(0.05, -0.30)
+    assert not d.ok
+
+
+def test_a_genuine_short_clip_is_still_accepted():
+    """The leniency the short-clip path exists for must survive: the live log's
+    weakest genuine short rows were 0.290 at 1.6s and 0.350 at 1.2s."""
+    for sim_user, sim_imp, dur in [(0.290, -0.017, 1.6), (0.350, 0.065, 1.2),
+                                   (0.422, -0.045, 1.4)]:
+        d = _decide_short(sim_user, sim_imp, dur)
+        assert d.ok, f"rejected real speech [{d.reason}]: {sim_user} at {dur}s"
+
+
+def test_a_short_clip_is_judged_more_leniently_than_a_long_one():
+    """Not simply the full threshold: a 1-2s embedding is genuinely noisier, and
+    tightening all the way would reinstate the false rejections that started
+    this."""
+    weak = 0.20   # below threshold 0.25, above the relaxed short-clip floor
+    assert _decide_short(weak, -0.10, duration=1.2).ok
+    assert not _decide_short(weak, -0.10, duration=3.0).ok

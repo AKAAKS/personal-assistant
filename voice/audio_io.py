@@ -156,8 +156,14 @@ class VoiceActivityDetector:
                     # time short. `no_speech_count` is deliberately not reset
                     # by speech, so overall patience stays bounded.
                     frames = list(pre_buffer) if pre_buffer else []
-                    speech_started = bool(pre_buffer)
                     speech_frames = len(pre_buffer) if pre_buffer else 0
+                    # Back to waiting for speech. This MUST be False even when a
+                    # pre_buffer was supplied: the speech_timeout_sec escape
+                    # lives in the `else` of the is_speech/elif speech_started
+                    # chain, so leaving it True stopped no_speech_count
+                    # incrementing and the 5s timeout could never fire -- a
+                    # quiet room then blocked for the full max_seconds (15s).
+                    speech_started = False
                     silent_count = 0
                     pre_roll.clear()
             else:
