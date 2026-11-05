@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 from datetime import datetime
 
 import pytest
@@ -170,7 +171,12 @@ def test_serve_forever_wires_push_to_clients_and_starts_reminder_task():
             return []
 
     notifier = NoOpNotifier()
-    server = JarvisServer(FakeAssistant(), notifier=notifier, reminder_store=EmptyReminderStore())
+    # port=0: let the OS pick a free port. These tests call serve_forever,
+    # so with the constructor default (8765) they fail whenever the real
+    # daemon is running on this machine.
+    server = JarvisServer(
+        FakeAssistant(), notifier=notifier, reminder_store=EmptyReminderStore(), port=0
+    )
 
     async def _run():
         task = asyncio.create_task(server.serve_forever())
@@ -455,18 +461,11 @@ def test_e2e_due_reminder_reaches_live_client_through_full_chain(tmp_path):
     assert notifier.drain() == []
 
 
-# --- backward-compatible construction ---
-
-
-def test_assistant_lock_holder_defaults_to_self():
-    server = JarvisServer(FakeAssistant())
-    assert server.assistant_lock_holder is server
-
-
-def test_assistant_lock_holder_can_be_overridden():
-    sentinel = object()
-    server = JarvisServer(FakeAssistant(), assistant_lock_holder=sentinel)
-    assert server.assistant_lock_holder is sentinel
+# The two `assistant_lock_holder` tests that were here are gone with the
+# attribute. It was a "reserved hook for a future multi-server topology" that
+# nothing ever read: these two tests were its only consumers, and they asserted
+# only that the constructor stored what it was handed. __main__'s HA-rule
+# callables serialize on `server._lock` directly, which the comment there says.
 
 
 # --- conditional reminders (standing nudges) ---
@@ -600,3 +599,34 @@ def test_fire_due_reminders_no_condition_notifies_normally(tmp_path):
     asyncio.run(server._fire_due_reminders())
 
     assert notifier.notify_calls == [("Reminder: call mom", "high")]
+
+
+# --- the reminder tick must not do sqlite on the event loop -----------------
+#
+# _fire_due_reminders' own docstring promises this: it names notify(),
+# mark_fired() and logged_today() as "all run via asyncio.to_thread so the
+# event loop is never blocked by them". due() was the one call left unwrapped,
+# and it is not read-only -- _retire_invalid can issue an UPDATE + commit.
+# This runs every REMINDER_TICK_SEC for the life of the daemon.
+
+
+class ThreadRecordingReminderStore:
+    def __init__(self):
+        self.due_thread = None
+
+    def due(self, now):
+        self.due_thread = threading.current_thread()
+        return []
+
+
+def test_reminder_due_query_does_not_run_on_the_event_loop():
+    store = ThreadRecordingReminderStore()
+    server = JarvisServer(FakeAssistant(), reminder_store=store)
+
+    asyncio.run(server._fire_due_reminders())
+
+    assert store.due_thread is not None, "due() was never called"
+    assert store.due_thread is not threading.main_thread(), (
+        "reminder_store.due() ran on the event loop thread, which the method's "
+        "own docstring says it must not"
+    )

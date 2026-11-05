@@ -60,10 +60,15 @@ def test_record_utterance_returns_none_on_silence():
     assert c._record_utterance() is None
 
 
-def test_record_utterance_returns_none_on_tooshort_blip():
-    c = _client(np.ones(100, dtype=np.int16))  # < 1600 samples -> ignored
-    c._wake_buf = np.array([], dtype=np.int16)
-    assert c._record_utterance() is None
+# The two "too-short blip" tests that used to live here are gone with
+# MIN_UTTERANCE_SAMPLES. They asserted a client-side length floor that the real
+# VAD makes unreachable: both callers pass silence_ms=800, so a non-None return
+# carries >= 10 speech frames + 26 trailing-silence frames = 17,280 samples,
+# against a floor of 8,000. They only passed because the fake VAD here hands
+# back a raw 100-sample array, which record_until_silence cannot do. "Too short
+# to be a turn" is now decided once, in VAD-positive milliseconds, by the only
+# code that can see which frames were speech -- see
+# test_audio_io.test_a_blip_of_noise_with_trailing_silence_is_rejected.
 
 
 def test_record_utterance_resets_wake_buf():
@@ -94,11 +99,6 @@ def test_followup_returns_pcm_bytes_when_speech_captured():
 
 def test_followup_returns_none_on_silence():
     c = _client(None)  # window passed with no speech
-    assert c._capture_followup() is None
-
-
-def test_followup_returns_none_on_tooshort_blip():
-    c = _client(np.ones(100, dtype=np.int16))  # < 1600 samples -> ignored
     assert c._capture_followup() is None
 
 

@@ -62,6 +62,22 @@ TOOL_PERMISSIONS = {
     "export_meals": "write",
     "set_nutrition_targets": "write",
     "meal_trends": "read_only",
+    # Food lookup / pantry / meal planning (macro-chef tool-packs).
+    # Tiered by this file's own rule: "write" is reversible, "destructive" is
+    # hard to undo. pantry_remove deletes a row but the user can re-add the
+    # item, which puts it in the same class as delete_trigger_rule ("write")
+    # rather than calendar_delete_event ("destructive", because it discards
+    # data JARVIS never authored). Revisit if pantry history ever matters.
+    "lookup_food": "read_only",
+    "pantry_list": "read_only",
+    "pantry_add": "write",
+    "pantry_set_quantity": "write",
+    "pantry_remove": "write",
+    "check_dish": "read_only",
+    "suggest_meals": "read_only",
+    "list_planned_meals": "read_only",
+    "plan_prep": "write",
+    "cook_meal": "write",
     # Files
     "search_files": "read_only",
     "read_document": "read_only",

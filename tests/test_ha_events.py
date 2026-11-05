@@ -318,3 +318,47 @@ def test_cooldown_check_failure_skips_rule_not_listener(rules, caplog):
 
     assert run_direct.calls == []
     assert any("Rule" in r.message for r in caplog.records)
+
+
+# --- sqlite must not run on the event loop ----------------------------------
+#
+# `_process_event` is a coroutine and fires on EVERY HA state_changed event, of
+# which a busy installation emits a continuous stream. jarvisd/db.py hands out
+# ONE shared sqlite3.Connection (check_same_thread=False) that every to_thread
+# worker also writes through, so a statement issued from the loop thread can
+# serialize behind a worker's write and stall the whole daemon -- including the
+# voice reply path -- for the duration.
+
+
+class ThreadRecordingRules:
+    """Records which thread each store call arrived on."""
+
+    def __init__(self, rule=None):
+        self.threads = {}
+        self._rule = rule
+
+    def matches(self, event):
+        self.threads["matches"] = threading.current_thread()
+        return [self._rule] if self._rule else []
+
+    def check_and_stamp_cooldown(self, rule_id, now):
+        self.threads["check_and_stamp_cooldown"] = threading.current_thread()
+        return True
+
+
+@pytest.mark.parametrize("call", ["matches", "check_and_stamp_cooldown"])
+def test_rule_store_calls_do_not_run_on_the_event_loop(call):
+    rule = {"id": 1, "name": "desk on", "kind": "direct",
+            "action": json.dumps({"tool": "control_light", "input": {}})}
+    store = ThreadRecordingRules(rule=rule)
+    listener = make_listener(store, run_direct=SpyCallable())
+
+    asyncio.run(listener._process_event(state_event("light.desk", "on")))
+
+    called_on = store.threads.get(call)
+    assert called_on is not None, f"{call}() was never called"
+    assert called_on is not threading.main_thread(), (
+        f"rules_store.{call}() ran on the event loop thread; blocking sqlite "
+        "there can stall every other coroutine, including the voice path "
+        "(check_and_stamp_cooldown also issues an UPDATE + commit)"
+    )

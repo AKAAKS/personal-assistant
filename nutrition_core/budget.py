@@ -10,10 +10,6 @@ def remaining(goal: Macros, eaten: Macros) -> Macros:
     return goal - eaten
 
 
-def after_meal(remaining_now: Macros, meal_total: Macros) -> Macros:
-    return remaining_now - meal_total
-
-
 def min_kcal_for(macros: Macros) -> float:
     # Atwater floor: the calories needed to supply the remaining macros.
     # Negative components are an overshoot, not a calorie requirement.

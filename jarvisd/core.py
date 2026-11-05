@@ -65,16 +65,22 @@ How you work:
 INTERRUPTION_NOTE = "(The user interrupted and cut off this reply before I finished.)"
 
 
-def _find_last_assistant_turn(conversation: list[dict]) -> dict | None:
+def find_last_assistant_turn(conversation: list[dict]) -> dict | None:
     """Return the most recent assistant-role turn in `conversation`, or None.
 
     Shared by Assistant.note_interruption()'s no-arg walk and by
     JarvisServer's barge-in capture-at-receipt logic (see
     JarvisServer._capture_interrupt_target), so "what counts as the current
     last assistant turn" is defined in exactly one place.
+
+    That claim used to be false -- the server walked the conversation itself
+    and the two had drifted on roleless turns (this used turn["role"] and
+    raised; the server used .get and skipped). Unified on .get: a turn without
+    a role is not an assistant turn, and a malformed history must not take down
+    barge-in marking.
     """
     for turn in reversed(conversation):
-        if turn["role"] == "assistant":
+        if turn.get("role") == "assistant":
             return turn
     return None
 
@@ -512,7 +518,7 @@ class Assistant:
         after the first call.
         """
         if turn is None:
-            turn = _find_last_assistant_turn(self.conversation)
+            turn = find_last_assistant_turn(self.conversation)
         if turn is None:
             return
         _mark_turn_interrupted(turn)

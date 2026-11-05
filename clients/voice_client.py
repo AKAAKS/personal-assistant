@@ -62,10 +62,6 @@ WATCH_TAIL_SEC = float(os.getenv("WATCH_TAIL_MS", "150")) / 1000.0
 # any echo still in flight never reaches the follow-up VAD.
 ECHO_DRAIN_SEC = float(os.getenv("ECHO_DRAIN_MS", "250")) / 1000.0
 
-# Shortest audio worth sending. The old floor was 1600 samples (0.1s), which is
-# far below any real command and let echo blips through to the server.
-MIN_UTTERANCE_SAMPLES = int(os.getenv("MIN_UTTERANCE_SAMPLES", "8000"))  # 0.5s
-
 # Barge-in policy while a reply is playing (see PlaybackWakePolicy).
 #
 # These default to the SAME score and streak as idle listening on purpose. The
@@ -112,13 +108,22 @@ class PlaybackWakePolicy:
     through the detector for the whole reply and trusted that it could never
     sound like "hey jarvis".
 
-    Three cheap discriminators, no echo canceller required:
-      * a stricter score threshold than idle listening;
-      * the chunk must be clearly louder than the running echo floor (you
-        speaking near the mic beats the speaker's bleed), where the floor is
-        learned from the non-candidate chunks -- which during playback *are*
-        the echo;
-      * the hit must repeat over consecutive chunks, so one fluke can't fire.
+    Three discriminators are available, but only the first is ON by default --
+    see the constants above for the measured reason, and change the env knobs
+    there to re-enable the others:
+      * the score threshold (active; defaults to the same value as idle
+        listening, because demanding more made interrupting JARVIS harder than
+        waking it);
+      * the loudest chunk within the score's own ~1.5s window must beat the
+        running echo floor, learned from the non-candidate chunks -- which
+        during playback *are* the echo (OFF by default:
+        PLAYBACK_LEVEL_RATIO=0);
+      * the hit must repeat over consecutive chunks (effectively off:
+        PLAYBACK_WAKE_CONSECUTIVE=1).
+
+    The state behind the inactive gates is still maintained, because the
+    near-miss diagnostic log reads it -- that log is what revealed the gate was
+    rejecting every genuine barge-in.
 
     Known limit: for the first few hundred milliseconds of a reply the echo
     floor has not been learned yet, so the level gate rests on `min_level`
@@ -254,7 +259,7 @@ class VoiceClient:
         audio = self.vad.record_until_silence(
             self.mic, max_seconds=15.0, silence_ms=800, speech_timeout_sec=5.0,
         )
-        if audio is None or len(audio) < MIN_UTTERANCE_SAMPLES:
+        if audio is None:
             log.info("No speech captured")
             print("  (no speech detected)\n")
             return None  # the run loop beeps once when it re-arms the wake word
@@ -398,7 +403,7 @@ class VoiceClient:
             self.mic, max_seconds=15.0, silence_ms=800,
             speech_timeout_sec=FOLLOWUP_WINDOW_SEC,
         )
-        if audio is None or len(audio) < MIN_UTTERANCE_SAMPLES:
+        if audio is None:
             return None
         log.info("Captured %.1fs follow-up", len(audio) / 16000)
         return audio.tobytes()
