@@ -390,7 +390,9 @@ class JarvisServer:
         -- it fires (with a warning logged) rather than silently going dark, since a
         typo in a condition string must never permanently suppress a reminder.
         """
-        due = self.reminder_store.due(datetime.now())
+        # to_thread like the three calls below: due() is sqlite, and
+        # _retire_invalid can issue an UPDATE + commit from here.
+        due = await asyncio.to_thread(self.reminder_store.due, datetime.now())
         for r in due:
             if await self._should_skip_notify(r):
                 log.info("Reminder #%s condition satisfied; skipping notify", r["id"])

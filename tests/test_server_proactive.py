@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 from datetime import datetime
 
 import pytest
@@ -600,3 +601,34 @@ def test_fire_due_reminders_no_condition_notifies_normally(tmp_path):
     asyncio.run(server._fire_due_reminders())
 
     assert notifier.notify_calls == [("Reminder: call mom", "high")]
+
+
+# --- the reminder tick must not do sqlite on the event loop -----------------
+#
+# _fire_due_reminders' own docstring promises this: it names notify(),
+# mark_fired() and logged_today() as "all run via asyncio.to_thread so the
+# event loop is never blocked by them". due() was the one call left unwrapped,
+# and it is not read-only -- _retire_invalid can issue an UPDATE + commit.
+# This runs every REMINDER_TICK_SEC for the life of the daemon.
+
+
+class ThreadRecordingReminderStore:
+    def __init__(self):
+        self.due_thread = None
+
+    def due(self, now):
+        self.due_thread = threading.current_thread()
+        return []
+
+
+def test_reminder_due_query_does_not_run_on_the_event_loop():
+    store = ThreadRecordingReminderStore()
+    server = JarvisServer(FakeAssistant(), reminder_store=store)
+
+    asyncio.run(server._fire_due_reminders())
+
+    assert store.due_thread is not None, "due() was never called"
+    assert store.due_thread is not threading.main_thread(), (
+        "reminder_store.due() ran on the event loop thread, which the method's "
+        "own docstring says it must not"
+    )
