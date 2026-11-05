@@ -4,6 +4,7 @@ We build the client via __new__ so the wake-word model and real microphone are
 never touched; only the pieces _capture_followup uses are faked.
 """
 
+import asyncio
 import io
 import time
 import wave
@@ -11,7 +12,8 @@ import winsound
 
 import numpy as np
 
-from clients.voice_client import VoiceClient
+import clients.voice_client as vc
+from clients.voice_client import PlaybackWakePolicy, VoiceClient
 
 
 class FakeMic:
@@ -224,40 +226,65 @@ WAKE_CHUNK = 1280  # WAKE_WORD_CHUNK
 
 
 class FrameMic:
-    """Mic that always has a full wake-word chunk ready."""
-    def __init__(self):
+    """Mic that always has a full wake-word chunk ready, at a given level."""
+    def __init__(self, level=0):
         self.clears = 0
+        self.reads = 0
+        self.level = level
 
     def clear(self):
         self.clears += 1
 
     def read_frame(self, timeout=1.0):
-        return np.zeros(WAKE_CHUNK, dtype=np.int16)
+        self.reads += 1
+        return np.full(WAKE_CHUNK, self.level, dtype=np.int16)
 
 
 class FakeWake:
-    """process_frame returns True on the Nth call (0 = never)."""
-    def __init__(self, fire_on=0):
+    """score() is high for calls in [fire_on, fire_until] (fire_on=0 = never).
+
+    fire_until models a TRANSIENT high score -- the realistic shape of both a
+    real barge-in and a self-fire on JARVIS's own speech, where surrounding
+    chunks score low and so teach the policy its echo floor.
+    """
+    def __init__(self, fire_on=0, fire_until=None):
         self.fire_on = fire_on
+        self.fire_until = fire_until
         self.calls = 0
+        self.resets = 0
+
+    def score(self, chunk):
+        self.calls += 1
+        if not self.fire_on or self.calls < self.fire_on:
+            return 0.0
+        if self.fire_until is not None and self.calls > self.fire_until:
+            return 0.0
+        return 0.95
 
     def process_frame(self, chunk):
-        self.calls += 1
-        return self.fire_on and self.calls >= self.fire_on
+        return self.score(chunk) >= 0.5
+
+    def reset(self):
+        self.resets += 1
 
 
-def _watch_client(wake):
+def _watch_client(wake, level=8000, policy=None):
     c = VoiceClient.__new__(VoiceClient)
-    c.mic = FrameMic()
+    c.mic = FrameMic(level=level)
     c.wake_word = wake
     c._wake_buf = np.array([], dtype=np.int16)
+    c._playback_policy = policy or PlaybackWakePolicy(
+        threshold=0.7, consecutive=2, level_ratio=2.0, min_level=200.0
+    )
     return c
 
 
 def test_watch_for_wake_returns_true_when_word_fires():
-    c = _watch_client(FakeWake(fire_on=2))
+    # Loud, confident and sustained: the user really did cut in.
+    c = _watch_client(FakeWake(fire_on=2), level=8000)
     assert c._watch_for_wake(duration=5.0) is True
     assert c.mic.clears == 1
+    assert c.wake_word.resets == 1
 
 
 def test_watch_for_wake_returns_false_after_duration():
@@ -265,6 +292,61 @@ def test_watch_for_wake_returns_false_after_duration():
     start = time.monotonic()
     assert c._watch_for_wake(duration=0.05) is False
     assert time.monotonic() - start < 2.0  # exits near the deadline, doesn't hang
+
+
+# --- Bluetooth latency: the watch must cover the whole physical playout ------
+
+
+def test_watch_waits_past_the_clip_for_output_latency():
+    """The reply is still coming out of the speaker after the WAV's own
+    duration. Ending the watch there is what purged mid-sentence."""
+    c = _watch_client(FakeWake(fire_on=0))
+    start = time.monotonic()
+    c._watch_for_wake(duration=0.2)
+    elapsed = time.monotonic() - start
+    assert elapsed >= 0.2 + vc.OUTPUT_LATENCY_SEC, (
+        f"watch ended after {elapsed:.2f}s, before the clip had played out"
+    )
+
+
+def test_quiet_self_fire_during_playback_is_not_a_barge_in():
+    """JARVIS's own voice can briefly score high, but it is no louder than the
+    echo floor the surrounding chunks established, so it must not interrupt."""
+    # Chunks 1-14 score 0 at level 400 and teach the floor; 15-18 score 0.95 at
+    # that same level -- a transient self-fire, not someone talking over it.
+    c = _watch_client(FakeWake(fire_on=15, fire_until=18), level=400)
+    assert c._watch_for_wake(duration=0.5) is False
+
+
+def test_a_loud_barge_in_still_wins_at_the_same_echo_level():
+    """Same transient, but the chunk is loud: that is a person, not the echo.
+    Guards against the gate above being so strict it kills real barge-in."""
+    c = _watch_client(FakeWake(fire_on=15, fire_until=25), level=400)
+    # Hand the policy a loud candidate once the floor has settled on 400.
+    for _ in range(20):
+        c._playback_policy.observe(score=0.0, level=400.0)
+    assert c._playback_policy.observe(score=0.95, level=6000.0) is False  # 1 of 2
+    assert c._playback_policy.observe(score=0.95, level=6000.0) is True
+
+
+# --- the echo drain ---------------------------------------------------------
+
+
+def test_drain_mic_consumes_frames_for_the_window_then_clears():
+    c = _watch_client(FakeWake(fire_on=0))
+    c.mic.reads = 0
+    start = time.monotonic()
+    c._drain_mic(0.15)
+    assert time.monotonic() - start >= 0.15
+    assert c.mic.reads > 0, "drain must actually read (and discard) frames"
+    assert c.mic.clears == 1
+
+
+def test_drain_mic_is_a_noop_for_a_zero_window():
+    c = _watch_client(FakeWake(fire_on=0))
+    c.mic.reads = 0
+    c._drain_mic(0)
+    assert c.mic.reads == 0
 
 
 # --- _play_and_watch() must actually run the watch ---------------------------
@@ -318,3 +400,222 @@ def test_play_and_watch_runs_the_watch_despite_async_from_memory_limit(monkeypat
 
     assert watched["called"] is True  # the barge-in watch actually ran
     assert result is True             # and its result is propagated back
+
+
+# --- an unreadable WAV duration must not leak audio into the next capture ---
+#
+# `if interrupted or duration > 0` was added so an unparseable header would not
+# cause a purge that truncates the reply. It traded one bug for a worse one:
+# with duration == 0.0 and no barge-in, nothing purges, _watch_for_wake returns
+# after only latency + tail (~0.6s), and the loop walks into _capture_followup
+# while the clip is STILL PLAYING -- recording JARVIS as the user's follow-up,
+# which is the feedback loop this whole branch exists to close. The 250ms
+# _drain_mic cannot cover a multi-second reply.
+#
+# A clip whose length we cannot determine goes down the BLOCKING path instead:
+# PlaySound returns only when playback is finished, so there is nothing left to
+# purge and nothing left to bleed. Barge-in is lost for that one malformed clip,
+# which is the right trade.
+
+
+def test_an_unreadable_duration_plays_blocking_instead_of_watching(monkeypatch):
+    calls = []
+
+    def fake_play(target, flags):
+        calls.append(flags)
+
+    monkeypatch.setattr(winsound, "PlaySound", fake_play)
+    c = _client(None)
+    watched = []
+    monkeypatch.setattr(c, "_watch_for_wake", lambda d: watched.append(d) or False)
+    monkeypatch.setattr(c, "_drain_mic", lambda *a, **k: None)
+
+    interrupted = c._play_and_watch(b"not a parseable wav")
+
+    assert interrupted is False
+    assert watched == [], (
+        "the async watch ran for a clip whose end time is unknown; the capture "
+        "that follows will record the still-playing reply"
+    )
+    assert winsound.SND_MEMORY in calls, "expected the blocking memory playback"
+    assert not any(f & winsound.SND_ASYNC for f in calls), (
+        "async playback was started for an unbounded clip"
+    )
+
+
+def test_a_readable_duration_still_takes_the_async_barge_in_path(monkeypatch):
+    monkeypatch.setattr(winsound, "PlaySound", lambda *a: None)
+    c = _client(None)
+    watched = []
+    monkeypatch.setattr(c, "_watch_for_wake", lambda d: watched.append(d) or False)
+    monkeypatch.setattr(c, "_drain_mic", lambda *a, **k: None)
+
+    c._play_and_watch(_make_wav(0.5))
+
+    assert watched and abs(watched[0] - 0.5) < 0.01, "barge-in watch was skipped"
+
+
+# --- a barge-in means an exchange IS in progress ---------------------------
+#
+# `pending_barge_in` is only ever set from inside the playback watch, so it
+# implies a reply was sounding and therefore that an exchange is underway. The
+# barge-in branch never set `in_conversation`, so on the FIRST exchange it
+# stayed False -- and an `unverified` capture (JARVIS's own echo, the case the
+# unverified branch exists for) then hit `not in_conversation` and rearmed,
+# ending the session. Exactly the "hearing itself ends the conversation"
+# behaviour the comment there says is fixed; it only worked from the second
+# exchange on.
+
+
+def test_an_unverified_echo_does_not_end_a_conversation_it_started_in():
+    """_followup_next is the owner of this decision; the bug was the loop's
+    `not in_conversation` short-circuit around it, which this pins."""
+    # Mid-conversation: an unverified capture must NOT end the exchange.
+    assert VoiceClient._followup_next(
+        in_conversation=True, misfires=0, productive=False,
+    ) == (True, 1)
+
+
+def test_the_barge_in_branch_marks_the_conversation_active():
+    """Static guarantee: the branch that consumes pending_barge_in sets
+    in_conversation, so the unverified path cannot mistake a barge-in turn for
+    an idle one."""
+    import inspect
+
+    src = inspect.getsource(VoiceClient.run)
+    branch = src.split("if pending_barge_in:", 1)[1].split("elif in_conversation:", 1)[0]
+    assert "in_conversation = True" in branch, (
+        "the barge-in branch leaves in_conversation False, so an unverified "
+        "echo on the first exchange rearms and ends the session"
+    )
+
+
+# --- the mic has exactly one owner at a time -------------------------------
+#
+# A proactive announcement arrives on the BACKGROUND RECEIVER task
+# (on_proactive_audio=self._play) while the main loop is blocked in a capture on
+# a different worker thread. _play then ran _drain_mic concurrently with
+# _capture_utterance / _capture_followup, and the two share all the mic state:
+# _drain_mic consumes frames the capture is waiting for, calls self.mic.clear()
+# which flushes the queue mid-capture, and reassigns self._wake_buf while
+# _capture_utterance is doing self._wake_buf = np.concatenate([...]) -- a lost
+# update that drops or re-feeds wake-word chunks.
+#
+# The old _play_lock only serialized PlaySound against PlaySound, so it could
+# not help: the capture never took it.
+#
+# Decision (product, not mechanical): a reminder WAITS for the capture to
+# finish rather than cutting the user off mid-sentence. Losing a command is
+# worse than a ~2s delay on an announcement, and JARVIS talking over the user
+# is the same class of problem as the feedback loop this client exists to stop.
+# One lock now guards both devices, so "who owns the mic" has a single answer.
+
+
+def test_a_proactive_announcement_waits_for_an_active_capture(monkeypatch):
+    import threading
+
+    monkeypatch.setattr(winsound, "PlaySound", lambda *a: None)
+
+    async def scenario():
+        c = _client(None)
+        c._audio_lock = asyncio.Lock()
+        events = []
+        capture_running = threading.Event()
+        let_capture_finish = threading.Event()
+
+        def fake_capture():
+            events.append("capture:enter")
+            capture_running.set()
+            let_capture_finish.wait(5.0)
+            events.append("capture:exit")
+            return b"pcm"
+
+        monkeypatch.setattr(c, "_drain_mic", lambda *a, **k: events.append("drain"))
+
+        async def capture_turn():
+            # what run() does for every capture
+            async with c._audio_lock:
+                return await asyncio.to_thread(fake_capture)
+
+        cap = asyncio.create_task(capture_turn())
+        await asyncio.to_thread(capture_running.wait, 5.0)
+
+        play = asyncio.create_task(c._play(b"wav"))
+        await asyncio.sleep(0.1)   # ample time to misbehave if unguarded
+
+        assert "drain" not in events, (
+            "the proactive announcement drained the mic while a capture was "
+            "in flight; it would eat the user's speech and race _wake_buf"
+        )
+
+        let_capture_finish.set()
+        await asyncio.gather(cap, play)
+        assert events.index("capture:exit") < events.index("drain")
+
+    asyncio.run(scenario())
+
+
+def _run_ast():
+    """VoiceClient.run as an AST, for exact nesting questions.
+
+    Indentation heuristics cannot answer these: a capture's `async with` sits at
+    a SHALLOWER indent than the reply playback yet does not enclose it, because
+    the block closed. Containment is a tree question, so ask the tree.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    return ast.parse(textwrap.dedent(inspect.getsource(VoiceClient.run)))
+
+
+def _audio_lock_blocks(tree):
+    import ast
+
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncWith) and any(
+            "_audio_lock" in ast.dump(item.context_expr) for item in node.items
+        ):
+            out.append(node)
+    return out
+
+
+def _calls_to(node, attr):
+    import ast
+
+    return [
+        n for n in ast.walk(node)
+        if isinstance(n, ast.Attribute) and n.attr == attr
+    ]
+
+
+def test_the_main_loop_holds_the_audio_lock_around_every_capture():
+    """The concurrency test above can only prove _play cooperates. This pins the
+    other half: run() must actually take the lock, for all three capture paths.
+    """
+    tree = _run_ast()
+    blocks = _audio_lock_blocks(tree)
+    assert blocks, "run() no longer acquires _audio_lock at all"
+
+    for fn in ("_record_utterance", "_capture_followup", "_capture_utterance"):
+        assert _calls_to(tree, fn), f"{fn} is no longer called by run(); update this test"
+        guarded = any(_calls_to(b, fn) for b in blocks)
+        assert guarded, (
+            f"{fn} runs without holding _audio_lock, so a proactive "
+            "announcement can drain the mic underneath it"
+        )
+
+
+def test_the_reply_is_not_played_while_the_audio_lock_is_held():
+    """asyncio.Lock is NOT reentrant, so widening a capture's `async with` to
+    cover the reply would deadlock the client outright: _play_and_watch_reply
+    acquires the same lock.
+    """
+    tree = _run_ast()
+    assert _calls_to(tree, "_play_and_watch_reply"), "reply playback moved"
+    for b in _audio_lock_blocks(tree):
+        assert not _calls_to(b, "_play_and_watch_reply"), (
+            "a capture holds _audio_lock across the reply playback; "
+            "_play_and_watch_reply re-acquires it and the client deadlocks"
+        )

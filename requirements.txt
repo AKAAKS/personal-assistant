@@ -37,7 +37,21 @@ google-auth-httplib2>=0.2.0
 # Clipboard tools
 pyperclip>=1.8.2
 
-# Speaker verification (voiceprint) — respond only to the enrolled voice
+# Speaker verification (voiceprint) — respond only to the enrolled voice.
+# speechbrain's ECAPA-TDNN is the default backend: it separates similar voices
+# far better than the GE2E d-vector, which is what stops the enrolled speaker's
+# score band from overlapping the TTS echo's. resemblyzer is kept as a fallback
+# backend (SPEAKER_VERIFY_BACKEND=resemblyzer) so a failed model download can't
+# lock you out of your own assistant.
+speechbrain>=1.0
+# torchaudio is deliberately NOT installed by this file. It must match your
+# installed torch MAJOR.MINOR exactly; left unpinned here, the resolver picks a
+# version that drags in a different torch, and on a Windows Store Python that
+# upgrade fails on the long-path limit -- which is exactly what the line below
+# used to cause. Install it by hand:
+#   python -c "import torch; print(torch.__version__)"   # e.g. 2.10.0+cpu
+#   pip install torchaudio==2.10.0                       # match MAJOR.MINOR
+# speechbrain imports it lazily, so ECAPA only needs it at first use.
 resemblyzer>=0.1.4
 librosa>=0.10.0
 

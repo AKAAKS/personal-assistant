@@ -131,3 +131,22 @@ def make_tts(backend: str | None = None, rate: int = 180, voice_id: str | None =
         edge = EdgeTTS()  # reads EDGE_TTS_VOICE; NOT the SAPI voice_id
         return _EdgeWithFallback(edge, rate=rate, voice_id=voice_id)
     return TextToSpeech(rate=rate, voice_id=voice_id)
+
+
+def make_tts_from_env():
+    """Build TTS exactly as the daemon does, from TTS_BACKEND/RATE/VOICE_ID.
+
+    The single source of truth for "which voice is JARVIS". Enrollment and
+    calibration synthesize the NEGATIVE voiceprint -- the thing that lets an
+    echo be rejected for being closer to JARVIS than to the user -- so if they
+    build a different voice than the daemon speaks with, that print describes a
+    voice that is never heard and the margin rule is measured against nothing.
+    Both previously called make_tts(rate=...), dropping voice_id and the
+    positional backend, so TTS_BACKEND=edge gave a pyttsx3 print against an
+    Edge voice.
+    """
+    return make_tts(
+        os.getenv("TTS_BACKEND") or None,
+        rate=int(os.getenv("TTS_RATE", "180")),
+        voice_id=os.getenv("TTS_VOICE_ID") or None,
+    )

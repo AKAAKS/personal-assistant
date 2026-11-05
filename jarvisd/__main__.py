@@ -114,11 +114,7 @@ def run(args, log):
         print("Loading speech models (Whisper + TTS)... first start can take ~15s.", flush=True)
         from voice.stt import SpeechToText
         from voice.tts import make_tts
-        stt = SpeechToText(
-            model_size=os.getenv("WHISPER_MODEL", "small"),
-            device=os.getenv("WHISPER_DEVICE", "cuda"),
-            compute_type=os.getenv("WHISPER_COMPUTE_TYPE", "int8_float16"),
-        )
+        stt = SpeechToText.from_env()
         tts = make_tts(
             tts_backend,
             rate=int(os.getenv("TTS_RATE", "180")),
