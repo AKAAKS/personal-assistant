@@ -222,9 +222,19 @@ class VoiceClient:
             raise SystemExit(1)
         self._wake_buf = np.array([], dtype=np.int16)
         self._playback_policy = PlaybackWakePolicy()
-        # Serializes winsound.PlaySound calls: a proactive WAV must never
-        # interleave with a reply WAV (winsound.PlaySound is blocking).
-        self._play_lock = asyncio.Lock()
+        # Guards BOTH audio devices: whoever holds this owns the mic and the
+        # speaker. A proactive announcement arrives on the background receiver
+        # task while the main loop is blocked in a capture on another worker
+        # thread, and the two share every piece of mic state -- _drain_mic
+        # consumes frames the capture wants, clears the queue mid-capture, and
+        # reassigns _wake_buf while _capture_utterance is concatenating onto it.
+        # The old name was _play_lock and it only serialized PlaySound against
+        # PlaySound, which the captures never took, so it could not help.
+        #
+        # A proactive therefore WAITS for an active capture instead of cutting
+        # the user off mid-sentence: losing a command is worse than a ~2s delay
+        # on an announcement.
+        self._audio_lock = asyncio.Lock()
 
     def _capture_utterance(self) -> bytes | None:
         """Block until the wake word, then record one utterance. PCM or None."""
@@ -396,7 +406,7 @@ class VoiceClient:
 
     async def _play_and_watch_reply(self, wav: bytes) -> bool:
         """Play a reply under the shared play-lock; return whether interrupted."""
-        async with self._play_lock:
+        async with self._audio_lock:
             return await asyncio.to_thread(self._play_and_watch, wav)
 
     def _capture_followup(self) -> bytes | None:
@@ -465,7 +475,7 @@ class VoiceClient:
     async def _play(self, wav: bytes):
         """Play a WAV under the shared lock so a proactive and a reply WAV
         can never sound simultaneously (winsound.PlaySound is blocking)."""
-        async with self._play_lock:
+        async with self._audio_lock:
             await asyncio.to_thread(winsound.PlaySound, bytes(wav), winsound.SND_MEMORY)
             # A proactive announcement is spoken while the main loop may be
             # sitting in a capture, so its echo needs draining too.
@@ -525,7 +535,8 @@ class VoiceClient:
                             # rearm, ending the session.
                             pending_barge_in = False
                             in_conversation = True
-                            pcm = await asyncio.to_thread(self._record_utterance)
+                            async with self._audio_lock:
+                                pcm = await asyncio.to_thread(self._record_utterance)
                             if pcm is None:
                                 advance(productive=False)
                                 if not in_conversation:
@@ -533,7 +544,8 @@ class VoiceClient:
                                 continue
                         elif in_conversation:
                             print("  Listening for follow-up... (or stay quiet to end)")
-                            pcm = await asyncio.to_thread(self._capture_followup)
+                            async with self._audio_lock:
+                                pcm = await asyncio.to_thread(self._capture_followup)
                             if pcm is None:
                                 misfires = MAX_FOLLOWUP_MISFIRES  # silent window ends it
                                 advance(productive=False)
@@ -541,7 +553,8 @@ class VoiceClient:
                                     rearm()
                                 continue
                         else:
-                            pcm = await asyncio.to_thread(self._capture_utterance)
+                            async with self._audio_lock:
+                                pcm = await asyncio.to_thread(self._capture_utterance)
                             active = True  # the wake word fired
                             if pcm is None:
                                 rearm()

@@ -4,6 +4,7 @@ We build the client via __new__ so the wake-word model and real microphone are
 never touched; only the pieces _capture_followup uses are faked.
 """
 
+import asyncio
 import io
 import time
 import wave
@@ -487,3 +488,134 @@ def test_the_barge_in_branch_marks_the_conversation_active():
         "the barge-in branch leaves in_conversation False, so an unverified "
         "echo on the first exchange rearms and ends the session"
     )
+
+
+# --- the mic has exactly one owner at a time -------------------------------
+#
+# A proactive announcement arrives on the BACKGROUND RECEIVER task
+# (on_proactive_audio=self._play) while the main loop is blocked in a capture on
+# a different worker thread. _play then ran _drain_mic concurrently with
+# _capture_utterance / _capture_followup, and the two share all the mic state:
+# _drain_mic consumes frames the capture is waiting for, calls self.mic.clear()
+# which flushes the queue mid-capture, and reassigns self._wake_buf while
+# _capture_utterance is doing self._wake_buf = np.concatenate([...]) -- a lost
+# update that drops or re-feeds wake-word chunks.
+#
+# The old _play_lock only serialized PlaySound against PlaySound, so it could
+# not help: the capture never took it.
+#
+# Decision (product, not mechanical): a reminder WAITS for the capture to
+# finish rather than cutting the user off mid-sentence. Losing a command is
+# worse than a ~2s delay on an announcement, and JARVIS talking over the user
+# is the same class of problem as the feedback loop this client exists to stop.
+# One lock now guards both devices, so "who owns the mic" has a single answer.
+
+
+def test_a_proactive_announcement_waits_for_an_active_capture(monkeypatch):
+    import threading
+
+    monkeypatch.setattr(winsound, "PlaySound", lambda *a: None)
+
+    async def scenario():
+        c = _client(None)
+        c._audio_lock = asyncio.Lock()
+        events = []
+        capture_running = threading.Event()
+        let_capture_finish = threading.Event()
+
+        def fake_capture():
+            events.append("capture:enter")
+            capture_running.set()
+            let_capture_finish.wait(5.0)
+            events.append("capture:exit")
+            return b"pcm"
+
+        monkeypatch.setattr(c, "_drain_mic", lambda *a, **k: events.append("drain"))
+
+        async def capture_turn():
+            # what run() does for every capture
+            async with c._audio_lock:
+                return await asyncio.to_thread(fake_capture)
+
+        cap = asyncio.create_task(capture_turn())
+        await asyncio.to_thread(capture_running.wait, 5.0)
+
+        play = asyncio.create_task(c._play(b"wav"))
+        await asyncio.sleep(0.1)   # ample time to misbehave if unguarded
+
+        assert "drain" not in events, (
+            "the proactive announcement drained the mic while a capture was "
+            "in flight; it would eat the user's speech and race _wake_buf"
+        )
+
+        let_capture_finish.set()
+        await asyncio.gather(cap, play)
+        assert events.index("capture:exit") < events.index("drain")
+
+    asyncio.run(scenario())
+
+
+def _run_ast():
+    """VoiceClient.run as an AST, for exact nesting questions.
+
+    Indentation heuristics cannot answer these: a capture's `async with` sits at
+    a SHALLOWER indent than the reply playback yet does not enclose it, because
+    the block closed. Containment is a tree question, so ask the tree.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    return ast.parse(textwrap.dedent(inspect.getsource(VoiceClient.run)))
+
+
+def _audio_lock_blocks(tree):
+    import ast
+
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncWith) and any(
+            "_audio_lock" in ast.dump(item.context_expr) for item in node.items
+        ):
+            out.append(node)
+    return out
+
+
+def _calls_to(node, attr):
+    import ast
+
+    return [
+        n for n in ast.walk(node)
+        if isinstance(n, ast.Attribute) and n.attr == attr
+    ]
+
+
+def test_the_main_loop_holds_the_audio_lock_around_every_capture():
+    """The concurrency test above can only prove _play cooperates. This pins the
+    other half: run() must actually take the lock, for all three capture paths.
+    """
+    tree = _run_ast()
+    blocks = _audio_lock_blocks(tree)
+    assert blocks, "run() no longer acquires _audio_lock at all"
+
+    for fn in ("_record_utterance", "_capture_followup", "_capture_utterance"):
+        assert _calls_to(tree, fn), f"{fn} is no longer called by run(); update this test"
+        guarded = any(_calls_to(b, fn) for b in blocks)
+        assert guarded, (
+            f"{fn} runs without holding _audio_lock, so a proactive "
+            "announcement can drain the mic underneath it"
+        )
+
+
+def test_the_reply_is_not_played_while_the_audio_lock_is_held():
+    """asyncio.Lock is NOT reentrant, so widening a capture's `async with` to
+    cover the reply would deadlock the client outright: _play_and_watch_reply
+    acquires the same lock.
+    """
+    tree = _run_ast()
+    assert _calls_to(tree, "_play_and_watch_reply"), "reply playback moved"
+    for b in _audio_lock_blocks(tree):
+        assert not _calls_to(b, "_play_and_watch_reply"), (
+            "a capture holds _audio_lock across the reply playback; "
+            "_play_and_watch_reply re-acquires it and the client deadlocks"
+        )
