@@ -183,9 +183,6 @@ class SpeakerVerifier:
     def enabled(self) -> bool:
         return self.voiceprint is not None
 
-    def similarity(self, audio) -> float:
-        return cosine_similarity(self._embed(audio), self.voiceprint)
-
     def decide(self, audio) -> VerifyResult:
         """Score an utterance and explain the verdict.
 

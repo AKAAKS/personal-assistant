@@ -27,16 +27,29 @@ def build_registry(
     tools: list of Anthropic tool definitions (dicts)
     handlers: tool name -> callable(tool_input: dict) -> str
 
-    Tools are assembled in order:
-    1. ha + system (always)
-    2. spotify (if spotify_client)
-    3. tv (if tv_client)
-    4. memory (if profile_store and memory_store)
-    5. reminder (if reminder_store)
-    6. rules (if rules_store)
-    7. meals (if meal_store)
-    8. files (if file_tools is True; file_summarizer may still be None)
-    9. proposals (if proposal_store)
+    Every pack is gated on the collaborator it needs, so a client that failed
+    to initialise simply contributes no tools. The order below is the order the
+    model sees them in; it is not otherwise significant.
+
+    ha + system + terminal + clipboard  always
+    spotify                             if spotify_client
+    tv                                  if tv_client
+    memory                              if profile_store and memory_store
+    reminders                           if reminder_store
+    rules                               if rules_store
+    meals                               if meal_store
+    food                                if food_service
+    pantry                              if pantry_store and food_service
+    meal_log / suggest / prep           if meal_log_conn (+ the two above)
+    files                               if file_tools (file_summarizer may be None)
+    proposals                           if proposal_store
+    gmail + calendar                    if google_client
+    weather                             if location_provider
+
+    Adding a pack means editing this function in three paired places (the
+    import, `tools +=`, `handler_map.update`) AND giving each new tool a tier in
+    security/policy.py -- that last one fails silently, so
+    tests/test_policy_meal_tools.py asserts it.
     """
     tools = list(ha.TOOLS) + list(system.TOOLS) + list(terminal.TOOLS) + list(clipboard.TOOLS)
     handler_map = {}

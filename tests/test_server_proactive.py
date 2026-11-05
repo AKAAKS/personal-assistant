@@ -171,7 +171,12 @@ def test_serve_forever_wires_push_to_clients_and_starts_reminder_task():
             return []
 
     notifier = NoOpNotifier()
-    server = JarvisServer(FakeAssistant(), notifier=notifier, reminder_store=EmptyReminderStore())
+    # port=0: let the OS pick a free port. These tests call serve_forever,
+    # so with the constructor default (8765) they fail whenever the real
+    # daemon is running on this machine.
+    server = JarvisServer(
+        FakeAssistant(), notifier=notifier, reminder_store=EmptyReminderStore(), port=0
+    )
 
     async def _run():
         task = asyncio.create_task(server.serve_forever())
@@ -456,18 +461,11 @@ def test_e2e_due_reminder_reaches_live_client_through_full_chain(tmp_path):
     assert notifier.drain() == []
 
 
-# --- backward-compatible construction ---
-
-
-def test_assistant_lock_holder_defaults_to_self():
-    server = JarvisServer(FakeAssistant())
-    assert server.assistant_lock_holder is server
-
-
-def test_assistant_lock_holder_can_be_overridden():
-    sentinel = object()
-    server = JarvisServer(FakeAssistant(), assistant_lock_holder=sentinel)
-    assert server.assistant_lock_holder is sentinel
+# The two `assistant_lock_holder` tests that were here are gone with the
+# attribute. It was a "reserved hook for a future multi-server topology" that
+# nothing ever read: these two tests were its only consumers, and they asserted
+# only that the constructor stored what it was handed. __main__'s HA-rule
+# callables serialize on `server._lock` directly, which the comment there says.
 
 
 # --- conditional reminders (standing nudges) ---
