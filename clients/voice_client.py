@@ -341,6 +341,22 @@ class VoiceClient:
         the watch ends.
         """
         duration = self._wav_duration(wav)
+        if duration <= 0:
+            # We cannot tell when this clip ends, so async playback would leave
+            # it sounding while the next capture opens -- recording JARVIS as
+            # the user's follow-up, the exact feedback loop this client exists
+            # to avoid. (Purging instead would truncate the reply, which is how
+            # an earlier version of this guard got it wrong in the other
+            # direction.) Blocking playback returns only when the sound has
+            # finished, so there is nothing left to purge or to bleed. The cost
+            # is no barge-in for one malformed clip.
+            try:
+                winsound.PlaySound(wav, winsound.SND_MEMORY)
+            except Exception:
+                log.warning("Could not play a reply with an unreadable duration",
+                            exc_info=True)
+            self._drain_mic()
+            return False
         tmp_path = None
         try:
             fd, tmp_path = tempfile.mkstemp(suffix=".wav", prefix="jarvis_reply_")
@@ -361,15 +377,13 @@ class VoiceClient:
         try:
             interrupted = self._watch_for_wake(duration)
         finally:
-            # Purge only when we know where the clip ends: the watch just ran
-            # for its full playout, or the user cut in deliberately. With an
-            # unreadable duration (0.0) we have no idea, so stopping would be a
-            # guess that truncates the reply -- let it finish instead.
-            if interrupted or duration > 0:
-                try:
-                    winsound.PlaySound(None, winsound.SND_PURGE)
-                except Exception:
-                    pass
+            # Unconditional: duration > 0 is guaranteed by the guard above, so
+            # the watch either ran the full playout or the user cut in. Both
+            # mean stopping the device is safe.
+            try:
+                winsound.PlaySound(None, winsound.SND_PURGE)
+            except Exception:
+                pass
             self._remove_tempfile(tmp_path)
         if not interrupted:
             self._drain_mic()  # swallow the Bluetooth-delayed tail
@@ -507,7 +521,15 @@ class VoiceClient:
                     while True:
                         if pending_barge_in:
                             # We just cut off a reply; the user is already talking.
+                            # pending_barge_in is only set from inside the
+                            # playback watch, so a reply WAS sounding and an
+                            # exchange is underway -- say so, or an unverified
+                            # capture (JARVIS's own echo, which is the whole
+                            # reason that branch exists) would see
+                            # `not in_conversation` on the first exchange and
+                            # rearm, ending the session.
                             pending_barge_in = False
+                            in_conversation = True
                             pcm = await asyncio.to_thread(self._record_utterance)
                             if pcm is None:
                                 advance(productive=False)

@@ -49,8 +49,21 @@ DEFAULT_BACKEND = "ecapa"
 # 0.70-0.87 on a 3s clip). We still trust the *relative* comparison, so a short
 # clip is decided by the margin rule alone.
 DEFAULT_MIN_DURATION_SEC = 2.0
-DEFAULT_MARGIN = 0.10
-DEFAULT_THRESHOLD = 0.75
+
+# Cosine scores are NOT comparable across embedding models, so the defaults are
+# per backend. Getting this wrong is the original bug in a new costume: 0.75 is
+# an ordinary same-speaker score for Resemblyzer and sits near the TOP of
+# ECAPA's measured genuine band (0.290-0.775 on this hardware), so reusing it
+# rejected almost everything. The ECAPA numbers are the midpoints of the bands
+# measured live and pinned in tests/test_verify_live_scores.py, which also
+# asserts these defaults accept every genuine row and reject every mixed one.
+BACKEND_DEFAULT_THRESHOLD = {"ecapa": 0.25, "resemblyzer": 0.75}
+BACKEND_DEFAULT_MARGIN = {"ecapa": 0.24, "resemblyzer": 0.10}
+
+# Kept for callers that construct SpeakerVerifier directly; from_env() resolves
+# per backend instead. These track the default backend.
+DEFAULT_MARGIN = BACKEND_DEFAULT_MARGIN["ecapa"]
+DEFAULT_THRESHOLD = BACKEND_DEFAULT_THRESHOLD["ecapa"]
 
 
 def cosine_similarity(a, b) -> float:
@@ -354,8 +367,11 @@ def from_env():
                     "for this run. Install it with: pip install -r requirements.txt",
                     backend, exc_info=True)
         return None
-    threshold = _setting(cfg, "SPEAKER_VERIFY_THRESHOLD", "threshold", DEFAULT_THRESHOLD)
-    margin = _setting(cfg, "SPEAKER_VERIFY_MARGIN", "margin", DEFAULT_MARGIN)
+    # Per backend: a threshold is only meaningful on the scale it was measured on.
+    threshold = _setting(cfg, "SPEAKER_VERIFY_THRESHOLD", "threshold",
+                         BACKEND_DEFAULT_THRESHOLD.get(backend, DEFAULT_THRESHOLD))
+    margin = _setting(cfg, "SPEAKER_VERIFY_MARGIN", "margin",
+                      BACKEND_DEFAULT_MARGIN.get(backend, DEFAULT_MARGIN))
     min_dur = _setting(cfg, "SPEAKER_VERIFY_MIN_DURATION_SEC", "min_duration_sec",
                        DEFAULT_MIN_DURATION_SEC)
     log.info("Speaker verification: %s backend, threshold %.2f, margin %.2f%s",

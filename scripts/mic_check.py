@@ -47,11 +47,7 @@ def main():
 
     print("\nLoading Whisper...")
     from voice.stt import SpeechToText
-    stt = SpeechToText(
-        model_size=os.getenv("WHISPER_MODEL", "small"),
-        device=os.getenv("WHISPER_DEVICE", "cuda"),
-        compute_type=os.getenv("WHISPER_COMPUTE_TYPE", "int8_float16"),
-    )
+    stt = SpeechToText.from_env()  # same defaults as the daemon
     text = stt.transcribe(audio)
     print(f"Whisper: {text!r} {'(OK)' if text else '(EMPTY — mic/VAD stages above should say why)'}")
 

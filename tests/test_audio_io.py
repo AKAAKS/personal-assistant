@@ -211,3 +211,37 @@ def test_persistent_noise_still_gives_up_within_the_patience_window():
         mic, silence_ms=300, min_speech_ms=300, speech_timeout_sec=1.0
     )
     assert audio is None
+
+
+# --- the gate must not be able to eat a spoken confirmation ----------------
+#
+# voice/stt.py deliberately keeps "yes"/"no"/"okay" OUT of _FILLER_UTTERANCES:
+# JARVIS requires a spoken confirmation before any destructive tool call, so
+# dropping a bare "yes" as noise silently breaks that flow. MIN_SPEECH_MS was
+# then set to 300ms, which discards the same utterance EARLIER -- at the VAD
+# layer, before Whisper ever sees it. A briskly spoken "Yes." is ~200-300ms of
+# voiced audio, so the two guards contradicted each other and the VAD one won.
+#
+# Length cannot separate a confirmation from a noise blip: the logged blips were
+# ~200ms of VAD-positive audio, the same as "yes". The thing that CAN separate
+# them is speaker verification, which already rejected those blips correctly
+# (they scored near zero against BOTH voiceprints). So this gate is a cheap
+# sanity floor that must stay below any real word, and verification remains the
+# actual noise defence.
+
+
+def test_a_briskly_spoken_confirmation_survives_the_gate():
+    """~240ms of speech: a plausible "Yes." in a destructive-action prompt."""
+    vad = ScriptedVAD()
+    mic = ScriptedMic(_speech(8) + _silence(30))   # 8 frames = 240ms
+    audio = vad.record_until_silence(mic, silence_ms=300)
+    assert audio is not None, (
+        "a ~240ms confirmation was dropped before Whisper saw it; JARVIS's "
+        "destructive-tool confirmation depends on this utterance"
+    )
+
+
+def test_the_floor_still_drops_a_single_frame_blip():
+    vad = ScriptedVAD()
+    mic = ScriptedMic(_speech(1) + _silence(30))   # 30ms -- not a word
+    assert vad.record_until_silence(mic, silence_ms=300) is None

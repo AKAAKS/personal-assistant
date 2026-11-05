@@ -149,9 +149,15 @@ def _speak_and_record(mic, wav: bytes) -> np.ndarray | None:
                 pass
 
 
-def _collect_voice(encoder, backend, mic, vad):
-    """Prompt for spoken samples until we have enough. Returns embeddings."""
-    embeddings = []
+def _collect_voice(encoder, backend, mic, vad, embeddings):
+    """Prompt for spoken samples until we have enough.
+
+    Appends into the caller's `embeddings` list rather than returning a new one,
+    so a Ctrl-C part-way through keeps what was already recorded. Binding the
+    result on return instead meant an interrupt on prompt 5 of 6 discarded four
+    good samples and reported "captured 0" -- and made MIN_SAMPLES unreachable,
+    since this only ever returned exactly N_SAMPLES or raised.
+    """
     i = 0
     while len(embeddings) < N_SAMPLES:
         prompt = PROMPTS[i % len(PROMPTS)]
@@ -210,7 +216,7 @@ def main():
 
     embeddings, jarvis_embs, recorded = [], [], False
     try:
-        embeddings = _collect_voice(encoder, backend, mic, vad)
+        _collect_voice(encoder, backend, mic, vad, embeddings)
 
         if len(embeddings) >= MIN_SAMPLES:
             print("\n--- Now JARVIS speaks. Stay quiet for a few seconds. ---")

@@ -26,10 +26,22 @@ PRE_ROLL_MS = int(os.getenv("PRE_ROLL_MS", "300"))
 # A capture must hold at least this much VAD-positive audio to count as an
 # utterance. Total length cannot tell a real command from a noise blip: with
 # silence_ms of trailing silence appended, a 1.0s "utterance" can be ~0.2s of
-# room noise. Live log 15:18 shipped two such clips to the server, which scored
-# them near zero against both voiceprints -- noise, not a voice. Rejecting them
-# here saves the round trip and keeps the follow-up window quiet.
-MIN_SPEECH_MS = int(os.getenv("MIN_SPEECH_MS", "300"))
+# room noise (live log 15:18 shipped two such clips to the server).
+#
+# This is a SANITY FLOOR, not the noise defence, and it is deliberately well
+# below any real word. It was 300ms, which silently broke something more
+# important: voice/stt.py keeps "yes"/"no"/"okay" out of _FILLER_UTTERANCES
+# because JARVIS requires a spoken confirmation before any destructive tool
+# call, and a briskly spoken "Yes." is ~200-300ms of voiced audio -- so the
+# 300ms gate discarded confirmations here, before Whisper ever saw them. Length
+# simply cannot separate "yes" from a 200ms blip.
+#
+# What CAN separate them is speaker verification, and it already does: those
+# logged blips scored near zero against BOTH voiceprints, while the user's own
+# speech scores 0.29-0.78. So noise rejection belongs there, and this floor only
+# discards captures too short to be any word at all. The cost is one wasted
+# round trip on a blip, which is the right price for never eating a "yes".
+MIN_SPEECH_MS = int(os.getenv("MIN_SPEECH_MS", "120"))
 
 
 class MicrophoneStream:

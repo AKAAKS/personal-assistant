@@ -399,3 +399,91 @@ def test_play_and_watch_runs_the_watch_despite_async_from_memory_limit(monkeypat
 
     assert watched["called"] is True  # the barge-in watch actually ran
     assert result is True             # and its result is propagated back
+
+
+# --- an unreadable WAV duration must not leak audio into the next capture ---
+#
+# `if interrupted or duration > 0` was added so an unparseable header would not
+# cause a purge that truncates the reply. It traded one bug for a worse one:
+# with duration == 0.0 and no barge-in, nothing purges, _watch_for_wake returns
+# after only latency + tail (~0.6s), and the loop walks into _capture_followup
+# while the clip is STILL PLAYING -- recording JARVIS as the user's follow-up,
+# which is the feedback loop this whole branch exists to close. The 250ms
+# _drain_mic cannot cover a multi-second reply.
+#
+# A clip whose length we cannot determine goes down the BLOCKING path instead:
+# PlaySound returns only when playback is finished, so there is nothing left to
+# purge and nothing left to bleed. Barge-in is lost for that one malformed clip,
+# which is the right trade.
+
+
+def test_an_unreadable_duration_plays_blocking_instead_of_watching(monkeypatch):
+    calls = []
+
+    def fake_play(target, flags):
+        calls.append(flags)
+
+    monkeypatch.setattr(winsound, "PlaySound", fake_play)
+    c = _client(None)
+    watched = []
+    monkeypatch.setattr(c, "_watch_for_wake", lambda d: watched.append(d) or False)
+    monkeypatch.setattr(c, "_drain_mic", lambda *a, **k: None)
+
+    interrupted = c._play_and_watch(b"not a parseable wav")
+
+    assert interrupted is False
+    assert watched == [], (
+        "the async watch ran for a clip whose end time is unknown; the capture "
+        "that follows will record the still-playing reply"
+    )
+    assert winsound.SND_MEMORY in calls, "expected the blocking memory playback"
+    assert not any(f & winsound.SND_ASYNC for f in calls), (
+        "async playback was started for an unbounded clip"
+    )
+
+
+def test_a_readable_duration_still_takes_the_async_barge_in_path(monkeypatch):
+    monkeypatch.setattr(winsound, "PlaySound", lambda *a: None)
+    c = _client(None)
+    watched = []
+    monkeypatch.setattr(c, "_watch_for_wake", lambda d: watched.append(d) or False)
+    monkeypatch.setattr(c, "_drain_mic", lambda *a, **k: None)
+
+    c._play_and_watch(_make_wav(0.5))
+
+    assert watched and abs(watched[0] - 0.5) < 0.01, "barge-in watch was skipped"
+
+
+# --- a barge-in means an exchange IS in progress ---------------------------
+#
+# `pending_barge_in` is only ever set from inside the playback watch, so it
+# implies a reply was sounding and therefore that an exchange is underway. The
+# barge-in branch never set `in_conversation`, so on the FIRST exchange it
+# stayed False -- and an `unverified` capture (JARVIS's own echo, the case the
+# unverified branch exists for) then hit `not in_conversation` and rearmed,
+# ending the session. Exactly the "hearing itself ends the conversation"
+# behaviour the comment there says is fixed; it only worked from the second
+# exchange on.
+
+
+def test_an_unverified_echo_does_not_end_a_conversation_it_started_in():
+    """_followup_next is the owner of this decision; the bug was the loop's
+    `not in_conversation` short-circuit around it, which this pins."""
+    # Mid-conversation: an unverified capture must NOT end the exchange.
+    assert VoiceClient._followup_next(
+        in_conversation=True, misfires=0, productive=False,
+    ) == (True, 1)
+
+
+def test_the_barge_in_branch_marks_the_conversation_active():
+    """Static guarantee: the branch that consumes pending_barge_in sets
+    in_conversation, so the unverified path cannot mistake a barge-in turn for
+    an idle one."""
+    import inspect
+
+    src = inspect.getsource(VoiceClient.run)
+    branch = src.split("if pending_barge_in:", 1)[1].split("elif in_conversation:", 1)[0]
+    assert "in_conversation = True" in branch, (
+        "the barge-in branch leaves in_conversation False, so an unverified "
+        "echo on the first exchange rearms and ends the session"
+    )
