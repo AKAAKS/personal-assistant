@@ -74,8 +74,9 @@ def test_build_system_cached_prompt_plus_uncached_time_when_no_profile():
     blocks = ai._build_system()
     # system prompt (cached) + current-time block (uncached, always last)
     assert len(blocks) == 2
-    from jarvisd.core import SYSTEM_PROMPT
-    assert blocks[0]["text"] == SYSTEM_PROMPT
+    # The prompt is now rendered for THIS assistant's tools, not a fixed constant.
+    from jarvisd.core import render_system_prompt
+    assert blocks[0]["text"] == render_system_prompt(ai._available_tool_names())
     assert blocks[0]["cache_control"] == {"type": "ephemeral"}
     assert "cache_control" not in blocks[-1]  # a value that changes every call must not be cached
     assert "current local date and time" in blocks[-1]["text"].lower()
@@ -97,8 +98,9 @@ def test_build_system_profile_cached_before_uncached_time(tmp_path):
     blocks = ai._build_system()
 
     assert len(blocks) == 3  # system prompt + profile + time
-    from jarvisd.core import SYSTEM_PROMPT
-    assert blocks[0]["text"] == SYSTEM_PROMPT
+    # The prompt is now rendered for THIS assistant's tools, not a fixed constant.
+    from jarvisd.core import render_system_prompt
+    assert blocks[0]["text"] == render_system_prompt(ai._available_tool_names())
     assert blocks[0]["cache_control"] == {"type": "ephemeral"}
 
     profile_block = blocks[1]

@@ -99,14 +99,16 @@ def test_execute_guarded_run_script_autonomous_never_executes():
 
 
 def test_system_prompt_carries_spoken_persona_rules():
-    from jarvisd.core import SYSTEM_PROMPT
+    # The persona rules are fixed text, so they live in the template rather than
+    # in the per-run capability tables -- see render_system_prompt().
+    from jarvisd.core import SYSTEM_PROMPT_TEMPLATE
 
-    p = SYSTEM_PROMPT.lower()
+    p = SYSTEM_PROMPT_TEMPLATE.lower()
     assert "no markdown" in p
     assert "no bullet" in p or "no lists" in p
     assert "read aloud" in p
     # never the butler honorific — check the actual prohibition, not just that "sir" appears
-    assert 'never use "sir"' in SYSTEM_PROMPT
+    assert 'never use "sir"' in SYSTEM_PROMPT_TEMPLATE
 
 
 # --- Issue #3: _compact_history must not orphan a tool_result -------------

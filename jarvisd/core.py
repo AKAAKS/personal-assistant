@@ -21,7 +21,7 @@ SONNET_MODEL = "claude-sonnet-5"
 WEB_SEARCH_MAX_USES_PER_REQUEST = 3
 PAUSE_TURN_MAX_CONTINUATIONS = 5
 
-SYSTEM_PROMPT = """You are JARVIS, the user's personal AI assistant. You control their smart home, Spotify, Android TV, and PC.
+SYSTEM_PROMPT_TEMPLATE = """You are JARVIS, the user's personal AI assistant. You act on their behalf through the tools you have been given — the Capabilities below are the whole of what you can do, and they change from run to run as integrations come and go.
 
 Persona and voice — this matters as much as being correct:
 - You speak out loud through a voice assistant. Everything you say is READ ALOUD, so talk the way people talk, not the way documents are written.
@@ -35,18 +35,7 @@ Persona and voice — this matters as much as being correct:
   - If your previous reply was cut off (you'll see a note saying so), the user interrupted to correct or redirect you. Adjust to what they now want; don't repeat what you were saying.
 
 Capabilities:
-- Smart home (Home Assistant): lights, switches, climate, sensors, notifications
-- Spotify: search, play on any device, control playback
-- Android TV: launch/navigate apps, type in search fields, remote control
-- PC control: launch/close apps, list processes, open URLs, system info. Open a terminal the user drives (open_terminal — e.g. "run Claude in a terminal"), or run a one-off command and read back its output (run_command, needs confirmation). Restart/shut down the PC (system_power) — but FIRST call scan_unsaved_work and warn the user about any open apps that may have unsaved work, then confirm before doing it. "cancel the shutdown" uses system_power with action cancel.
-- Gmail: search and read mail, and compose drafts. You CANNOT send — you only create drafts the user sends themselves, so say so ("I've drafted it; send it when you're ready").
-- Google Calendar: list upcoming events, check a specific day, create events, delete events (deleting asks for confirmation).
-- Weather: get_weather gives current conditions and today's forecast for the user's location (known automatically) or any place they name. Use it for weather — do NOT web-search weather.
-- Web search: current information from the web, with citations. Each search costs money — only search when the answer needs current information.
-- Habit suggestions: when the user asks about suggestions, use list_proposals; accept_proposal/dismiss_proposal act on them.
-- Reminders and timers: set and cancel reminders, and set quick countdown timers (set_timer — e.g. "a 10-minute timer").
-- Meals and nutrition: log meals, summarize the day, set daily calorie/macro targets (set_nutrition_targets — meal_summary then shows progress), and show multi-day trends (meal_trends).
-- Clipboard: read what the user just copied (get_clipboard) or copy text to their clipboard for pasting (set_clipboard).
+{capabilities}
 
 Security policy (strictly enforced):
 - NO access to bank accounts, cards, financial services, or sensitive IDs
@@ -57,10 +46,89 @@ How you work:
 - Whether an app, device, or track is currently open, running, or playing is live state that changes on its own — you cannot know it from memory. To report or act on it, call the relevant tool to check or do it; never assume it from earlier in the conversation, because what you did before may no longer be true.
 - Confirm actions briefly after doing them ("Done — lights are off.").
 - Chain multiple actions when it makes sense (e.g. "movie night" = dim the lights and open Netflix).
-- Spotify: search for the URI first, then play. Target a specific device only if asked.
-- TV: launch the app first, then open its search, then type the query.
-- "Give me my briefing" = weather (get_weather) plus top headlines (web search), today's reminders (list_reminders), and today's meals (meal_summary), delivered as a short spoken rundown.
+{operating_notes}
 """
+
+# Each line of the Capabilities section, paired with the tools it describes.
+#
+# The prose is hand-written on purpose -- the Gmail line's "You CANNOT send" is
+# a safety property no auto-generated summary of a tool schema would produce.
+# What is NOT hand-written is whether a line appears: a line is rendered only
+# when every tool it names is actually registered.
+#
+# This exists because the two used to drift. When the Google OAuth grant expired
+# on 2026-11-03, bootstrap set google=None and the Gmail and Calendar tools
+# silently vanished, but the prompt advertised both for another nine days. The
+# model, promised a capability it had no tool for, invented explanations for the
+# gap instead of saying the integration was down.
+CAPABILITIES = [
+    ("- Smart home (Home Assistant): lights, switches, climate, sensors, notifications",
+     ("list_devices", "control_light", "control_switch", "send_notification")),
+    ("- Spotify: search, play on any device, control playback",
+     ("spotify_search", "spotify_play", "spotify_playback_control")),
+    ("- Android TV: launch/navigate apps, type in search fields, remote control",
+     ("tv_launch_app", "tv_remote", "tv_type_text")),
+    ('- PC control: launch/close apps, list processes, open URLs, system info. Open a terminal the user drives (open_terminal — e.g. "run Claude in a terminal"), or run a one-off command and read back its output (run_command, needs confirmation). Restart/shut down the PC (system_power) — but FIRST call scan_unsaved_work and warn the user about any open apps that may have unsaved work, then confirm before doing it. "cancel the shutdown" uses system_power with action cancel.',
+     ("launch_app", "close_app", "open_url_browser", "open_terminal", "run_command",
+      "scan_unsaved_work", "system_power")),
+    ('- Gmail: search and read mail, and compose drafts. You CANNOT send — you only create drafts the user sends themselves, so say so ("I\'ve drafted it; send it when you\'re ready").',
+     ("gmail_search", "gmail_read", "gmail_draft")),
+    ("- Google Calendar: list upcoming events, check a specific day, create events, delete events (deleting asks for confirmation).",
+     ("calendar_list_events", "calendar_get_day", "calendar_create_event", "calendar_delete_event")),
+    ("- Weather: get_weather gives current conditions and today's forecast for the user's location (known automatically) or any place they name. Use it for weather — do NOT web-search weather.",
+     ("get_weather",)),
+    ("- Web search: current information from the web, with citations. Each search costs money — only search when the answer needs current information.",
+     ("web_search",)),
+    ("- Habit suggestions: when the user asks about suggestions, use list_proposals; accept_proposal/dismiss_proposal act on them.",
+     ("list_proposals", "accept_proposal", "dismiss_proposal")),
+    ('- Reminders and timers: set and cancel reminders, and set quick countdown timers (set_timer — e.g. "a 10-minute timer").',
+     ("set_reminder", "list_reminders", "cancel_reminder", "set_timer")),
+    ("- Meals and nutrition: summarize the day, set daily calorie/macro targets (set_nutrition_targets — meal_summary then shows progress), and show multi-day trends (meal_trends).",
+     ("meal_summary", "set_nutrition_targets", "meal_trends")),
+    ("- Meal logging: log what the user ate (log_meal, or log_estimated_meal when they describe it loosely) and report the day's running totals (day_status).",
+     ("log_meal", "log_estimated_meal", "day_status")),
+    ("- Clipboard: read what the user just copied (get_clipboard) or copy text to their clipboard for pasting (set_clipboard).",
+     ("get_clipboard", "set_clipboard")),
+]
+
+# The "How you work" lines that are about a SPECIFIC tool rather than about
+# working in general. Gated identically: an instruction for using a tool the
+# model does not have is noise at best, and at worst it is the model being told
+# a capability exists in a section it trusts.
+OPERATING_NOTES = [
+    ("- Spotify: search for the URI first, then play. Target a specific device only if asked.",
+     ("spotify_search", "spotify_play")),
+    ("- TV: launch the app first, then open its search, then type the query.",
+     ("tv_launch_app", "tv_type_text")),
+    ('- "Give me my briefing" = weather (get_weather) plus top headlines (web search), today\'s reminders (list_reminders), and today\'s meals (meal_summary), delivered as a short spoken rundown.',
+     ("get_weather", "web_search", "list_reminders", "meal_summary")),
+]
+
+# web_search is a SERVER-SIDE Anthropic tool: it never comes from build_registry,
+# it is appended per-request in _call_model when the budget allows. It still has
+# to be gateable like everything else, so it is named here and supplied by
+# _available_tool_names() rather than by the registry.
+SERVER_SIDE_TOOLS = frozenset({"web_search"})
+
+
+def render_system_prompt(available: set) -> str:
+    """The system prompt describing exactly `available`, and nothing more.
+
+    A capability line appears only when EVERY tool it names is present. Partial
+    presence drops the line: half a capability described in full is the same
+    lie, just smaller.
+    """
+    def applicable(table):
+        return "\n".join(line for line, required in table if set(required) <= available)
+
+    # rstrip: an empty operating-notes section would otherwise leave the prompt
+    # ending in a blank line, which differs byte-for-byte between runs and would
+    # churn the prompt cache for no reason.
+    return SYSTEM_PROMPT_TEMPLATE.format(
+        capabilities=applicable(CAPABILITIES),
+        operating_notes=applicable(OPERATING_NOTES),
+    ).rstrip() + "\n"
+
 
 INTERRUPTION_NOTE = "(The user interrupted and cut off this reply before I finished.)"
 
@@ -210,10 +278,26 @@ class Assistant:
         self.cost_tracker.record(HAIKU_MODEL, u.input_tokens, u.output_tokens, source="summarize")
         return "".join(b.text for b in resp.content if b.type == "text")
 
+    def _available_tool_names(self) -> set:
+        """Every tool name this assistant can actually call this run.
+
+        The registry plus web_search when it is switched on -- see
+        SERVER_SIDE_TOOLS for why that one is not in the registry.
+        """
+        names = {t["name"] for t in self.tools if "name" in t}
+        if self.enable_web_search:
+            names |= SERVER_SIDE_TOOLS
+        return names
+
     def _build_system(self) -> list[dict]:
-        """Assemble the cached system-prompt blocks: SYSTEM_PROMPT, then profile (if any)."""
+        """Assemble the cached system-prompt blocks: the system prompt rendered
+        for THIS assistant's tools, then profile (if any)."""
         blocks = [
-            {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}
+            {
+                "type": "text",
+                "text": render_system_prompt(self._available_tool_names()),
+                "cache_control": {"type": "ephemeral"},
+            }
         ]
         if self.profile_store is not None:
             profile = self.profile_store.load()
