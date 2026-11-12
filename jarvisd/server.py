@@ -273,8 +273,14 @@ class JarvisServer:
         if self.speaker_verifier is not None:
             if not await asyncio.to_thread(self.speaker_verifier.accepts, audio):
                 log.info("Utterance rejected — not the enrolled speaker")
+                # `reason` distinguishes this from "we heard you but Whisper got
+                # nothing". The client must not treat it as a misfire: a
+                # rejected utterance is usually JARVIS's own TTS echo, and
+                # counting it would end the conversation because the assistant
+                # heard itself. Additive field; older clients ignore it.
                 await self._safe_send(
-                    ws, json.dumps({"type": "reply", "text": "", "heard": "", "audio_follows": False})
+                    ws, json.dumps({"type": "reply", "text": "", "heard": "",
+                                    "audio_follows": False, "reason": "unverified"})
                 )
                 return
         heard = await asyncio.to_thread(self.stt.transcribe, audio)

@@ -360,3 +360,63 @@ def test_stored_none_capture_skips_marking_but_still_processes():
     assert fake.call_order == ["process"]  # process still ran normally
     assert reply["heard"] == "turn on the light"
     assert reply["text"] == "echo: turn on the light"
+
+
+# --- a rejected (unverified) utterance is reported as such -------------------
+#
+# The client needs to tell "not you" apart from "you, but unintelligible":
+# only the latter is a misfire. A rejected utterance is usually JARVIS's own
+# TTS echo, and counting that as a misfire ended the conversation because the
+# assistant had heard itself.
+
+
+class _RejectAll:
+    def accepts(self, audio):
+        return False
+
+
+class _AcceptAll:
+    def accepts(self, audio):
+        return True
+
+
+class _EchoSTT:
+    def transcribe(self, audio):
+        return "lights on"
+
+
+def test_unverified_utterance_is_flagged_with_a_reason():
+    server = JarvisServer(FakeAssistant(), stt=_EchoSTT(), tts=FakeTTS(),
+                          speaker_verifier=_RejectAll())
+    ws = FakeWS()
+    asyncio.run(server._handle_audio(ws, np.zeros(16000, dtype=np.int16).tobytes()))
+
+    reply = json.loads(ws.sent[-1])
+    assert reply["reason"] == "unverified"
+    assert reply["heard"] == "" and reply["text"] == ""
+    assert reply["audio_follows"] is False
+
+
+def test_empty_transcription_carries_no_unverified_reason():
+    """An accepted-but-empty utterance IS a misfire, so it must not be tagged."""
+    class SilentSTT:
+        def transcribe(self, audio):
+            return "   "
+
+    server = JarvisServer(FakeAssistant(), stt=SilentSTT(), tts=FakeTTS(),
+                          speaker_verifier=_AcceptAll())
+    ws = FakeWS()
+    asyncio.run(server._handle_audio(ws, np.zeros(16000, dtype=np.int16).tobytes()))
+
+    assert json.loads(ws.sent[-1]).get("reason") is None
+
+
+def test_an_accepted_utterance_is_transcribed_as_normal():
+    server = JarvisServer(FakeAssistant(), stt=_EchoSTT(), tts=FakeTTS(),
+                          speaker_verifier=_AcceptAll())
+    ws = FakeWS()
+    asyncio.run(server._handle_audio(ws, np.zeros(16000, dtype=np.int16).tobytes()))
+
+    reply = json.loads(ws.sent[0])
+    assert reply["heard"] == "lights on"
+    assert reply.get("reason") is None
