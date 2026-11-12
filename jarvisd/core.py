@@ -87,6 +87,8 @@ CAPABILITIES = [
      ("meal_summary", "set_nutrition_targets", "meal_trends")),
     ("- Meal logging: log what the user ate (log_meal, or log_estimated_meal when they describe it loosely) and report the day's running totals (day_status).",
      ("log_meal", "log_estimated_meal", "day_status")),
+    ('- Maps and directions: you have no directions tool, but open_url_browser is enough. Build a Google Maps directions URL yourself and open it: https://www.google.com/maps/dir/?api=1&origin=<origin>&destination=<destination>&travelmode=walking (or driving, transit, bicycling), URL-encoding each place. Use the user\'s known coordinates or home address as the origin when they say "from home" or "from here". Do this instead of saying you can only open Google Maps, or asking them to type the addresses in themselves. You still cannot read the route back — say you have opened it, and let them read the time off the map.',
+     ("open_url_browser",)),
     ("- Clipboard: read what the user just copied (get_clipboard) or copy text to their clipboard for pasting (set_clipboard).",
      ("get_clipboard", "set_clipboard")),
 ]

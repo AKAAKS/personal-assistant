@@ -106,3 +106,39 @@ def test_every_capability_line_gates_on_at_least_one_tool():
 def test_spotify_operating_note_dropped_with_spotify():
     """The 'search for the URI first' instruction is useless without the tools."""
     assert "search for the URI first" not in prompt_text(make_assistant())
+
+
+# -- directions ------------------------------------------------------------
+#
+# On 2026-10-30 JARVIS answered "walk from my home to a nearby gym" by building
+# a https://www.google.com/maps/dir/<origin>/<destination> URL -- taking the
+# origin from the coordinates in its own location block -- and opening it.
+# On 2026-11-12 it refused the same request, saying it could only
+# open Google Maps for the user to fill in. Nothing had changed in the code:
+# the prompt never granted a directions capability, so the Oct 30 answer was
+# improvisation that a clean context produced ~4 times in 5 and a context
+# containing its own "I can only open URLs" produced 0 times in 5.
+#
+# Granting the capability explicitly beat the poisoned transcript 6/6.
+
+def test_directions_capability_rendered_when_browser_tool_available():
+    from jarvisd.core import render_system_prompt
+    assert "maps/dir" in render_system_prompt({"open_url_browser"})
+
+
+def test_directions_capability_absent_without_browser_tool():
+    from jarvisd.core import render_system_prompt
+    assert "maps/dir" not in render_system_prompt({"launch_app"})
+
+
+def test_directions_capability_names_travelmode():
+    """Without travelmode the URL defaults to driving, so 'walking directions'
+    would silently return a driving route -- the original question."""
+    text = render_capability_text()
+    assert "travelmode" in text
+    assert "walking" in text
+
+
+def render_capability_text():
+    from jarvisd.core import render_system_prompt
+    return render_system_prompt({"open_url_browser"})
