@@ -19,6 +19,7 @@ import numpy as np
 import websockets
 import websockets.exceptions
 
+from clients import activity
 from clients.protocol import ReceiveLoop
 from voice.audio_io import MicrophoneStream, VoiceActivityDetector
 from voice.wake_word import WakeWordDetector
@@ -260,12 +261,17 @@ class VoiceClient:
         """
         self.mic.clear()  # drop the wake phrase / anything said while JARVIS talked
         self._wake_buf = np.array([], dtype=np.int16)
+        # Tray fills the dot ring solid: the wake word landed and we are
+        # recording. This is the half of the old ambiguity that used to look
+        # identical to "nothing registered" -- see clients/activity.py.
+        activity.write(activity.HEARING)
         print("  Listening...")
         audio = self.vad.record_until_silence(
             self.mic, max_seconds=15.0, silence_ms=800, speech_timeout_sec=5.0,
         )
         if audio is None or len(audio) < MIN_UTTERANCE_SAMPLES:
             log.info("No speech captured")
+            activity.write(activity.MISSED, activity.NO_WORDS)
             print("  (no speech detected)\n")
             return None  # the run loop beeps once when it re-arms the wake word
         log.info("Captured %.1fs of audio", len(audio) / 16000)
@@ -521,6 +527,7 @@ class VoiceClient:
                         print("  (stopped listening — say 'hey jarvis' to start again)\n")
                         self._stopped_beep()
                         active = False
+                    activity.write(activity.ARMED)
 
                 try:
                     while True:
@@ -560,6 +567,10 @@ class VoiceClient:
                                 rearm()
                                 continue
                         await ws.send(pcm)
+                        # Heard you, working on it: the tray pulses violet
+                        # until a reply lands. This is the signal the user
+                        # was missing while waiting in silence.
+                        activity.write(activity.THINKING)
                         item = await receiver.get_reply(recv_task)
                         reply = item["data"]
                         if reply.get("type") == "error":
@@ -577,6 +588,7 @@ class VoiceClient:
                             # conversation. A noisy room still terminates via
                             # MAX_UNVERIFIED.
                             unverified += 1
+                            activity.write(activity.MISSED, activity.UNVERIFIED)
                             log.info("Ignored utterance %d/%d: not the enrolled "
                                      "speaker (likely TTS echo or another voice)",
                                      unverified, MAX_UNVERIFIED)
@@ -587,6 +599,7 @@ class VoiceClient:
                             continue
                         unverified = 0
                         if not reply.get("heard") and not reply.get("text"):
+                            activity.write(activity.MISSED, activity.NO_WORDS)
                             print("  (didn't catch that)\n")
                             advance(productive=False)
                             if not in_conversation:
@@ -599,6 +612,7 @@ class VoiceClient:
                         if reply.get("audio_follows"):
                             wav = await item["wav_future"]
                             if wav is not None:
+                                activity.write(activity.SPEAKING)
                                 interrupted = await self._play_and_watch_reply(wav)
                                 if interrupted:
                                     print("  [interrupted]")
@@ -606,6 +620,7 @@ class VoiceClient:
                                     pending_barge_in = True
                                     continue  # skip advance; go record the new turn
                         # A completed exchange -> keep listening for a follow-up.
+                        activity.write(activity.ARMED)
                         advance(productive=True)
                 finally:
                     recv_task.cancel()
