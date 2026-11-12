@@ -56,6 +56,7 @@ class ReminderStore:
         due_ts: str,
         recurrence: str = "none",
         condition: str | None = None,
+        kind: str = "reminder",
     ) -> int:
         if recurrence not in _VALID_RECURRENCES:
             raise ValueError(
@@ -70,9 +71,9 @@ class ReminderStore:
 
         created_ts = datetime.now().isoformat(timespec="seconds")
         cur = self._conn.execute(
-            "INSERT INTO reminders (text, due_ts, recurrence, status, created_ts, condition) "
-            "VALUES (?, ?, ?, 'active', ?, ?)",
-            (text, due_ts, recurrence, created_ts, condition),
+            "INSERT INTO reminders (text, due_ts, recurrence, status, created_ts, condition, kind) "
+            "VALUES (?, ?, ?, 'active', ?, ?, ?)",
+            (text, due_ts, recurrence, created_ts, condition, kind),
         )
         self._conn.commit()
         return cur.lastrowid

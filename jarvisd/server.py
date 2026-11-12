@@ -395,8 +395,30 @@ class JarvisServer:
             if await self._should_skip_notify(r):
                 log.info("Reminder #%s condition satisfied; skipping notify", r["id"])
             else:
-                await asyncio.to_thread(self.notifier.notify, f"Reminder: {r['text']}", "high")
+                await asyncio.to_thread(
+                    self.notifier.notify, f"Reminder: {r['text']}", self._priority_for(r)
+                )
             await asyncio.to_thread(self.reminder_store.mark_fired, r["id"], datetime.now())
+
+    @staticmethod
+    def _priority_for(r) -> str:
+        """Notifier priority for a due reminder row.
+
+        A countdown timer is something the user set moments ago and is sitting
+        there waiting on, so it overrides quiet hours ("urgent"). A scheduled or
+        recurring reminder does not: a 2am nudge to clean the bathroom should
+        still be banked until morning.
+
+        Rows written before the `kind` column existed read as 'reminder' via the
+        migration's default, and a row from a future build with an unrecognized
+        kind falls back to "high" -- the quieter of the two, so an unknown value
+        can never start shouting at 3am.
+        """
+        try:
+            kind = r["kind"]
+        except (IndexError, KeyError):
+            return "high"  # older row shape; treat as a scheduled reminder
+        return "urgent" if kind == "timer" else "high"
 
     async def _should_skip_notify(self, r) -> bool:
         """Whether a due reminder's condition says to skip notifying (but still fire/advance)."""

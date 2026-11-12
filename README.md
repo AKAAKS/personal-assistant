@@ -30,7 +30,7 @@ Design docs: `docs/superpowers/specs/`.
   candidate, $0 otherwise); nothing is written without your approval.
 - **Offline-first voice** — "hey jarvis" wake word, Whisper STT, and TTS that
   prefers offline SAPI5 but can use free neural voices, with automatic fallback.
-- **Built test-first** — **517 passing tests**, a thin-client/daemon split
+- **Built test-first** — **1,270 passing tests**, a thin-client/daemon split
   designed for a future Raspberry Pi satellite, and loopback-only networking.
 
 ## Setup

@@ -15,6 +15,7 @@ LOG_BACKUPS = 3
 
 from jarvisd.bootstrap import create_assistant
 from jarvisd.ha_events import HAEventListener
+from jarvisd.local_notify import make_local_notifier
 from jarvisd.notifier import Notifier
 from jarvisd.server import JarvisServer
 
@@ -133,7 +134,16 @@ def run(args, log):
     # so `conn is not None` implies both stores are set too.
     notifier = None
     if conn is not None:
-        notifier = Notifier(conn, ha_client=ha, quiet_hours=os.getenv("QUIET_HOURS", "23:00-08:00"))
+        # local_notify is the route that is always available: speaking a notice
+        # aloud needs a connected voice client and the HA push needs a reachable
+        # HA, so without it a timer could come due with nothing on this machine
+        # making a sound. Returns None off Windows, which the Notifier skips.
+        notifier = Notifier(
+            conn,
+            ha_client=ha,
+            quiet_hours=os.getenv("QUIET_HOURS", "23:00-08:00"),
+            local_notify=make_local_notifier(),
+        )
 
     server = JarvisServer(
         ai, stt=stt, tts=tts, speaker_verifier=speaker_verifier,

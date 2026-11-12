@@ -10,7 +10,7 @@ from nutrition_core.store.schema import (
     SEED_GOALS_FROM_TARGETS_SQL,
 )
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # version -> SQL script. Later phases append entries and bump SCHEMA_VERSION.
 MIGRATIONS = {
@@ -99,6 +99,12 @@ MIGRATIONS = {
     # pantry per-100g snapshot columns (DDL owned by nutrition_core).
     8: PANTRY_SNAPSHOT_SQL,
     9: MEAL_INGREDIENT_LINK_SQL,
+    # Distinguish a countdown timer from a scheduled reminder. A timer is
+    # something the user set moments ago and is actively waiting on, so it
+    # overrides quiet hours; a scheduled reminder does not. NOT NULL with a
+    # default backfills existing rows as 'reminder', which is the safe reading:
+    # pre-existing rows keep respecting the quiet window.
+    10: "ALTER TABLE reminders ADD COLUMN kind TEXT NOT NULL DEFAULT 'reminder';",
 }
 
 

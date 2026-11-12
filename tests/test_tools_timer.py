@@ -9,8 +9,10 @@ class FakeReminderStore:
     def __init__(self):
         self.added = []
 
-    def add(self, text, due_ts, recurrence="none", condition=None):
-        self.added.append({"text": text, "due_ts": due_ts, "recurrence": recurrence})
+    def add(self, text, due_ts, recurrence="none", condition=None, kind="reminder"):
+        self.added.append(
+            {"text": text, "due_ts": due_ts, "recurrence": recurrence, "kind": kind}
+        )
         return len(self.added)
 
 
@@ -24,6 +26,8 @@ def test_set_timer_creates_a_oneoff_reminder_in_the_future():
     delta_min = (due - datetime.now()).total_seconds() / 60
     assert 9 <= delta_min <= 11          # ~10 minutes out
     assert "10" in out
+    # kind="timer" is what lets the scheduler sound it during quiet hours.
+    assert rec["kind"] == "timer"
 
 
 def test_set_timer_accepts_a_label():

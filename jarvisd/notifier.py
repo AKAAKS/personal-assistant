@@ -25,8 +25,26 @@ def _parse_quiet_hours(quiet_hours: str | None) -> tuple[time, time] | None:
         return None
 
 
+# Priorities allowed to interrupt. "urgent" additionally ignores quiet hours:
+# it is for a countdown the user set themselves and is actively waiting on, where
+# staying quiet defeats the entire point of the timer. Scheduled and recurring
+# reminders stay "high" and keep respecting the quiet window.
+INTERRUPTING = frozenset({"high", "urgent"})
+IGNORES_QUIET_HOURS = frozenset({"urgent"})
+
+
 class Notifier:
-    """Routes proactive output: quiet hours -> queue; high priority -> client push -> HA push -> queue; low -> queue."""
+    """Routes proactive output.
+
+    Delivery order for an interrupting notice: speak it through a connected
+    client -> local toast+chime on this machine -> Home Assistant phone push ->
+    queue for the next turn. Low priority always queues.
+
+    The local step exists because the first and third are both routinely
+    unavailable: no voice client is connected unless the user launched one, and
+    the HA push needs a reachable HA. Without it a timer could come due with
+    nothing on the machine the user was sitting at making a sound.
+    """
 
     def __init__(
         self,
@@ -34,6 +52,7 @@ class Notifier:
         ha_client=None,
         quiet_hours: str | None = "23:00-08:00",
         now=datetime.now,
+        local_notify=None,
     ):
         self._conn = conn
         self.ha_client = ha_client
@@ -41,6 +60,10 @@ class Notifier:
         self._quiet_window = _parse_quiet_hours(quiet_hours)
         # Set by the server: callable(text) -> int (number of connected clients reached).
         self.push_to_clients = None
+        # Optional callable(text) -> bool: raise a notification on THIS machine
+        # (Windows toast + chime). False/None means unavailable, so routing falls
+        # through to the phone push. See jarvisd.local_notify.
+        self.local_notify = local_notify
 
     def _is_quiet(self, now: datetime) -> bool:
         if self._quiet_window is None:
@@ -68,11 +91,11 @@ class Notifier:
         """Deliver or queue a proactive message. Never raises."""
         try:
             now = self.now()
-            if self._is_quiet(now):
+            if self._is_quiet(now) and priority not in IGNORES_QUIET_HOURS:
                 self._enqueue(text)
                 return
 
-            if priority == "high":
+            if priority in INTERRUPTING:
                 reached = 0
                 if self.push_to_clients is not None:
                     try:
@@ -83,6 +106,15 @@ class Notifier:
 
                 if reached > 0:
                     return
+
+                # Nobody was listening. Make a noise on this machine before
+                # reaching for the phone: the user is most likely sitting here.
+                if self.local_notify is not None:
+                    try:
+                        if self.local_notify(text):
+                            return
+                    except Exception as e:
+                        log.warning("local_notify failed: %s", e)
 
                 if self.ha_client is not None:
                     try:

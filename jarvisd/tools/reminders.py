@@ -103,7 +103,8 @@ def handlers(reminder_store):
         text = f"Timer: {label}" if label else "Timer's up."
         due = (datetime.now() + timedelta(minutes=float(minutes))).isoformat(timespec="seconds")
         try:
-            reminder_store.add(text, due, "none")
+            # kind="timer" so the scheduler can let it through quiet hours.
+            reminder_store.add(text, due, "none", kind="timer")
         except (ValueError, OSError, OverflowError) as exc:
             return f"Error: {exc}"
         pretty = int(minutes) if float(minutes).is_integer() else minutes

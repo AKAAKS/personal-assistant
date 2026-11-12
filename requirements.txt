@@ -22,6 +22,10 @@ websockets>=12.0
 pystray>=0.19.4
 Pillow>=10.0.0
 
+# Local notifications (Windows toast for reminders/timers when no voice
+# client is connected); lazy-imported, Windows-only
+winotify>=1.1.0
+
 # Location (Windows GPS for weather / "near me"); lazy-imported, Windows-only
 winsdk>=1.0.0b10
 
