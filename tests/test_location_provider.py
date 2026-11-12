@@ -74,8 +74,8 @@ def test_format_osm_address_road_without_number():
 
 
 def test_format_osm_address_falls_back_to_display_name():
-    data = {"address": {}, "display_name": "Ferguson Township, Centre County, PA"}
-    assert _format_osm_address(data) == "Ferguson Township"
+    data = {"address": {}, "display_name": "Example Township, Example County, PA"}
+    assert _format_osm_address(data) == "Example Township"
 
 
 def test_format_osm_address_empty():
@@ -85,8 +85,9 @@ def test_format_osm_address_empty():
 # --- explicit home from env ---
 
 def test_from_env_reads_home(monkeypatch):
-    monkeypatch.setenv("JARVIS_HOME_LAT", "40.80")
-    monkeypatch.setenv("JARVIS_HOME_LON", "-77.86")
+    # Deliberately not a real place: these only have to round-trip as floats.
+    monkeypatch.setenv("JARVIS_HOME_LAT", "12.34")
+    monkeypatch.setenv("JARVIS_HOME_LON", "-56.78")
     monkeypatch.setenv("JARVIS_HOME_NAME", "123 Main St, State College")
     p = LocationProvider.from_env()
     assert p.home is not None

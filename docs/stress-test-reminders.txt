@@ -1,0 +1,354 @@
+===============================================================================
+ LIVE STRESS TEST - reminder timezone handling + history compaction
+ Covers the fixes for issues #2 and #3 (merged in bc914ea)
+===============================================================================
+
+WHY THIS EXISTS
+
+  The test suite has 1092 passing tests, and they all pass. But four things
+  cannot be proven offline:
+
+    - what the MODEL actually sends as a `due` value
+    - whether the live 15-second reminder tick survives a bad row
+    - whether compaction works on REAL SDK block objects (the tests use
+      plain dicts, so one branch of the code has never run for real)
+    - whether any of it survives a daemon restart
+
+  This walks those four. Tests A-C are the ones that matter; D-F are
+  regression checks.
+
+TIME
+
+  ~15 minutes, most of it waiting for ticks. Test C costs a handful of
+  API calls; the rest are nearly free.
+
+RISK
+
+  None to your real data. Every step runs against a throwaway database
+  (data\stresstest.db) that you delete at the end. Your real reminders in
+  data\jarvis.db are never opened.
+
+
+===============================================================================
+ BEFORE YOU START
+===============================================================================
+
+  You need three terminals. Nothing else - no Home Assistant, no Spotify,
+  no Docker. Every tool used below is local.
+
+  Terminal 1 - THE DAEMON
+
+      cd C:\Users\akshi\Projects\personal-assistant
+      $env:JARVIS_DB = "data\stresstest.db"
+      python -m jarvisd --no-speech --verbose
+
+      --no-speech skips a ~15s model load you don't need here.
+      Wait for: "JARVIS brain ready."
+
+  Terminal 2 - THE CLIENT (where you type, and where reminders appear)
+
+      cd C:\Users\akshi\Projects\personal-assistant
+      python -m clients.cli
+
+  Terminal 3 - THE LOG (watch this; most failures show up here first)
+
+      cd C:\Users\akshi\Projects\personal-assistant
+      Get-Content logs\jarvisd.log -Wait -Tail 20
+
+  Two commands you will reuse. Run them in Terminal 3:
+
+      # show the reminder table
+      python -I scripts\poison_reminders.py data\stresstest.db --show
+
+      # count the warnings that matter
+      Select-String -Path logs\jarvisd.log -Pattern "unusable due_ts|tick failed"
+
+  The helper script has three modes, all taking the database path:
+
+      (no flag)    inject the five test rows
+      --show       print the reminder table
+      --backdate   push recurring rows three days into the past (Test D)
+
+
+===============================================================================
+ TEST A - Does the model send a timezone at all?
+===============================================================================
+
+  GOAL     Issue #2 only triggers because the model can send an
+           offset-aware time like 08:00:00-04:00. The system prompt hands
+           it the local zone with %Z, so it readily does. No test can
+           prove this - it depends on live model output.
+
+  DO       Type these three in Terminal 2, one at a time:
+
+               remind me at 8am Eastern tomorrow to call the bank
+               set a reminder for 2pm UTC today to check the build
+               remind me in 90 minutes to stretch
+
+           Then show the table:
+
+               python -I scripts\poison_reminders.py data\stresstest.db --show
+
+  EXPECT   Every due_ts is plain and naive:   2026-11-05T08:00:00
+           No "+05:30", no "-04:00", no trailing "Z" on any row.
+
+  RED FLAG The reply confirms a DIFFERENT time than the stored row shows.
+           That means the confirmation is echoing raw input again - the
+           exact bug fixed in 3405b10.
+
+  [ ] PASS   [ ] FAIL ____________________________________________________
+
+
+===============================================================================
+ TEST B - One bad row must not silence every reminder
+===============================================================================
+
+  This is the heart of issue #2. Before the fix, a single offset-aware row
+  made the scan raise, so NOTHING fired - no reminders, no timers - until
+  that row was deleted. The only symptom was a traceback every 15 seconds.
+
+  GOAL     Prove one unusable row can no longer take the others down.
+
+  DO       Leave the daemon RUNNING. In Terminal 3:
+
+               python -I scripts\poison_reminders.py data\stresstest.db
+
+           This writes five rows straight past add(), bypassing the
+           validation that now makes them impossible to create:
+
+               legacy-offset    2026-01-01T08:00:00-05:00   should FIRE
+               legacy-zulu      2026-01-01T12:00:00Z        should FIRE
+               ancient-aware    1950-06-01T12:00:00Z        should RETIRE
+               pure-junk        tomorrow morning            should RETIRE
+               CANARY           ~20 seconds from now        should FIRE
+
+           Now watch for 30 seconds - two ticks.
+
+  EXPECT   In Terminal 2, the canary arrives as a proactive message. The
+           two legacy rows fire too: they are normalized when read, so an
+           existing database keeps working after the upgrade.
+
+           In Terminal 3, each unusable row logs
+
+               reminder N has an unusable due_ts '...'; marking it invalid
+
+           ONCE - not once per tick. They are retired to status 'invalid'
+           so the scan heals itself.
+
+           Confirm with:
+
+               python -I scripts\poison_reminders.py data\stresstest.db --show
+               Select-String -Path logs\jarvisd.log -Pattern "unusable due_ts"
+
+           Expect exactly 2 warnings and 2 rows marked invalid.
+
+  RED FLAG Nothing fires at all, and the log grows a "reminder tick failed"
+           traceback every 15 seconds. That is the original bug, alive.
+
+           Also watch for: the same warning repeating on every tick. That
+           means retirement isn't sticking, and the log will fill forever.
+
+  NOTE     This is also the only live exercise of a write happening from
+           inside the tick thread on the shared connection. It is safe
+           (check_same_thread=False, WAL journal, and mark_fired already
+           wrote from that thread before this change) - but this is where
+           you would see it if it weren't.
+
+  [ ] PASS   [ ] FAIL ____________________________________________________
+
+
+===============================================================================
+ TEST C - Compaction against real SDK objects   <-- MOST IMPORTANT
+===============================================================================
+
+  Read this one before running it.
+
+  The tests for issue #3 build conversation history out of plain Python
+  dicts. In production, assistant content arrives as SDK block OBJECTS.
+  The fix handles both:
+
+      (b.get("type") if isinstance(b, dict) else getattr(b, "type", None))
+
+  ...but only the dict half has ever actually executed. This test runs the
+  other half. If anything in the #3 fix is wrong, it shows up here.
+
+  GOAL     Cross the history cap on a tool-using turn without the API
+           rejecting the request.
+
+  SHORTCUT At MAX_HISTORY = 40 you need ~11 tool-using turns to cross the
+           boundary, which is ~11 API calls. Lower the cap instead and
+           cross it in three.
+
+               jarvisd\core.py  line 116:     MAX_HISTORY = 6
+
+           Restart the daemon after editing. REVERTING THIS IS A STEP
+           BELOW - do not skip it.
+
+  DO       Every turn must use a tool, or the history won't take the
+           4-entry shape that causes the bug. In Terminal 2:
+
+               remember that the stress test started
+               what do you remember about the stress test
+               list my reminders
+               what's my system info
+               list my reminders again
+
+  EXPECT   All five replies succeed, normally, with nothing odd in the log.
+
+  RED FLAG Any of these in Terminal 3:
+
+               unexpected tool_use_id found in tool_result blocks
+               invalid_request_error
+               400
+
+           Check explicitly:
+
+               Select-String -Path logs\jarvisd.log -Pattern "tool_use_id|400|invalid_request"
+
+           A failure here means the window still opens on a tool_result
+           whose tool_use is gone. Note WHICH turn failed - the bug tends
+           to hit two turns in a row, because the window advances only an
+           entry or two per turn.
+
+  THEN     Put the cap back:
+
+               jarvisd\core.py  line 116:     MAX_HISTORY = 40
+
+           Restart. Optionally repeat with ~11 tool turns to see it at the
+           real cap.
+
+  [ ] PASS   [ ] FAIL ____________________________________________________
+  [ ] MAX_HISTORY reverted to 40
+
+
+===============================================================================
+ TEST D - Recurring reminders catch up, once
+===============================================================================
+
+  GOAL     A daily reminder missed for three days should fire ONCE on
+           restart, not three times. mark_fired does that, and it now
+           parses through the guarded path.
+
+  DO       In Terminal 2:
+
+               remind me every day at 9am to take vitamins
+
+           Stop the daemon (Ctrl+C in Terminal 1), then backdate it three
+           days:
+
+               python -I scripts\poison_reminders.py data\stresstest.db --backdate
+
+           It should report "Backdated 1 recurring reminder(s)". Restart
+           the daemon.
+
+           (The script does this rather than a sqlite3 shell command
+           because the sqlite3 CLI is not installed on this machine.)
+
+  EXPECT   It fires exactly once. Then:
+
+               python -I scripts\poison_reminders.py data\stresstest.db --show
+
+           ...shows due_ts moved forward to the next FUTURE 9am, and the
+           row is still 'active'.
+
+  RED FLAG Three notifications, or a due_ts still in the past.
+
+  [ ] PASS   [ ] FAIL ____________________________________________________
+
+
+===============================================================================
+ TEST E - Timers still work
+===============================================================================
+
+  GOAL     set_timer builds its own due from datetime.now(), so it was
+           always naive and never had the bug. This confirms the widened
+           error handling didn't disturb it.
+
+  DO           set a 1 minute timer for the kettle
+
+  EXPECT   Reply reads:  Timer set for 1 minute(s) - kettle.
+           It fires about 60 seconds later.
+
+  [ ] PASS   [ ] FAIL ____________________________________________________
+
+
+===============================================================================
+ TEST F - Nothing is lost on restart
+===============================================================================
+
+  GOAL     Reminders are durable; retired rows stay retired.
+
+  DO       Stop the daemon, restart it, then:
+
+               list my reminders
+
+  EXPECT   Active reminders are all still there. The two rows retired in
+           Test B are absent - they can never fire, so they are correctly
+           hidden rather than listed as pending.
+
+  [ ] PASS   [ ] FAIL ____________________________________________________
+
+
+===============================================================================
+ ONE KNOWN WART - expected, not a failure
+===============================================================================
+
+  list_reminders shows the RAW stored string. Normalization happens when a
+  row is written, not when it is displayed. So a pre-upgrade row that was
+  already stored with an offset will:
+
+    - display with its offset  (2026-01-01T12:00:00Z)
+    - sort by literal text under ORDER BY due_ts, so it may appear out of
+      order in the list
+
+  ...even though it fires at exactly the right moment. You will probably
+  see this on legacy-zulu in Test B. It is cosmetic. A code review flagged
+  it and it was left alone deliberately; say the word and display-time
+  normalization is a small follow-up.
+
+
+===============================================================================
+ TEARDOWN
+===============================================================================
+
+  [ ] Stop the daemon (Ctrl+C in Terminal 1)
+  [ ] Delete the throwaway database:
+
+          Remove-Item data\stresstest.db*
+
+  [ ] Drop the env var so the daemon returns to the real database:
+
+          Remove-Item Env:\JARVIS_DB
+
+  [ ] Confirm MAX_HISTORY is back to 40 and nothing else was edited:
+
+          git diff
+
+      This should show NO changes to jarvisd\core.py. If it does, Test C's
+      shortcut is still in place.
+
+  [ ] Restart the daemon normally and check your real reminders survived:
+
+          list my reminders
+
+
+===============================================================================
+ RESULTS
+===============================================================================
+
+  Date: ______________    Tester: ______________
+
+  A  model sends naive times            [ ] pass  [ ] fail
+  B  bad row doesn't silence the rest   [ ] pass  [ ] fail
+  C  compaction on real SDK objects     [ ] pass  [ ] fail
+  D  recurring catch-up fires once      [ ] pass  [ ] fail
+  E  timers unaffected                  [ ] pass  [ ] fail
+  F  survives restart                   [ ] pass  [ ] fail
+
+  Notes:
+  ____________________________________________________________________
+  ____________________________________________________________________
+  ____________________________________________________________________
+
+  If B or C fail, that is a real regression in the merged fix - the
+  failing log line is the thing to capture.

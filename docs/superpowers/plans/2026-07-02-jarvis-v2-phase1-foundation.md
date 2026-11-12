@@ -17,7 +17,7 @@
 - Never commit `.env`, `logs/`, or `data/` (SQLite lives in `data/jarvis.db`).
 - All work happens on branch `phase1-foundation` off `master`.
 - Run tests with plain `pytest` from the repo root. Tests must not hit the network or load ML models (except the one real-TTS test marked in Task 7).
-- Working dir for all commands: `C:/Users/akshi/Projects/personal-assistant`.
+- Working dir for all commands: `<repo root>`.
 
 ---
 

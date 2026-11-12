@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-26 (revised 2026-10-29 for JARVIS integration)
 **Status:** Approved for planning
-**Author:** akspam156@gmail.com
+**Author:** Akshit Kartik (@AKAAKS)
 
 ## Purpose
 

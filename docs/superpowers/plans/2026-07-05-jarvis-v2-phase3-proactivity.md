@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Windows 11; Git Bash commands; working dir `C:/Users/akshi/Projects/personal-assistant`.
+- Windows 11; Git Bash commands; working dir `<repo root>`.
 - Branch `phase3-proactivity` off master. Strict TDD per task (RED evidence → GREEN evidence).
 - Never commit `.env`, `logs/`, `data/`. No new pip dependencies.
 - Tests: `pytest` from repo root, no network, no sleeps longer than ~0.3s; time-dependent logic must accept an injectable `now` (callable or parameter) so tests never wait.

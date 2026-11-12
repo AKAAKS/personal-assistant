@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Windows 11; commands below are Git Bash. Working dir: `C:/Users/akshi/Projects/personal-assistant`.
+- Windows 11; commands below are Git Bash. Working dir: `<repo root>`.
 - All work on branch `phase2-memory` off `master`. TDD: each task writes failing tests first (RED), then implements (GREEN); implementer reports both.
 - Never commit `.env`, `logs/`, `data/` (profile + DB are personal data and live in `data/`).
 - Tests: plain `pytest` from repo root; no network, no ML models; SQLite tests use `tmp_path`.
