@@ -30,9 +30,11 @@ from pathlib import Path
 # and the payload shapes for Notification and PermissionRequest are not
 # published, so whatever does not fire simply never appears.
 EVENTS = (
-    "SessionStart",       # a session opened -> working
+    "SessionStart",       # a terminal opened -> idle, nothing asked of it yet
     "UserPromptSubmit",   # a turn started -> working, clear the last message
     "PermissionRequest",  # blocked on a tool approval -> waiting
+    "PostToolUse",        # the tool ran, so the prompt was answered -> working
+    "PostToolUseFailure", # a denied or failed tool; same conclusion
     "Notification",       # permission prompt -> waiting; idle -> announceable
     "Stop",               # the turn finished -> done, record what it said
     "SessionEnd",         # the session closed -> forget it
@@ -144,8 +146,16 @@ def install(settings_path, *, script_path, backup=True, state_dir=None) -> str:
 
     wanted = hook_entries(script_path)
     hooks = settings.get("hooks")
-    if not isinstance(hooks, dict):
+    if hooks is None:
         hooks = {}
+    elif not isinstance(hooks, dict):
+        # Same rule as the top level: refuse rather than clobber. Replacing a
+        # hooks block we could not parse would be an overwrite, which is the
+        # one thing this script promises never to do.
+        raise ValueError(
+            f"{settings_path} has a 'hooks' value that is not a JSON object; "
+            "refusing to touch it. Fix or remove that key and run this again."
+        )
 
     added, updated = [], []
     for event, entries in wanted.items():

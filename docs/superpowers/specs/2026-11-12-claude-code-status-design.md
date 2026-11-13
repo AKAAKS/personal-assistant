@@ -305,3 +305,52 @@ reported -- but it means "no record" cannot be read as "Stop did not fire".
   coroutine scheduled on the event loop; called on the loop thread it stalls
   for the full 10s timeout and reaches nobody. `_fire_due_reminders` already
   did this; the watcher now does too.
+
+## Second review, and the state machine it corrected
+
+A second review of the branch found three failures that all came from the same
+gap: nothing reported the END of a wait, or the resumption of real work, in the
+middle of a turn.
+
+- A **second permission prompt in one turn was never announced.** `since` moves
+  only on a real state change and the daemon dedupes on
+  `(session_id, state, since)`, so prompt #2 reused prompt #1's key. Approve
+  one, walk away, and the next one was silent forever -- the feature's headline
+  case.
+- After the user approved, the record still said **`waiting` while Claude
+  worked**, so `claude_status` answered "needs your input, waiting 25 minutes"
+  about a session that was busy.
+- `SessionStart` set **`working` for a terminal nobody had typed into**, so
+  three terminals left open answered "Claude is working, two hours so far".
+
+Fixes:
+
+- **`PostToolUse` and `PostToolUseFailure` are now registered** (eight events,
+  not six). A finished tool is the only available proof that the prompt in
+  front of it was answered. Both are needed: the published table says
+  `PostToolUse` runs "after successful tool", and a denied prompt fires
+  `PostToolUseFailure`. The cost is one hook process per tool call, which is
+  the price of not reporting a stale state.
+- **A fourth state, `idle`** -- the terminal is open and nothing has been asked
+  of it. It reads as "Claude is open in X with nothing running" and announces
+  nothing, because an untouched terminal is no more news than a long turn.
+  Neither `working` nor `done` was true of it.
+- **`notify(..., local_only=True)`** stops the fallback chain before the Home
+  Assistant phone push. Ignoring quiet hours is only reasonable while the
+  notice stays on this machine; "Claude finished in X" buzzing a phone at 4am
+  is the notice that gets a feature switched off.
+- The installer now **refuses a non-object `hooks` value** instead of silently
+  replacing it, matching what it already did for a non-object top level.
+
+Corrected from the first probe table: `PermissionRequest` **is** a real event
+in Claude Code 2.1.323 -- its own hook-events table lists it ("Run before
+permission prompt", matcher = tool name), alongside `PreToolUse`,
+`PostToolUse`, `PostToolUseFailure`, `PostCompact` and the rest. Whether it
+fires for an `async` hook is still unconfirmed.
+
+Known and accepted: `announcement_for` still requires `idle_ts`, which only the
+idle `Notification` sets, so the push path depends on Claude Code emitting that
+signal while a permission dialog is open. Satisfying the guard from the
+permission event instead would announce while the user is sitting at the
+keyboard, which the third anti-goal forbids, so this stays as designed until
+the idle signal is observed in an interactive session.

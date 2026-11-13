@@ -108,6 +108,11 @@ def _clause(record: dict, label: str, age: float) -> str:
             return (f"Claude finished in {label} {duration} ago and said: "
                     f"{_spoken(message)}")
         return f"Claude finished in {label} {duration} ago."
+    if state == cs.IDLE:
+        # Neither working nor finished: a terminal nobody has typed into. It
+        # gets its own clause rather than being folded into either, because
+        # both would be untrue.
+        return f"Claude is open in {label} with nothing running, {duration} now."
     return f"Claude is working in {label}, {duration} so far."
 
 

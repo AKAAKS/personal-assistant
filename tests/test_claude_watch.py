@@ -27,8 +27,8 @@ class RecordingNotifier:
     def __init__(self):
         self.calls = []
 
-    def notify(self, text, priority="low", *, perishable=False):
-        self.calls.append((text, priority, perishable))
+    def notify(self, text, priority="low", *, perishable=False, local_only=False):
+        self.calls.append((text, priority, perishable, local_only))
 
     def drain(self):
         return []
@@ -102,6 +102,11 @@ def test_an_idle_at_the_same_moment_as_the_state_change_announces():
     assert JarvisServer.announcement_for(record) is not None
 
 
+def test_an_idle_session_announces_nothing():
+    """A terminal sitting at an empty prompt is not news, same as a long turn."""
+    assert JarvisServer.announcement_for(_rec(cs.IDLE, idle=True)) is None
+
+
 def test_an_unknown_state_announces_nothing():
     assert JarvisServer.announcement_for(_rec("teleporting")) is None
 
@@ -121,7 +126,7 @@ def test_a_tick_announces_a_waiting_session():
 def test_the_announcement_is_perishable():
     notifier = RecordingNotifier()
     _tick(_server([_rec(cs.WAITING)], notifier))
-    text, priority, perishable = notifier.calls[0]
+    text, priority, perishable, local_only = notifier.calls[0]
     assert perishable is True
 
 
@@ -136,6 +141,15 @@ def test_the_announcement_is_not_silenced_by_quiet_hours():
     assert notifier.calls[0][1] == "urgent"
 
 
+def test_the_announcement_never_escalates_to_the_phone():
+    """It ignores quiet hours so it still reaches someone working at 2am, but
+    the notifier's fallback chain ends at a phone push -- and "Claude finished
+    in X" buzzing a phone at 4am is exactly the notice nobody wants."""
+    notifier = RecordingNotifier()
+    _tick(_server([_rec(cs.WAITING)], notifier))
+    assert notifier.calls[0][3] is True
+
+
 def test_notify_is_never_called_on_the_event_loop_thread():
     """push_to_clients is _push_from_thread, which blocks the calling thread
     on a coroutine scheduled on the loop. Called FROM the loop thread that
@@ -148,9 +162,11 @@ def test_notify_is_never_called_on_the_event_loop_thread():
             super().__init__()
             self.threads = []
 
-        def notify(self, text, priority="low", *, perishable=False):
+        def notify(self, text, priority="low", *, perishable=False,
+                   local_only=False):
             self.threads.append(threading.get_ident())
-            super().notify(text, priority, perishable=perishable)
+            super().notify(text, priority, perishable=perishable,
+                           local_only=local_only)
 
     notifier = ThreadRecordingNotifier()
     server = _server([_rec(cs.WAITING)], notifier)

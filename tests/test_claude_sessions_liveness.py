@@ -136,7 +136,7 @@ def test_a_failing_ancestor_lookup_still_writes_the_record(tmp_path):
         raise RuntimeError("psutil exploded")
     cs.apply_event({"hook_event_name": "SessionStart", "session_id": "s1"},
                    directory=tmp_path, ancestor=boom)
-    assert cs.read_raw(directory=tmp_path)[0]["state"] == cs.WORKING
+    assert cs.read_raw(directory=tmp_path)[0]["state"] == cs.IDLE
 
 
 # --- read_sessions ---------------------------------------------------------
@@ -145,8 +145,9 @@ def _write(directory, session_id, *, state, since, pid, started):
     cs.apply_event({"hook_event_name": "SessionStart", "session_id": session_id},
                    directory=directory, now=lambda: since,
                    ancestor=lambda: (pid, started) if pid else None)
-    if state != cs.WORKING:
-        event = ("PermissionRequest" if state == cs.WAITING else "Stop")
+    if state != cs.IDLE:
+        event = {cs.WAITING: "PermissionRequest", cs.DONE: "Stop",
+                 cs.WORKING: "UserPromptSubmit"}[state]
         cs.apply_event({"hook_event_name": event, "session_id": session_id},
                        directory=directory, now=lambda: since,
                        ancestor=lambda: (pid, started) if pid else None)

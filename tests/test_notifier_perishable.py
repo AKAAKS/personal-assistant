@@ -101,6 +101,61 @@ def test_a_perishable_urgent_notice_ignores_quiet_hours_like_any_other(tmp_path)
     assert _queued(conn) == []
 
 
+def test_a_local_only_notice_does_not_reach_the_phone(tmp_path):
+    """The Claude-session notices ignore quiet hours so they still reach
+    someone working at 2am. Escalating those to a phone push means "Claude
+    finished" buzzing a phone at 4am, which nobody asked for."""
+    ha = FakeHAClient()
+    notifier, conn = make_notifier(tmp_path, now=fixed_now(QUIET), ha_client=ha)
+    notifier.push_to_clients = lambda text: 0
+    notifier.notify("Claude needs your input in proj.", priority="urgent",
+                    perishable=True, local_only=True)
+    assert ha.calls == []
+    assert _queued(conn) == []
+
+
+def test_a_local_only_notice_still_uses_the_local_toast(tmp_path):
+    local = FakeLocal(result=True)
+    ha = FakeHAClient()
+    notifier, conn = make_notifier(tmp_path, now=fixed_now(QUIET),
+                                   ha_client=ha, local_notify=local)
+    notifier.push_to_clients = lambda text: 0
+    notifier.notify("Claude needs your input in proj.", priority="urgent",
+                    perishable=True, local_only=True)
+    assert local.calls == ["Claude needs your input in proj."]
+    assert ha.calls == []
+
+
+def test_a_local_only_notice_still_speaks_to_a_connected_client(tmp_path):
+    spoken = []
+    ha = FakeHAClient()
+    notifier, conn = make_notifier(tmp_path, now=fixed_now(QUIET), ha_client=ha)
+    notifier.push_to_clients = lambda text: spoken.append(text) or 1
+    notifier.notify("Claude finished in proj.", priority="urgent",
+                    perishable=True, local_only=True)
+    assert spoken == ["Claude finished in proj."]
+    assert ha.calls == []
+
+
+def test_the_phone_push_is_untouched_for_a_normal_notice(tmp_path):
+    """The default must not change: a reminder with no route still reaches the
+    phone."""
+    ha = FakeHAClient()
+    notifier, conn = make_notifier(tmp_path, now=fixed_now(AWAKE), ha_client=ha)
+    notifier.push_to_clients = lambda text: 0
+    notifier.notify("Reminder: bins out.", priority="high")
+    assert [c[0] for c in ha.calls] == ["Reminder: bins out."]
+
+
+def test_local_only_is_keyword_only(tmp_path):
+    import inspect
+
+    from jarvisd.notifier import Notifier
+    param = inspect.signature(Notifier.notify).parameters["local_only"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is False
+
+
 def test_perishable_is_keyword_only(tmp_path):
     """Every existing positional call site must stay untouched."""
     import inspect

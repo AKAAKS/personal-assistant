@@ -16,7 +16,8 @@ import pytest
 from scripts import install_claude_hooks as installer
 
 EVENTS = ("SessionStart", "UserPromptSubmit", "PermissionRequest",
-          "Notification", "Stop", "SessionEnd")
+          "PostToolUse", "PostToolUseFailure", "Notification", "Stop",
+          "SessionEnd")
 
 SCRIPT = r"C:\repo\scripts\claude_status_hook.py"
 
@@ -141,6 +142,16 @@ def test_it_refuses_rather_than_clobbering_unparseable_settings(tmp_path):
     with pytest.raises(ValueError):
         installer.install(path, script_path=SCRIPT)
     assert path.read_text(encoding="utf-8") == '{"model": "opus", oops'
+
+
+def test_it_refuses_a_hooks_value_that_is_not_an_object(tmp_path):
+    """The docstring promises "merge, never overwrite" and "refuse rather than
+    clobber". Silently replacing a hooks value we could not understand is
+    neither."""
+    path = _settings(tmp_path, {"model": "opus", "hooks": "oops"})
+    with pytest.raises(ValueError):
+        installer.install(path, script_path=SCRIPT)
+    assert _read(path)["hooks"] == "oops"
 
 
 def test_it_refuses_settings_that_are_not_an_object(tmp_path):

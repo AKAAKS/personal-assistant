@@ -540,8 +540,15 @@ class JarvisServer:
                 # silently dropped during the default 23:00-08:00 quiet window:
                 # the user works past 02:00, and the idle signal already proves
                 # they are at the PC but away from the keyboard.
+                #
+                # local_only is the other half of that bargain: ignoring quiet
+                # hours is only reasonable while the notice stays on this
+                # machine. The fallback chain otherwise ends at a Home
+                # Assistant phone push, and "Claude finished in X" buzzing a
+                # phone at 4am is the notice that gets a feature switched off.
                 await asyncio.to_thread(
-                    self.notifier.notify, text, "urgent", perishable=True
+                    self.notifier.notify, text, "urgent",
+                    perishable=True, local_only=True,
                 )
             except Exception:
                 log.exception("claude announcement failed")

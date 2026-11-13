@@ -81,6 +81,22 @@ def test_a_working_session_names_the_project_and_the_duration(tmp_path):
     assert "5 minutes" in out
 
 
+def test_an_idle_session_is_reported_as_open_not_working(tmp_path):
+    """An opened terminal nobody has typed into is neither working nor
+    finished. Reporting "working, 2 hours so far" is the confident wrong
+    answer the design forbids."""
+    _write(tmp_path, "s1", None, project="proj", age=7200.0)
+    out = _call(directory=tmp_path)
+    assert "proj" in out
+    assert "working" not in out.lower()
+    assert "finished" not in out.lower()
+
+
+def test_an_idle_session_is_not_mistaken_for_nothing_running(tmp_path):
+    _write(tmp_path, "s1", None, project="proj", age=60.0)
+    assert "no claude code session" not in _call(directory=tmp_path).lower()
+
+
 def test_a_waiting_session_says_it_needs_you(tmp_path):
     _waiting(tmp_path, age=120.0)
     out = _call(directory=tmp_path)

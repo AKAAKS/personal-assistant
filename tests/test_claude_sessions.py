@@ -30,7 +30,7 @@ def _stop(directory, message, session_id="s1", now=1100.0):
     )
 
 
-def test_session_start_creates_a_working_record(tmp_path):
+def test_session_start_creates_an_idle_record(tmp_path):
     cs.apply_event(
         {
             "hook_event_name": "SessionStart",
@@ -40,7 +40,7 @@ def test_session_start_creates_a_working_record(tmp_path):
         directory=tmp_path,
     )
     rec = cs.read_raw(directory=tmp_path)[0]
-    assert rec["state"] == cs.WORKING
+    assert rec["state"] == cs.IDLE
     assert rec["project"] == "personal-assistant"
     assert rec["session_id"] == "s1"
 
@@ -114,6 +114,63 @@ def test_a_new_prompt_clears_the_previous_last_message(tmp_path):
     rec = cs.read_raw(directory=tmp_path)[0]
     assert rec["state"] == cs.WORKING
     assert rec["last_message"] is None
+
+
+def test_an_opened_session_is_idle_not_working(tmp_path):
+    """SessionStart means a terminal was opened, not that a turn is in flight.
+    Calling it `working` made three terminals left open all day answer
+    "Claude is working, 2 hours so far" forever."""
+    _start(tmp_path)
+    assert cs.read_raw(directory=tmp_path)[0]["state"] == cs.IDLE
+
+
+def test_an_idle_session_becomes_working_on_the_first_prompt(tmp_path):
+    _start(tmp_path)
+    cs.apply_event({"hook_event_name": "UserPromptSubmit", "session_id": "s1"},
+                   directory=tmp_path)
+    assert cs.read_raw(directory=tmp_path)[0]["state"] == cs.WORKING
+
+
+def test_a_finished_tool_ends_the_wait(tmp_path):
+    """Nothing else tells us the permission prompt was answered: the tool
+    having run is the proof."""
+    _start(tmp_path)
+    cs.apply_event({"hook_event_name": "PermissionRequest", "session_id": "s1",
+                    "tool_name": "Bash"}, directory=tmp_path, now=lambda: 2000.0)
+    cs.apply_event({"hook_event_name": "PostToolUse", "session_id": "s1"},
+                   directory=tmp_path, now=lambda: 2100.0)
+    rec = cs.read_raw(directory=tmp_path)[0]
+    assert rec["state"] == cs.WORKING
+    assert rec["tool_name"] is None
+
+
+def test_a_failed_or_denied_tool_also_ends_the_wait(tmp_path):
+    """A denied prompt fires PostToolUseFailure, not PostToolUse, so without
+    this the record would sit on `waiting` for a prompt the user said no to."""
+    _start(tmp_path)
+    cs.apply_event({"hook_event_name": "PermissionRequest", "session_id": "s1",
+                    "tool_name": "Bash"}, directory=tmp_path, now=lambda: 2000.0)
+    cs.apply_event({"hook_event_name": "PostToolUseFailure", "session_id": "s1"},
+                   directory=tmp_path, now=lambda: 2100.0)
+    assert cs.read_raw(directory=tmp_path)[0]["state"] == cs.WORKING
+
+
+def test_a_second_prompt_in_one_turn_gets_a_fresh_since(tmp_path):
+    """The daemon dedupes announcements on (session_id, state, since). With
+    nothing between two prompts, `since` never moved, the key repeated, and the
+    second genuine wait was never announced at all."""
+    _start(tmp_path)
+    cs.apply_event({"hook_event_name": "PermissionRequest", "session_id": "s1",
+                    "tool_name": "Bash"}, directory=tmp_path, now=lambda: 2000.0)
+    first = cs.read_raw(directory=tmp_path)[0]["since"]
+    cs.apply_event({"hook_event_name": "PostToolUse", "session_id": "s1"},
+                   directory=tmp_path, now=lambda: 2100.0)
+    cs.apply_event({"hook_event_name": "PermissionRequest", "session_id": "s1",
+                    "tool_name": "Edit"}, directory=tmp_path, now=lambda: 2200.0)
+    second = cs.read_raw(directory=tmp_path)[0]
+    assert second["state"] == cs.WAITING
+    assert second["since"] == 2200.0 and second["since"] != first
+    assert second["tool_name"] == "Edit"
 
 
 def test_a_new_prompt_clears_the_tool_it_was_waiting_on(tmp_path):
@@ -246,7 +303,7 @@ def test_the_write_leaves_no_temp_file_behind(tmp_path):
 
 def test_the_record_on_disk_is_valid_json(tmp_path):
     _start(tmp_path)
-    assert json.loads((tmp_path / "s1.json").read_text(encoding="utf-8"))["state"] == cs.WORKING
+    assert json.loads((tmp_path / "s1.json").read_text(encoding="utf-8"))["state"] == cs.IDLE
 
 
 def test_a_missing_state_directory_reads_as_empty(tmp_path):

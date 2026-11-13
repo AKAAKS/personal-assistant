@@ -21,7 +21,11 @@ Two fields have independent lifetimes on purpose:
 
   - `state` is what the session is doing now. `since` moves only when `state`
     changes value, so "how long has it been like this" stays true across the
-    repeated events of one state.
+    repeated events of one state. That makes a real transition out of
+    `waiting` load-bearing: the daemon dedupes announcements on
+    `(session_id, state, since)`, so without one, a second permission prompt in
+    the same turn would reuse the first one's key and never be announced. The
+    `PostToolUse` / `PostToolUseFailure` pair provides it.
   - `last_message` is written only by `Stop` and cleared only by the next
     `UserPromptSubmit`. An earlier draft kept a single state field, and an idle
     notification 60s after `Stop` both flipped a finished session to "waiting
@@ -47,6 +51,7 @@ except Exception:  # pragma: no cover - exercised only on a broken install
 log = logging.getLogger(__name__)
 
 # --- states ----------------------------------------------------------------
+IDLE = "idle"         # the terminal is open; nothing has been asked of it yet
 WORKING = "working"   # a turn is in flight
 WAITING = "waiting"   # blocked on the user: a permission prompt
 DONE = "done"         # the turn finished; the session sits at an empty prompt
@@ -262,13 +267,38 @@ def apply_event(payload: dict, *, directory=DIR, now=time.time,
         new_state = state
         idle_ts = record.get("idle_ts")
 
-        if event in ("SessionStart", "UserPromptSubmit"):
+        if event == "SessionStart":
+            # Opening a terminal is not a turn. Calling this `working` made
+            # three terminals left open all day answer "Claude is working, two
+            # hours so far" forever, which is the confident wrong answer the
+            # design exists to avoid.
+            new_state = IDLE
+            record["last_message"] = None
+            record["tool_name"] = None
+        elif event == "UserPromptSubmit":
             new_state = WORKING
             record["last_message"] = None
             # The tool belongs to the prompt that is over. Keeping it would
             # make the NEXT wait report the wrong tool -- "needs your input to
             # use Bash" about an Edit prompt -- which is a confident wrong
             # answer, not a vaguer one.
+            record["tool_name"] = None
+        elif event in ("PostToolUse", "PostToolUseFailure"):
+            # A tool that has finished -- successfully or not -- is proof that
+            # the permission prompt in front of it was answered. Nothing else
+            # tells us that: PermissionRequest fires before the prompt, and the
+            # next lifecycle event is the end of the whole turn.
+            #
+            # It matters twice. Without it a record sits on `waiting` while
+            # Claude works, and -- because the daemon dedupes announcements on
+            # (session_id, state, since) and `since` only moves on a real state
+            # change -- a SECOND prompt in the same turn reused the first one's
+            # key and was never announced at all.
+            #
+            # Both events are needed: the published table says PostToolUse runs
+            # "after successful tool", and a denied prompt fires
+            # PostToolUseFailure instead.
+            new_state = WORKING
             record["tool_name"] = None
         elif event == "PermissionRequest":
             new_state = WAITING

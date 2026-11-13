@@ -88,7 +88,7 @@ class Notifier:
             log.error("Failed to enqueue notice: %s", e)
 
     def notify(self, text: str, priority: str = "low", *,
-               perishable: bool = False) -> None:
+               perishable: bool = False, local_only: bool = False) -> None:
         """Deliver or queue a proactive message. Never raises.
 
         `perishable` means the notice is only true now: deliver it through a
@@ -99,6 +99,13 @@ class Notifier:
 
         It is keyword-only so no existing positional call site changes, and it
         defaults to False because reminders and timers DO want to be banked.
+
+        `local_only` stops the fallback chain before the phone push: speak it
+        to a connected client, or make a noise on this machine, or drop it.
+        It exists for notices that are about THIS machine and are allowed to
+        ignore quiet hours -- a Claude Code session idling at 3am is worth
+        saying out loud to someone sitting here, and not worth buzzing a phone
+        on a bedside table.
         """
         try:
             now = self.now()
@@ -136,7 +143,7 @@ class Notifier:
                     except Exception as e:
                         log.warning("local_notify failed: %s", e)
 
-                if self.ha_client is not None:
+                if self.ha_client is not None and not local_only:
                     try:
                         self.ha_client.send_notification(text, title="JARVIS")
                         log.info("notify[%s] -> HA phone push: %s", priority, text)

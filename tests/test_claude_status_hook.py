@@ -21,7 +21,7 @@ def test_a_valid_event_reaches_the_store(tmp_path):
     payload = json.dumps({"hook_event_name": "SessionStart",
                           "session_id": "s1", "cwd": "/x/proj"})
     assert hook.main(io.StringIO(payload), directory=tmp_path) == 0
-    assert cs.read_raw(directory=tmp_path)[0]["state"] == cs.WORKING
+    assert cs.read_raw(directory=tmp_path)[0]["state"] == cs.IDLE
 
 
 def test_the_project_survives_a_posix_cwd(tmp_path):
