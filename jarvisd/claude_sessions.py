@@ -39,6 +39,11 @@ import tempfile
 import time
 from pathlib import Path
 
+try:  # psutil is a dependency, but liveness must degrade rather than crash
+    import psutil
+except Exception:  # pragma: no cover - exercised only on a broken install
+    psutil = None
+
 log = logging.getLogger(__name__)
 
 # --- states ----------------------------------------------------------------
@@ -53,6 +58,19 @@ DIR = (Path(__file__).resolve().parent.parent / "data" / "claude_sessions")
 # Bounds the record, and bounds what transits to the API when the user asks
 # and the message comes back as tool output.
 MESSAGE_CAP = 500
+
+# Only for a record that could not find its claude.exe ancestor: 12 hours, so a
+# weird launch shape degrades to "eventually forgotten" instead of either
+# "immediately invisible" or "busy forever".
+NO_PID_TTL_SEC = 43200
+
+# A probe result meaning "the process is running but we cannot read it"
+# (psutil.AccessDenied). It must count as LIVE: a session we cannot inspect is
+# still a session, and calling it dead is the confident wrong answer the design
+# forbids.
+START_UNKNOWN = -1.0
+
+_CLAUDE_PROCESS = "claude.exe"
 
 # A Notification whose text contains one of these is the permission prompt
 # rather than the idle nudge. The payload shape for Notification is not
@@ -132,7 +150,95 @@ def _looks_like_permission(payload: dict) -> bool:
     return any(hint in text for hint in _PERMISSION_HINTS)
 
 
-def apply_event(payload: dict, *, directory=DIR, now=time.time) -> None:
+def _psutil_walker(start_pid=None):
+    """Yield (pid, name, create_time) for this process and each ancestor."""
+    if psutil is None:
+        return
+    proc = psutil.Process(start_pid) if start_pid else psutil.Process()
+    seen = 0
+    while proc is not None and seen < 32:  # a cycle would otherwise hang a hook
+        seen += 1
+        try:
+            yield proc.pid, proc.name(), proc.create_time()
+        except Exception:
+            return
+        try:
+            proc = proc.parent()
+        except Exception:
+            return
+
+
+def claude_ancestor(*, start_pid=None, walker=_psutil_walker):
+    """The nearest `claude.exe` ancestor as (pid, start_time), or None.
+
+    `os.getppid()` is useless here: the verified chain from a hook-like child
+    on this machine is `bash -> bash -> bash -> claude.exe -> powershell ->
+    WindowsTerminal`, so the hook's own parent is a transient shell. The start
+    time comes back with the pid because the pid alone is not an identity --
+    Windows reuses pids, and a reused one would keep a dead session "busy".
+    """
+    try:
+        for entry in walker(start_pid):
+            pid, name = entry[0], entry[1]
+            started = entry[2] if len(entry) > 2 else START_UNKNOWN
+            if str(name or "").lower() == _CLAUDE_PROCESS:
+                return pid, started
+    except Exception as e:
+        log.debug("claude_sessions: ancestor walk failed: %s", e)
+    return None
+
+
+def _psutil_probe(pid):
+    """The start time of `pid`: None if it is gone, START_UNKNOWN if opaque."""
+    if psutil is None:
+        return START_UNKNOWN
+    try:
+        return psutil.Process(pid).create_time()
+    except psutil.NoSuchProcess:
+        return None
+    except Exception:
+        # AccessDenied and anything else: it exists as far as we can tell.
+        return START_UNKNOWN
+
+
+def is_live(record, *, now=time.time, probe=_psutil_probe) -> bool:
+    """Is the Claude session this record describes still running?
+
+    Liveness, not a timer: a session blocked on a permission prompt for three
+    hours is in a state that is still true, and a TTL would quietly delete the
+    most useful answer this feature has.
+    """
+    try:
+        pid = record.get("claude_pid")
+        if not pid:
+            updated = record.get("updated_ts")
+            if not isinstance(updated, (int, float)):
+                return False
+            return (now() - updated) <= NO_PID_TTL_SEC
+        started = probe(pid)
+        if started is None:
+            return False  # the process is gone
+        if started == START_UNKNOWN:
+            return True   # running, just not inspectable by us
+        recorded = record.get("claude_started")
+        if not isinstance(recorded, (int, float)) or recorded == START_UNKNOWN:
+            return True   # nothing to compare against; trust the live pid
+        return abs(started - recorded) < 1.0
+    except Exception as e:
+        log.debug("claude_sessions: liveness check failed: %s", e)
+        return False
+
+
+def read_sessions(*, directory=DIR, now=time.time, probe=_psutil_probe) -> list[dict]:
+    """The live records, most recent state change first."""
+    live = [r for r in read_raw(directory=directory)
+            if is_live(r, now=now, probe=probe)]
+    live.sort(key=lambda r: r.get("since") or 0, reverse=True)
+    return live
+
+
+def apply_event(payload: dict, *, directory=DIR, now=time.time,
+                ancestor=claude_ancestor) -> None:
     """Fold one hook event into that session's record. Never raises."""
     try:
         if not isinstance(payload, dict):
@@ -195,6 +301,17 @@ def apply_event(payload: dict, *, directory=DIR, now=time.time) -> None:
         if mode:
             record["permission_mode"] = mode
         record.setdefault("permission_mode", None)
+
+        # Re-resolved on every write: the hook is a fresh child of the same
+        # claude.exe each time, and a record that loses its pid would start
+        # expiring on the 12-hour fallback instead of on liveness.
+        try:
+            found = ancestor()
+        except Exception as e:
+            log.debug("claude_sessions: ancestor lookup failed: %s", e)
+            found = None
+        record["claude_pid"] = found[0] if found else None
+        record["claude_started"] = found[1] if found else None
 
         _write(path, record)
     except Exception as e:
