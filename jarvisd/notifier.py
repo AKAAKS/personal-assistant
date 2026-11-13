@@ -92,6 +92,7 @@ class Notifier:
         try:
             now = self.now()
             if self._is_quiet(now) and priority not in IGNORES_QUIET_HOURS:
+                log.info("notify[%s] -> queued (quiet hours): %s", priority, text)
                 self._enqueue(text)
                 return
 
@@ -105,6 +106,8 @@ class Notifier:
                         reached = 0
 
                 if reached > 0:
+                    log.info("notify[%s] -> spoken to %d client(s): %s",
+                             priority, reached, text)
                     return
 
                 # Nobody was listening. Make a noise on this machine before
@@ -112,17 +115,21 @@ class Notifier:
                 if self.local_notify is not None:
                     try:
                         if self.local_notify(text):
+                            log.info("notify[%s] -> local toast/chime: %s", priority, text)
                             return
+                        log.info("notify[%s] -> local notifier declined", priority)
                     except Exception as e:
                         log.warning("local_notify failed: %s", e)
 
                 if self.ha_client is not None:
                     try:
                         self.ha_client.send_notification(text, title="JARVIS")
+                        log.info("notify[%s] -> HA phone push: %s", priority, text)
                         return
                     except Exception as e:
                         log.warning("ha_client.send_notification failed: %s", e)
 
+                log.info("notify[%s] -> queued (no route available): %s", priority, text)
                 self._enqueue(text)
                 return
 

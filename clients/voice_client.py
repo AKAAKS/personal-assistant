@@ -27,6 +27,10 @@ from voice.wake_word import WakeWordDetector
 log = logging.getLogger(__name__)
 
 WAKE_WORD_CHUNK = 1280  # openwakeword expects 80ms chunks at 16kHz
+# How long the idle wake-word wait holds the audio lock before letting a
+# pending proactive announcement have the mic. Short enough that a reminder
+# is not noticeably late, long enough that the yield costs nothing.
+WAKE_SCAN_SLICE_SEC = 0.5
 
 # After JARVIS replies, keep listening this many seconds for a follow-up WITHOUT
 # requiring the wake word again, so a back-and-forth conversation is hands-free.
@@ -239,7 +243,24 @@ class VoiceClient:
 
     def _capture_utterance(self) -> bytes | None:
         """Block until the wake word, then record one utterance. PCM or None."""
-        while True:
+        pcm, _ = self._scan_for_wake_and_record(None)
+        return pcm
+
+    def _scan_for_wake_and_record(self, slice_sec: float | None,
+                                  now=time.monotonic):
+        """Scan for the wake word for at most `slice_sec`; record if it fires.
+
+        Returns (pcm_or_None, fired). `slice_sec=None` scans until the wake word
+        fires, which is what _capture_utterance wants. A bounded slice is what
+        _await_wake_utterance wants, so the idle wait can let go of the mic
+        between slices -- see the lock discussion there.
+
+        `fired` is distinct from `pcm is not None`: the wake word firing and
+        then hearing nothing is a real outcome (True, None) that must end the
+        wait so run() can re-arm, not look like "keep scanning".
+        """
+        deadline = None if slice_sec is None else now() + slice_sec
+        while deadline is None or now() < deadline:
             frame = self.mic.read_frame(timeout=1.0)
             if frame is None:
                 continue
@@ -251,7 +272,39 @@ class VoiceClient:
             if not self.wake_word.process_frame(chunk):
                 continue
             log.info("Wake word detected")
-            return self._record_utterance()
+            return self._record_utterance(), True
+        return None, False
+
+    async def _await_wake_utterance(self) -> bytes | None:
+        """The idle wait: block until the user speaks, without owning the mic
+        for the whole time.
+
+        _audio_lock gives the mic and speaker a single owner, and every capture
+        takes it so a proactive announcement can't drain the mic underneath
+        one. For a bounded capture that is the right trade: an announcement
+        waits a couple of seconds rather than cutting the user off mid-sentence.
+
+        This wait is NOT bounded -- it ends only when the user says the wake
+        word -- so holding the lock across it did not delay announcements, it
+        suppressed them. A reminder or timer coming due while JARVIS sits idle
+        is the normal case, and it would sit in _play waiting on this lock until
+        the user happened to speak, arriving as "this passed while you were
+        away" on the next turn.
+
+        So scan in short slices, each holding the lock, and release between
+        them. Mic exclusivity is unchanged while a slice runs; a waiting
+        announcement gets the mic within one slice. The sleep(0) is what makes
+        that real: releasing a lock only schedules the next waiter, so without
+        a yield this loop would re-acquire it immediately every time.
+        """
+        while True:
+            async with self._audio_lock:
+                pcm, fired = await asyncio.to_thread(
+                    self._scan_for_wake_and_record, WAKE_SCAN_SLICE_SEC
+                )
+            if fired:
+                return pcm
+            await asyncio.sleep(0)
 
     def _record_utterance(self) -> bytes | None:
         """Record one utterance NOW (no wake word): capture until silence.
@@ -481,6 +534,7 @@ class VoiceClient:
     async def _play(self, wav: bytes):
         """Play a WAV under the shared lock so a proactive and a reply WAV
         can never sound simultaneously (winsound.PlaySound is blocking)."""
+        log.info("Playing proactive audio (%d bytes)", len(wav))
         async with self._audio_lock:
             await asyncio.to_thread(winsound.PlaySound, bytes(wav), winsound.SND_MEMORY)
             # A proactive announcement is spoken while the main loop may be
@@ -489,6 +543,10 @@ class VoiceClient:
 
     @staticmethod
     def _on_proactive_text(text: str):
+        # Logged as well as printed: under pythonw there is no console, so the
+        # print goes nowhere and a push that arrived but was never heard would
+        # otherwise leave no trace on either side of the socket.
+        log.info("Proactive push received: %s", text)
         print(f"JARVIS (proactive): {text}")
 
     async def run(self):
@@ -560,8 +618,10 @@ class VoiceClient:
                                     rearm()
                                 continue
                         else:
-                            async with self._audio_lock:
-                                pcm = await asyncio.to_thread(self._capture_utterance)
+                            # Idle: this wait owns the mic only in slices, so a
+                            # reminder coming due right now is spoken now
+                            # instead of waiting for the user to speak first.
+                            pcm = await self._await_wake_utterance()
                             active = True  # the wake word fired
                             if pcm is None:
                                 rearm()

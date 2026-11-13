@@ -355,6 +355,8 @@ class JarvisServer:
             except Exception:
                 log.warning("proactive push failed for a client; dropping it", exc_info=True)
                 self._clients.pop(ws, None)
+        log.info("proactive push: %d/%d client(s) reached (audio=%s)",
+                 reached, len(self._clients) + 0, wav is not None)
         return reached
 
     def _push_from_thread(self, text: str) -> int:

@@ -590,21 +590,54 @@ def _calls_to(node, attr):
     ]
 
 
-def test_the_main_loop_holds_the_audio_lock_around_every_capture():
+def test_the_main_loop_holds_the_audio_lock_around_every_bounded_capture():
     """The concurrency test above can only prove _play cooperates. This pins the
-    other half: run() must actually take the lock, for all three capture paths.
+    other half: run() must actually take the lock around the captures it owns.
+
+    The idle wake-word wait is deliberately NOT in this list -- it is unbounded,
+    so it manages the lock in slices inside _await_wake_utterance. The test
+    below pins that path.
     """
     tree = _run_ast()
     blocks = _audio_lock_blocks(tree)
     assert blocks, "run() no longer acquires _audio_lock at all"
 
-    for fn in ("_record_utterance", "_capture_followup", "_capture_utterance"):
+    for fn in ("_record_utterance", "_capture_followup"):
         assert _calls_to(tree, fn), f"{fn} is no longer called by run(); update this test"
         guarded = any(_calls_to(b, fn) for b in blocks)
         assert guarded, (
             f"{fn} runs without holding _audio_lock, so a proactive "
             "announcement can drain the mic underneath it"
         )
+
+
+def test_the_idle_branch_goes_through_the_slicing_wait():
+    """If run() ever calls _capture_utterance directly again -- inside the lock
+    or outside it -- the reminder bug is back: inside, announcements are
+    suppressed until the user speaks; outside, a proactive drains the mic
+    mid-capture."""
+    tree = _run_ast()
+    assert _calls_to(tree, "_await_wake_utterance"), (
+        "run() no longer uses the slicing idle wait"
+    )
+    assert not _calls_to(tree, "_capture_utterance"), (
+        "run() calls _capture_utterance directly; the idle wait must slice"
+    )
+
+
+def test_the_slicing_wait_scans_under_the_audio_lock():
+    """Structural half of the mid-slice exclusivity test above."""
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(VoiceClient._await_wake_utterance)))
+    blocks = _audio_lock_blocks(tree)
+    assert blocks, "_await_wake_utterance no longer takes the audio lock"
+    assert any(_calls_to(b, "_scan_for_wake_and_record") for b in blocks), (
+        "the scan slice runs without the audio lock, so a proactive can drain "
+        "the mic while the wake word is being listened for"
+    )
 
 
 def test_the_reply_is_not_played_while_the_audio_lock_is_held():
@@ -619,3 +652,153 @@ def test_the_reply_is_not_played_while_the_audio_lock_is_held():
             "a capture holds _audio_lock across the reply playback; "
             "_play_and_watch_reply re-acquires it and the client deadlocks"
         )
+
+
+# --- the idle wake-word wait must not hold the mic hostage ------------------
+#
+# The ownership lock above is right for a BOUNDED capture: a follow-up or a
+# post-barge-in recording lasts seconds, and "a reminder waits a couple of
+# seconds rather than cutting the user off" is the correct trade.
+#
+# The idle wake-word wait is not bounded. It ends only when the user says "hey
+# jarvis", so holding the same lock across it meant a reminder coming due while
+# JARVIS sat idle -- the normal case for every reminder and timer -- waited for
+# the user to speak first. That is exactly the reported bug: the announcement
+# only ever arrived as "this passed while you were away" on the next turn.
+#
+# The fix keeps mic ownership exclusive but makes the idle wait yield: it scans
+# in short slices, each under the lock, releasing between them. A proactive
+# gets the mic within one slice instead of never.
+
+
+def _wake_wait_client(monkeypatch, scan):
+    c = VoiceClient.__new__(VoiceClient)
+    c.mic = FakeMic()
+    c._audio_lock = asyncio.Lock()
+    monkeypatch.setattr(c, "_scan_for_wake_and_record", scan)
+    return c
+
+
+def test_a_proactive_announcement_does_not_wait_for_the_idle_wake_word_wait(monkeypatch):
+    """The bug, pinned: a reminder arriving while idle must be spoken now."""
+    import threading
+
+    monkeypatch.setattr(winsound, "PlaySound", lambda *a: None)
+
+    async def scenario():
+        events = []
+        scanning = threading.Event()
+
+        def fake_scan(slice_sec):
+            scanning.set()
+            events.append("scan")
+            time.sleep(0.02)  # a slice that hears nothing
+            return None, False
+
+        c = _wake_wait_client(monkeypatch, fake_scan)
+        monkeypatch.setattr(c, "_drain_mic", lambda *a, **k: events.append("drain"))
+
+        wait = asyncio.create_task(c._await_wake_utterance())
+        await asyncio.to_thread(scanning.wait, 5.0)
+        try:
+            # The user never speaks, so the wait is still running. The
+            # announcement must still get the mic.
+            await asyncio.wait_for(c._play(b"wav"), timeout=3.0)
+        finally:
+            wait.cancel()
+        assert "drain" in events, "the announcement never played"
+
+    asyncio.run(scenario())
+
+
+def test_the_idle_wait_holds_the_lock_while_a_slice_is_actually_scanning(monkeypatch):
+    """Yielding between slices must not cost mic exclusivity DURING one: a
+    drain mid-slice still eats frames and races _wake_buf."""
+    import threading
+
+    monkeypatch.setattr(winsound, "PlaySound", lambda *a: None)
+
+    async def scenario():
+        events = []
+        in_slice = threading.Event()
+        let_slice_finish = threading.Event()
+
+        def fake_scan(slice_sec):
+            events.append("slice:enter")
+            in_slice.set()
+            let_slice_finish.wait(5.0)
+            events.append("slice:exit")
+            return None, False
+
+        c = _wake_wait_client(monkeypatch, fake_scan)
+        monkeypatch.setattr(c, "_drain_mic", lambda *a, **k: events.append("drain"))
+
+        wait = asyncio.create_task(c._await_wake_utterance())
+        await asyncio.to_thread(in_slice.wait, 5.0)
+        play = asyncio.create_task(c._play(b"wav"))
+        await asyncio.sleep(0.1)  # ample time to misbehave if unguarded
+        assert "drain" not in events, "a proactive drained the mic mid-slice"
+        let_slice_finish.set()
+        await asyncio.wait_for(play, timeout=3.0)
+        wait.cancel()
+        assert events.index("slice:exit") < events.index("drain")
+
+    asyncio.run(scenario())
+
+
+def test_the_idle_wait_returns_the_pcm_from_the_slice_that_fired(monkeypatch):
+    async def scenario():
+        calls = []
+
+        def fake_scan(slice_sec):
+            calls.append(slice_sec)
+            if len(calls) < 3:
+                return None, False
+            return b"pcm", True
+
+        c = _wake_wait_client(monkeypatch, fake_scan)
+        assert await c._await_wake_utterance() == b"pcm"
+        assert len(calls) == 3, "it stopped slicing before the wake word fired"
+
+    asyncio.run(scenario())
+
+
+def test_a_fired_slice_that_captured_nothing_still_ends_the_wait(monkeypatch):
+    """A wake word followed by silence returns None, and run() re-arms on it.
+    Treating that as "keep slicing" would swallow the re-arm beep."""
+    async def scenario():
+        c = _wake_wait_client(monkeypatch, lambda s: (None, True))
+        assert await c._await_wake_utterance() is None
+
+    asyncio.run(scenario())
+
+
+# --- _scan_for_wake_and_record: one bounded slice --------------------------
+
+
+def test_a_slice_that_hears_nothing_reports_not_fired():
+    c = _watch_client(FakeWake(fire_on=0))  # never fires
+    pcm, fired = c._scan_for_wake_and_record(0.05)
+    assert (pcm, fired) == (None, False)
+    assert c.mic.reads > 0, "the slice never read the mic"
+
+
+def test_a_slice_that_hears_the_wake_word_records_and_reports_fired(monkeypatch):
+    c = _watch_client(FakeWake(fire_on=1))
+    monkeypatch.setattr(c, "_record_utterance", lambda: b"pcm")
+    assert c._scan_for_wake_and_record(5.0) == (b"pcm", True)
+
+
+def test_an_unbounded_slice_blocks_until_the_wake_word(monkeypatch):
+    """slice_sec=None keeps _capture_utterance's original semantics."""
+    c = _watch_client(FakeWake(fire_on=4))
+    monkeypatch.setattr(c, "_record_utterance", lambda: b"pcm")
+    assert c._scan_for_wake_and_record(None) == (b"pcm", True)
+    assert c.wake_word.calls == 4
+
+
+def test_capture_utterance_still_blocks_until_the_wake_word(monkeypatch):
+    """The sync entry point is unchanged for every non-idle caller."""
+    c = _watch_client(FakeWake(fire_on=3))
+    monkeypatch.setattr(c, "_record_utterance", lambda: b"pcm")
+    assert c._capture_utterance() == b"pcm"
