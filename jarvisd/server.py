@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime, timedelta
 
 import websockets
@@ -47,6 +48,17 @@ REMINDER_TICK_SEC = 15
 # debounce is Claude Code's own idle notification, not this interval, so this
 # only bounds how late an announcement can be.
 CLAUDE_WATCH_TICK_SEC = 15
+# How long a permission prompt must sit unanswered before it is announced.
+# This is the debounce for the WAITING case, standing in for an idle signal
+# Claude Code does not send while a dialog is open (measured: a prompt sat
+# `waiting` for 197 seconds with idle_ts still null). A prompt you are at the
+# keyboard for gets answered well inside a minute, so the anti-goal the idle
+# signal protected -- never announce while the user is watching -- still holds.
+WAIT_ANNOUNCE_SEC = 60
+# How much of what Claude said the SPOKEN notice carries. The record keeps 500
+# characters for `claude_status` to read out on request; a toast that recites
+# 500 characters of a merge report is the one that gets the feature muted.
+ANNOUNCE_MESSAGE_CAP = 120
 
 
 class JarvisServer:
@@ -470,7 +482,21 @@ class JarvisServer:
             await asyncio.sleep(REMINDER_TICK_SEC)
 
     @staticmethod
-    def announcement_for(record: dict) -> str | None:
+    def _announce_snippet(message) -> str:
+        """What Claude said, trimmed to about a sentence, for speaking aloud."""
+        spoken = re.sub(r"\s+", " ", strip_markdown(str(message))).strip()
+        if len(spoken) <= ANNOUNCE_MESSAGE_CAP:
+            return spoken
+        head = spoken[:ANNOUNCE_MESSAGE_CAP]
+        # Prefer a real sentence end, so the notice does not stop mid-clause.
+        cut = max(head.rfind(". "), head.rfind("! "), head.rfind("? "))
+        if cut > 0:
+            return head[:cut + 1]
+        cut = head.rfind(" ")
+        return (head[:cut] if cut > 0 else head).rstrip(",;:") + "..."
+
+    @staticmethod
+    def announcement_for(record: dict, *, now=time.time) -> str | None:
         """What to say about one Claude Code session, or None to stay quiet.
 
         Static and pure so every wording and guard case is testable without a
@@ -490,21 +516,32 @@ class JarvisServer:
         """
         idle_ts = record.get("idle_ts")
         since = record.get("since")
-        if not isinstance(idle_ts, (int, float)):
-            return None
-        if isinstance(since, (int, float)) and idle_ts < since:
+        state = record.get("state")
+        project = record.get("project") or "an unknown project"
+
+        # A fresh idle signal is always enough: it means Claude Code itself
+        # reported the session untended. Stale ones are ignored -- an idle that
+        # fired before the current state began describes a state that is gone.
+        fresh_idle = (isinstance(idle_ts, (int, float))
+                      and not (isinstance(since, (int, float)) and idle_ts < since))
+
+        if state == claude_sessions.WAITING:
+            # No idle signal arrives while a permission dialog is open, so the
+            # length of the wait is the evidence instead.
+            waited = (now() - since) if isinstance(since, (int, float)) else 0
+            if fresh_idle or waited >= WAIT_ANNOUNCE_SEC:
+                return f"Claude needs your input in {project}."
             return None
 
-        project = record.get("project") or "an unknown project"
-        state = record.get("state")
-        if state == claude_sessions.WAITING:
-            return f"Claude needs your input in {project}."
+        if not fresh_idle:
+            return None
+
         if state == claude_sessions.DONE:
             message = record.get("last_message")
             if not message:
                 return f"Claude finished in {project}."
-            spoken = re.sub(r"\s+", " ", strip_markdown(str(message))).strip()
-            return f"Claude finished in {project}. It said: {spoken}"
+            return (f"Claude finished in {project}. It said: "
+                    f"{JarvisServer._announce_snippet(message)}")
         return None
 
     def _read_claude_sessions(self) -> list[dict]:

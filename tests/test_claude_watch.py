@@ -12,6 +12,7 @@ checked without a server, a clock or a notifier.
 import asyncio
 
 from jarvisd import claude_sessions as cs
+from jarvisd import server as server_module
 from jarvisd.server import JarvisServer
 
 
@@ -85,9 +86,70 @@ def test_a_working_session_announces_nothing():
     assert JarvisServer.announcement_for(_rec(cs.WORKING, idle=True)) is None
 
 
-def test_no_idle_signal_announces_nothing():
-    """Being at the keyboard must stay silent; idle_prompt is the debounce."""
-    assert JarvisServer.announcement_for(_rec(cs.WAITING, idle=False)) is None
+def test_a_wait_younger_than_the_threshold_announces_nothing():
+    """Being at the keyboard must stay silent. For a permission prompt the
+    debounce is the length of the wait itself: answer it and nothing is said."""
+    record = _rec(cs.WAITING, idle=False, since=1000.0)
+    now = lambda: 1000.0 + server_module.WAIT_ANNOUNCE_SEC - 1
+    assert JarvisServer.announcement_for(record, now=now) is None
+
+
+def test_an_open_permission_prompt_announces_without_an_idle_signal():
+    """Measured live: Claude Code sends NO idle notification while a
+    permission dialog is open -- a prompt sat `waiting` for 197s with
+    idle_ts still null -- so gating this case on idle meant it could never
+    fire at all. The wait itself is the evidence nobody is answering."""
+    record = _rec(cs.WAITING, idle=False, since=1000.0)
+    now = lambda: 1000.0 + server_module.WAIT_ANNOUNCE_SEC
+    assert JarvisServer.announcement_for(record, now=now) == (
+        "Claude needs your input in proj.")
+
+
+def test_an_idle_signal_still_announces_a_wait_immediately():
+    """If Claude Code ever does send idle during a dialog, honour it rather
+    than waiting out the threshold."""
+    record = _rec(cs.WAITING, idle=True, since=1000.0)
+    now = lambda: 1000.0 + 1
+    assert JarvisServer.announcement_for(record, now=now) is not None
+
+
+def test_a_finished_session_still_needs_the_idle_signal():
+    """The `done` case keeps the original debounce, because it demonstrably
+    works: idle fires for a session sitting at an empty prompt."""
+    record = _rec(cs.DONE, idle=False, since=1000.0, message="pushed it")
+    now = lambda: 1000.0 + 99999
+    assert JarvisServer.announcement_for(record, now=now) is None
+
+
+def test_a_long_running_turn_still_announces_nothing():
+    """Only a WAIT earns the elapsed-time route; a long turn is not news."""
+    record = _rec(cs.WORKING, idle=False, since=1000.0)
+    now = lambda: 1000.0 + 99999
+    assert JarvisServer.announcement_for(record, now=now) is None
+
+
+def test_the_spoken_message_is_trimmed_to_about_a_sentence():
+    """Production read out ~500 characters of a merge report as a toast."""
+    long_message = ("Merged, pushed, and the daemon is back up on the new code. "
+                    "Master is 5722a68, a no-ff merge of all twelve commits, and "
+                    "the suite is green apart from three known failures.")
+    text = JarvisServer.announcement_for(
+        _rec(cs.DONE, message=long_message), now=lambda: 1000.0)
+    assert "Merged, pushed, and the daemon is back up on the new code." in text
+    assert "5722a68" not in text
+    assert len(text) < 200
+
+
+def test_a_message_with_no_sentence_end_is_cut_cleanly():
+    text = JarvisServer.announcement_for(
+        _rec(cs.DONE, message="x" * 400), now=lambda: 1000.0)
+    assert len(text) < 200
+
+
+def test_a_short_message_is_quoted_whole():
+    text = JarvisServer.announcement_for(
+        _rec(cs.DONE, message="pushed the commit"), now=lambda: 1000.0)
+    assert text.endswith("pushed the commit")
 
 
 def test_a_stale_idle_from_a_previous_state_announces_nothing():
