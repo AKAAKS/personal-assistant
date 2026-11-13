@@ -165,6 +165,26 @@ def test_the_summary_names_the_file_and_the_events(tmp_path):
     assert all(event in summary for event in EVENTS)
 
 
+def test_a_moved_script_path_is_updated_not_duplicated(tmp_path):
+    """The hook is registered by absolute path, so moving the repo -- or
+    installing from a worktree and then from the merged checkout -- must
+    re-point the existing entry rather than leave a dead one behind."""
+    path = _settings(tmp_path, {})
+    installer.install(path, script_path=r"C:\old\scripts\claude_status_hook.py")
+    installer.install(path, script_path=r"C:\new\scripts\claude_status_hook.py")
+    commands = [h["command"] for h in _commands(_read(path)["hooks"])]
+    assert all("old" not in c for c in commands)
+    assert len([c for c in commands if "new" in c]) == len(EVENTS)
+
+
+def test_a_moved_script_path_is_reported(tmp_path):
+    path = _settings(tmp_path, {})
+    installer.install(path, script_path=r"C:\old\scripts\claude_status_hook.py")
+    summary = installer.install(path,
+                                script_path=r"C:\new\scripts\claude_status_hook.py")
+    assert "updated" in summary.lower()
+
+
 def test_the_settings_file_stays_readable_json_with_indentation(tmp_path):
     path = _settings(tmp_path, {"model": "opus"})
     installer.install(path, script_path=SCRIPT)

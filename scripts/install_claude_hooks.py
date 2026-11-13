@@ -78,14 +78,43 @@ def _load(settings_path: Path) -> dict:
     return data
 
 
-def _already_registered(entries) -> bool:
+def _ours(hook) -> bool:
+    return isinstance(hook, dict) and _MARKER in str(hook.get("command", ""))
+
+
+def _repoint(entries, wanted_hook) -> tuple[list, str]:
+    """Return (`entries` with our hook re-pointed, outcome).
+
+    Outcome is "same" if ours is already there and identical, "updated" if it
+    was there pointing somewhere else, or "missing" if it is not there at all.
+    The hook is registered by absolute path, so moving the repo -- or
+    installing from a worktree and then from the merged checkout -- leaves a
+    dead entry unless we replace it in place.
+    """
+    outcome = "missing"
+    result = []
     for entry in entries or []:
         if not isinstance(entry, dict):
+            result.append(entry)
             continue
-        for hook in entry.get("hooks", []):
-            if isinstance(hook, dict) and _MARKER in str(hook.get("command", "")):
-                return True
-    return False
+        hooks = entry.get("hooks")
+        if not isinstance(hooks, list) or not any(_ours(h) for h in hooks):
+            result.append(entry)
+            continue
+        kept = []
+        for hook in hooks:
+            if not _ours(hook):
+                kept.append(hook)
+                continue
+            if hook == wanted_hook:
+                outcome = "same" if outcome == "missing" else outcome
+                kept.append(hook)
+            else:
+                outcome = "updated"
+                kept.append(dict(wanted_hook))
+        entry = dict(entry, hooks=kept)
+        result.append(entry)
+    return result, outcome
 
 
 def install(settings_path, *, script_path, backup=True) -> str:
@@ -98,17 +127,23 @@ def install(settings_path, *, script_path, backup=True) -> str:
     if not isinstance(hooks, dict):
         hooks = {}
 
-    added = []
+    added, updated = [], []
     for event, entries in wanted.items():
         existing = hooks.get(event)
         if not isinstance(existing, list):
             existing = [] if existing is None else [existing]
-        if _already_registered(existing):
+        repointed, outcome = _repoint(existing, entries[0]["hooks"][0])
+        if outcome == "same":
+            hooks[event] = repointed
             continue
-        hooks[event] = existing + entries
+        if outcome == "updated":
+            hooks[event] = repointed
+            updated.append(event)
+            continue
+        hooks[event] = repointed + entries
         added.append(event)
 
-    if not added:
+    if not added and not updated:
         return (f"The Claude Code status hooks are already installed in "
                 f"{settings_path} for: {', '.join(EVENTS)}. Nothing changed.")
 
@@ -125,10 +160,14 @@ def install(settings_path, *, script_path, backup=True) -> str:
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
 
-    return (f"Registered the Claude Code status hook in {settings_path} for: "
-            f"{', '.join(added)}.{backup_note} "
-            f"Events already present were left alone; the full set is "
-            f"{', '.join(EVENTS)}.")
+    parts = []
+    if added:
+        parts.append(f"registered it for: {', '.join(added)}")
+    if updated:
+        parts.append(f"updated the script path for: {', '.join(updated)}")
+    return (f"Claude Code status hook in {settings_path} -- {'; '.join(parts)}."
+            f"{backup_note} Hooks belonging to anything else were left alone; "
+            f"the full set this installs is {', '.join(EVENTS)}.")
 
 
 if __name__ == "__main__":
