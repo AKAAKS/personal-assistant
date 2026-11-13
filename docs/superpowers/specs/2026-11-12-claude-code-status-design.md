@@ -395,3 +395,36 @@ far" -- the turn that asked it.
 The lesson for the next reader: the tests and two code reviews all passed over
 this, because every one of them reasoned from the event list the build started
 with. Only running the thing found it.
+
+## The idle signal does not arrive during a permission prompt
+
+Measured on the merged code, with a real prompt left open:
+
+    11c711c9  state=waiting  project=akshi  since=197s ago
+              tool=AskUserQuestion  idle_ts=null
+
+`PermissionRequest` **does** fire for an `async` hook -- previously unconfirmed
+-- and it captures the tool name. But Claude Code sends no idle `Notification`
+while the dialog is open, so `idle_ts` stayed null and `announcement_for`
+returned None. Gated on idle, the headline case could never fire at all.
+
+The same tick announced the `done` case correctly in the same minute:
+
+    00:07:26 notify[urgent] -> local toast/chime: Claude finished in
+             personal-assistant. It said: ...
+
+So idle fires for a session sitting at an empty prompt, and not for one sitting
+on a dialog.
+
+**`WAIT_ANNOUNCE_SEC = 60`.** For `waiting`, the length of the wait is now the
+debounce: a prompt open for a minute is announced whether or not an idle signal
+ever arrives. This keeps the third anti-goal intact -- a prompt the user is
+sitting in front of is answered well inside a minute, so an announcement still
+only reaches someone who has walked away. A fresh idle signal still short-cuts
+the wait if one ever does arrive, and `done` keeps the original idle gate,
+which demonstrably works.
+
+**`ANNOUNCE_MESSAGE_CAP = 120`.** The first production announcement recited
+about 500 characters of a merge report into a toast. The record still keeps 500
+for `claude_status` to read back on request; the spoken notice now carries
+about a sentence, cut at a sentence boundary where there is one.
