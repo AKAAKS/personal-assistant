@@ -30,7 +30,7 @@ Design docs: `docs/superpowers/specs/`.
   candidate, $0 otherwise); nothing is written without your approval.
 - **Offline-first voice** — "hey jarvis" wake word, Whisper STT, and TTS that
   prefers offline SAPI5 but can use free neural voices, with automatic fallback.
-- **Built test-first** — **1,318 passing tests**, a thin-client/daemon split
+- **Built test-first** — **1,442 passing tests**, a thin-client/daemon split
   designed for a future Raspberry Pi satellite, and loopback-only networking.
 
 ## Setup
@@ -184,6 +184,33 @@ JARVIS can read and write your PC clipboard (via `pyperclip`):
   (**get_clipboard**).
 - "Copy that command to my clipboard" — puts text on the clipboard so you can
   paste it anywhere with Ctrl+V (**set_clipboard**).
+
+## Claude Code sessions
+
+JARVIS can tell you what the Claude Code sessions in your terminals are doing,
+so you don't have to walk back to the screen to find out:
+
+- "Is Claude still going?" / "has it finished?" / "is it waiting on me?" —
+  **claude_status** reports each live session: which project, whether it is
+  working, waiting on a permission prompt, or finished (and what it said).
+- When a session has sat unattended for about a minute, JARVIS says so
+  unprompted — "Claude needs your input in personal-assistant." Those notices
+  are perishable: if there is no way to reach you right now they are dropped,
+  never banked for the morning.
+
+It costs nothing per check: no screenshots, no vision, no extra API calls. Six
+Claude Code lifecycle hooks write one small file per session under
+`data/claude_sessions/`, and the tool reads them. A session's record expires on
+process liveness rather than a timer, so a session parked on a permission prompt
+for three hours is still reported truthfully, while a dead one stops claiming to
+be busy.
+
+Install the hooks once (merges into `~/.claude/settings.json`, backs it up
+first, and is safe to re-run):
+
+    python scripts/install_claude_hooks.py
+
+JARVIS only ever reports. It cannot answer a prompt or approve a tool call.
 
 ## Gmail & Calendar
 
