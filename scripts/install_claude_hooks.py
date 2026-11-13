@@ -33,10 +33,13 @@ EVENTS = (
     "SessionStart",       # a terminal opened -> idle, nothing asked of it yet
     "UserPromptSubmit",   # a turn started -> working, clear the last message
     "PermissionRequest",  # blocked on a tool approval -> waiting
+    "PermissionDenied",   # the user refused it; the wait is over -> working
     "PostToolUse",        # the tool ran, so the prompt was answered -> working
     "PostToolUseFailure", # a denied or failed tool; same conclusion
     "Notification",       # permission prompt -> waiting; idle -> announceable
     "Stop",               # the turn finished -> done, record what it said
+    "StopFailure",        # the turn ended in an error; still finished
+    "SubagentStop",       # a subagent/forked session's turn finished
     "SessionEnd",         # the session closed -> forget it
 )
 

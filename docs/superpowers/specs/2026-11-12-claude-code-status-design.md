@@ -354,3 +354,44 @@ signal while a permission dialog is open. Satisfying the guard from the
 permission event instead would announce while the user is sitting at the
 keyboard, which the third anti-goal forbids, so this stays as designed until
 the idle signal is observed in an interactive session.
+
+## `Stop` is one of three ways a turn ends
+
+Found by running the finished feature against this machine rather than against
+its tests. Asked in earnest, `claude_status` answered:
+
+    Claude is working in claude-code-status (session 1), 2 minutes so far.
+    Claude is working in claude-code-status (session 2), 35 minutes so far.
+    Claude is working in claude-code-status (session 3), 35 minutes so far.
+    Claude is working in claude-code-status (session 4), 35 minutes so far.
+    Claude is working in claude-code-status (session 5), 36 minutes so far.
+    Claude is working in akshi, 37 minutes so far.
+
+One clause of six was true. Liveness was working correctly -- it had already
+dropped two records whose processes had exited -- but a finished *subagent*
+session is still a live process, and nothing retired it.
+
+Claude Code 2.1.323's internal event list is longer than the documented table:
+
+    PostToolBatch, Notification, UserPromptSubmit, UserPromptExpansion,
+    SessionStart, SessionEnd, Stop, StopFailure, SubagentStart, SubagentStop,
+    PreCompact, PostCompact, PreModelSwitch, PostModelSwitch,
+    PermissionRequest, PermissionDenied, Setup, TeammateIdle, Task
+
+So `Stop` covers only one of three endings. Now registered as well:
+
+- **`SubagentStop`** -- a subagent or forked session's turn. This was the whole
+  six-clause answer above: every agent dispatched during the build started a
+  session that never reported finishing.
+- **`StopFailure`** -- a turn that ended in an error, which otherwise claimed
+  to be working for as long as its process lived.
+- **`PermissionDenied`** -- a prompt the user refused, which ends the wait just
+  as `PostToolUseFailure` does.
+
+Eleven events in total. After the re-install the same question answered with
+one clause: "Claude is working in claude-code-status, less than a minute so
+far" -- the turn that asked it.
+
+The lesson for the next reader: the tests and two code reviews all passed over
+this, because every one of them reasoned from the event list the build started
+with. Only running the thing found it.

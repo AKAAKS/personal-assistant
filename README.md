@@ -30,7 +30,7 @@ Design docs: `docs/superpowers/specs/`.
   candidate, $0 otherwise); nothing is written without your approval.
 - **Offline-first voice** — "hey jarvis" wake word, Whisper STT, and TTS that
   prefers offline SAPI5 but can use free neural voices, with automatic fallback.
-- **Built test-first** — **1,467 passing tests**, a thin-client/daemon split
+- **Built test-first** — **1,470 passing tests**, a thin-client/daemon split
   designed for a future Raspberry Pi satellite, and loopback-only networking.
 
 ## Setup
@@ -199,7 +199,7 @@ so you don't have to walk back to the screen to find out:
   never banked for the morning.
 
 It costs nothing per check: no screenshots, no vision, no extra API calls.
-Eight Claude Code lifecycle hooks write one small file per session under
+Eleven Claude Code lifecycle hooks write one small file per session under
 `data/claude_sessions/`, and the tool reads them. A session's record expires on
 process liveness rather than a timer, so a session parked on a permission prompt
 for three hours is still reported truthfully, while a dead one stops claiming to

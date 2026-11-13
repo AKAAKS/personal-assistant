@@ -16,8 +16,8 @@ import pytest
 from scripts import install_claude_hooks as installer
 
 EVENTS = ("SessionStart", "UserPromptSubmit", "PermissionRequest",
-          "PostToolUse", "PostToolUseFailure", "Notification", "Stop",
-          "SessionEnd")
+          "PermissionDenied", "PostToolUse", "PostToolUseFailure",
+          "Notification", "Stop", "StopFailure", "SubagentStop", "SessionEnd")
 
 SCRIPT = r"C:\repo\scripts\claude_status_hook.py"
 

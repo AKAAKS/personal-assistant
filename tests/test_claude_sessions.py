@@ -116,6 +116,43 @@ def test_a_new_prompt_clears_the_previous_last_message(tmp_path):
     assert rec["last_message"] is None
 
 
+def test_a_subagent_turn_ending_finishes_the_session(tmp_path):
+    """A subagent or forked session ends its turn with SubagentStop, not Stop.
+    Observed live: five such sessions sat on `working` for 35 minutes each,
+    because their processes were still alive and nothing retired them."""
+    _start(tmp_path)
+    cs.apply_event({"hook_event_name": "UserPromptSubmit", "session_id": "s1"},
+                   directory=tmp_path)
+    cs.apply_event({"hook_event_name": "SubagentStop", "session_id": "s1",
+                    "last_assistant_message": "review done"},
+                   directory=tmp_path)
+    rec = cs.read_raw(directory=tmp_path)[0]
+    assert rec["state"] == cs.DONE
+    assert rec["last_message"] == "review done"
+
+
+def test_a_failed_turn_finishes_the_session(tmp_path):
+    """`Stop` is one of three ways a turn ends; an errored turn fires
+    StopFailure, and without it the record claims to be working forever."""
+    _start(tmp_path)
+    cs.apply_event({"hook_event_name": "UserPromptSubmit", "session_id": "s1"},
+                   directory=tmp_path)
+    cs.apply_event({"hook_event_name": "StopFailure", "session_id": "s1"},
+                   directory=tmp_path)
+    assert cs.read_raw(directory=tmp_path)[0]["state"] == cs.DONE
+
+
+def test_a_denied_permission_ends_the_wait(tmp_path):
+    _start(tmp_path)
+    cs.apply_event({"hook_event_name": "PermissionRequest", "session_id": "s1",
+                    "tool_name": "Bash"}, directory=tmp_path, now=lambda: 2000.0)
+    cs.apply_event({"hook_event_name": "PermissionDenied", "session_id": "s1"},
+                   directory=tmp_path, now=lambda: 2100.0)
+    rec = cs.read_raw(directory=tmp_path)[0]
+    assert rec["state"] == cs.WORKING
+    assert rec["tool_name"] is None
+
+
 def test_an_opened_session_is_idle_not_working(tmp_path):
     """SessionStart means a terminal was opened, not that a turn is in flight.
     Calling it `working` made three terminals left open all day answer

@@ -283,7 +283,8 @@ def apply_event(payload: dict, *, directory=DIR, now=time.time,
             # use Bash" about an Edit prompt -- which is a confident wrong
             # answer, not a vaguer one.
             record["tool_name"] = None
-        elif event in ("PostToolUse", "PostToolUseFailure"):
+        elif event in ("PostToolUse", "PostToolUseFailure",
+                       "PermissionDenied"):
             # A tool that has finished -- successfully or not -- is proof that
             # the permission prompt in front of it was answered. Nothing else
             # tells us that: PermissionRequest fires before the prompt, and the
@@ -295,9 +296,9 @@ def apply_event(payload: dict, *, directory=DIR, now=time.time,
             # change -- a SECOND prompt in the same turn reused the first one's
             # key and was never announced at all.
             #
-            # Both events are needed: the published table says PostToolUse runs
-            # "after successful tool", and a denied prompt fires
-            # PostToolUseFailure instead.
+            # All three are needed: the published table says PostToolUse runs
+            # "after successful tool", a failing tool fires PostToolUseFailure,
+            # and a prompt the user refuses fires PermissionDenied.
             new_state = WORKING
             record["tool_name"] = None
         elif event == "PermissionRequest":
@@ -309,7 +310,13 @@ def apply_event(payload: dict, *, directory=DIR, now=time.time,
             else:
                 # Idle is an event about the current state, not a state.
                 idle_ts = ts
-        elif event == "Stop":
+        elif event in ("Stop", "StopFailure", "SubagentStop"):
+            # `Stop` is only ONE of three ways a turn ends. A subagent or
+            # forked session ends with SubagentStop, and an errored turn with
+            # StopFailure. Registering only Stop left every agent session
+            # claiming to be working for as long as its process lived --
+            # observed live as five sessions "working, 35 minutes so far" when
+            # one real turn was in flight.
             new_state = DONE
             record["tool_name"] = None  # the prompt, if any, is answered
             message = payload.get("last_assistant_message")
