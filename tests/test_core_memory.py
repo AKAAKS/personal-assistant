@@ -1,3 +1,4 @@
+import re
 """Tests for Task 4: profile-aware system prompt, turn persistence, history reload."""
 
 from types import SimpleNamespace
@@ -798,3 +799,25 @@ def test_run_script_executes_after_a_real_turn_boundary():
     second = ai.execute_guarded("run_script", {"name": "x.py"})
     assert second == "ran it"
     assert executed == [{"name": "x.py"}]
+
+
+def test_a_live_user_turn_carries_the_time_it_was_said():
+    """A turn is current when appended, but it sits in self.conversation for the
+    life of the daemon -- hours -- with nothing else saying when it was said."""
+    from jarvisd.core import Assistant
+    stamped = Assistant._stamped("remind me in two minutes about the light")
+    assert re.match(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] remind me in two minutes",
+                    stamped)
+
+
+def test_the_stamp_is_not_persisted_so_stamps_never_stack(tmp_path):
+    """_record_turn stores the raw text; only the in-context copy is stamped.
+    Otherwise a restored turn would be stamped twice, once per round trip."""
+    conn = db.connect(str(tmp_path / "jarvis.db"))
+    store = MemoryStore(conn)
+    ai = make_assistant(memory_store=store)
+    ai._record_turn("user", "remind me in two minutes")
+    row = conn.execute("SELECT content FROM messages").fetchone()
+    assert row["content"] == "remind me in two minutes"
+    assert store.load_history(max_turns=10) == [] or "[" in (
+        store.load_history(max_turns=10)[0]["content"])

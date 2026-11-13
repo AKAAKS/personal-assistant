@@ -90,10 +90,13 @@ def test_load_history_merges_consecutive_same_role(tmp_path):
     store.record("user", "actually wait")
     store.record("assistant", "sure, go ahead")
     history = store.load_history()
-    assert history == [
-        {"role": "user", "content": "hi\nactually wait"},
-        {"role": "assistant", "content": "sure, go ahead"},
-    ]
+    # each merged user row keeps its own stamp, so a pause inside one turn shows
+    assert len(history) == 2
+    assert history[0]["role"] == "user"
+    assert history[0]["content"].count("] ") == 2
+    assert history[0]["content"].splitlines()[0].endswith("hi")
+    assert history[0]["content"].splitlines()[1].endswith("actually wait")
+    assert history[1] == {"role": "assistant", "content": "sure, go ahead"}
 
 
 def test_load_history_drops_trailing_unanswered_user_turn(tmp_path):
@@ -103,10 +106,9 @@ def test_load_history_drops_trailing_unanswered_user_turn(tmp_path):
     store.record("user", "q2 unanswered")
     history = store.load_history()
     assert history[-1]["role"] == "assistant"
-    assert history == [
-        {"role": "user", "content": "q1"},
-        {"role": "assistant", "content": "a1"},
-    ]
+    assert len(history) == 2
+    assert history[0]["role"] == "user" and history[0]["content"].endswith("q1")
+    assert history[1] == {"role": "assistant", "content": "a1"}
 
 
 def test_load_history_starts_with_user(tmp_path):
@@ -121,10 +123,9 @@ def test_load_history_starts_with_user(tmp_path):
     store.record("assistant", "a1")
     history = store.load_history()
     assert history[0]["role"] == "user"
-    assert history == [
-        {"role": "user", "content": "q1"},
-        {"role": "assistant", "content": "a1"},
-    ]
+    assert len(history) == 2
+    assert history[0]["content"].endswith("q1")
+    assert history[1] == {"role": "assistant", "content": "a1"}
 
 
 def test_load_history_valid_alternation_shape(tmp_path):
@@ -138,3 +139,40 @@ def test_load_history_valid_alternation_shape(tmp_path):
     assert roles[-1] == "assistant"
     for i in range(len(roles) - 1):
         assert roles[i] != roles[i + 1]
+
+
+def _insert(conn, ts, role, content):
+    conn.execute("INSERT INTO messages (ts, role, content) VALUES (?, ?, ?)",
+                 (ts, role, content))
+    conn.commit()
+
+
+def test_load_history_stamps_a_user_turn_with_when_it_was_said(tmp_path):
+    """Restored turns arrive with no time of their own, so the model reads them
+    as if they had just happened. Observed: a reminder set at 19:33 ("two
+    minutes from now") was reported at 23:59 as still about to fire."""
+    store, conn = make_store(tmp_path)
+    _insert(conn, "2026-11-12T19:33:08", "user", "Remind me in two minutes about the light.")
+    _insert(conn, "2026-11-12T19:33:09", "assistant", "Done - reminder set for two minutes from now.")
+    history = store.load_history()
+    assert history[0]["content"] == (
+        "[2026-11-12 19:33] Remind me in two minutes about the light.")
+
+
+def test_load_history_leaves_assistant_turns_unstamped(tmp_path):
+    """Only user turns carry the marker, so the model never sees the format in
+    its own voice and starts reproducing it in replies."""
+    store, conn = make_store(tmp_path)
+    _insert(conn, "2026-11-12T19:33:08", "user", "hello")
+    _insert(conn, "2026-11-12T19:33:09", "assistant", "hi there")
+    history = store.load_history()
+    assert history[1] == {"role": "assistant", "content": "hi there"}
+
+
+def test_load_history_survives_an_unparseable_timestamp(tmp_path):
+    """A bad ts must not cost us the turn."""
+    store, conn = make_store(tmp_path)
+    _insert(conn, "not a timestamp", "user", "hello")
+    _insert(conn, "2026-11-12T19:33:09", "assistant", "hi there")
+    history = store.load_history()
+    assert history[0]["content"] == "hello"

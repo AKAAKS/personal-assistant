@@ -5,6 +5,7 @@ from datetime import datetime
 
 import anthropic
 
+from jarvisd.memory_store import MemoryStore
 from jarvisd.tools import build_registry
 from router.classifier import IntentClassifier, Tier
 from router.cost_tracker import CostTracker
@@ -321,7 +322,12 @@ class Assistant:
             "text": (
                 f"The current local date and time is {now:%A, %Y-%m-%d %H:%M %Z}. "
                 "Use this to resolve relative times (e.g. 'in 2 minutes', 'in an hour', "
-                "'tomorrow at 8am') into absolute times when setting reminders."
+                "'tomorrow at 8am') into absolute times when setting reminders. "
+                "Earlier user turns are prefixed with the time they were said, like "
+                "[2026-01-31 19:33]. A relative time inside an earlier turn, or in your "
+                "own reply to it, was relative to THAT moment, not to now: a reminder "
+                "you confirmed hours ago has already fired. Never report what a reminder "
+                "or timer is doing from the conversation -- check it with a tool."
             ),
         })
         # Current location (uncached, like the time block — it can change on a
@@ -349,6 +355,19 @@ class Assistant:
                     "text": f"The user's home base is {home.place}.",
                 })
         return blocks
+
+    @staticmethod
+    def _stamped(user_message: str) -> str:
+        """Date a user turn as it enters the conversation.
+
+        The turn is current NOW, but it stays in self.conversation for the life
+        of the daemon -- which can run many hours -- and nothing else in the
+        context says when it was said. Restored turns get the same marker from
+        their stored ts (MemoryStore.stamp). Only the in-context copy is
+        stamped; _record_turn persists the raw text, so stamps never stack.
+        """
+        return MemoryStore.stamp(datetime.now().isoformat(timespec="seconds"),
+                                 user_message)
 
     def _record_turn(self, role: str, text: str) -> None:
         """Persist a turn to episodic memory; never let a persistence failure break the reply."""
@@ -416,7 +435,7 @@ class Assistant:
         if tier == Tier.LOCAL:
             resp = self._handle_local(user_message)
             if resp is not None:
-                self.conversation.append({"role": "user", "content": user_message})
+                self.conversation.append({"role": "user", "content": self._stamped(user_message)})
                 self.conversation.append({"role": "assistant", "content": resp})
                 self._record_turn("assistant", resp)
                 return resp
@@ -455,7 +474,7 @@ class Assistant:
 
     def _claude_loop(self, user_message: str, model: str, autonomous: bool = False) -> str:
         """Agentic tool-use loop with Claude."""
-        self.conversation.append({"role": "user", "content": user_message})
+        self.conversation.append({"role": "user", "content": self._stamped(user_message)})
         self._compact_history()
 
         pause_continuations = 0
