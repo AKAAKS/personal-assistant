@@ -87,11 +87,26 @@ class Notifier:
         except Exception as e:
             log.error("Failed to enqueue notice: %s", e)
 
-    def notify(self, text: str, priority: str = "low") -> None:
-        """Deliver or queue a proactive message. Never raises."""
+    def notify(self, text: str, priority: str = "low", *,
+               perishable: bool = False) -> None:
+        """Deliver or queue a proactive message. Never raises.
+
+        `perishable` means the notice is only true now: deliver it through a
+        live route or drop it, never bank it. "Claude has been waiting on you"
+        banked at midnight and read out at 8am, about a session that ended
+        hours ago, is worse than silence -- and the queue is designed to do
+        exactly that, since drain() appends to the next turn whenever it comes.
+
+        It is keyword-only so no existing positional call site changes, and it
+        defaults to False because reminders and timers DO want to be banked.
+        """
         try:
             now = self.now()
             if self._is_quiet(now) and priority not in IGNORES_QUIET_HOURS:
+                if perishable:
+                    log.info("notify[%s] -> dropped (quiet hours, perishable): %s",
+                             priority, text)
+                    return
                 log.info("notify[%s] -> queued (quiet hours): %s", priority, text)
                 self._enqueue(text)
                 return
@@ -129,11 +144,19 @@ class Notifier:
                     except Exception as e:
                         log.warning("ha_client.send_notification failed: %s", e)
 
+                if perishable:
+                    log.info("notify[%s] -> dropped (no route, perishable): %s",
+                             priority, text)
+                    return
                 log.info("notify[%s] -> queued (no route available): %s", priority, text)
                 self._enqueue(text)
                 return
 
             # priority == "low" (or any unrecognized value): always queue
+            if perishable:
+                log.info("notify[%s] -> dropped (perishable, not interrupting): %s",
+                         priority, text)
+                return
             self._enqueue(text)
         except Exception as e:
             log.error("notify() failed unexpectedly: %s", e)
