@@ -91,6 +91,8 @@ CAPABILITIES = [
      ("open_url_browser",)),
     ("- Clipboard: read what the user just copied (get_clipboard) or copy text to their clipboard for pasting (set_clipboard).",
      ("get_clipboard", "set_clipboard")),
+    ('- Claude Code sessions on the PC: claude_status says whether each one is working, waiting on a permission prompt, or finished (and what it said). Use it for "is Claude still going?", "has it finished?", "is it waiting on me?" — it is about the coding sessions in their terminals, not about you.',
+     ("claude_status",)),
 ]
 
 # The "How you work" lines that are about a SPECIFIC tool rather than about
