@@ -82,6 +82,8 @@ TOOL_PERMISSIONS = {
     # Clipboard
     "get_clipboard": "read_only",
     "set_clipboard": "write",
+    # Claude Code session status (read-only: it reports, never answers a prompt)
+    "claude_status": "read_only",
 }
 
 DEFAULT_PERMISSION = "write"
