@@ -31,16 +31,22 @@ import asyncio
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 
 import websockets
 
+from jarvisd import claude_sessions
 from jarvisd.text_format import strip_markdown
 
 log = logging.getLogger(__name__)
 
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024  # 15s of 16kHz int16 is ~0.5MB; generous cap
 REMINDER_TICK_SEC = 15
+# How often to look for a Claude Code session that has gone unattended. The
+# debounce is Claude Code's own idle notification, not this interval, so this
+# only bounds how late an announcement can be.
+CLAUDE_WATCH_TICK_SEC = 15
 
 
 class JarvisServer:
@@ -114,6 +120,15 @@ class JarvisServer:
         self._pending_interrupt: dict = {}
         self._loop = None  # captured in serve_forever(); lets worker threads push safely
         self._reminder_task = None
+        # The Claude Code watcher: its own task rather than folded into
+        # _reminder_tick, so a failure in one cannot take the other down.
+        self._claude_watch_task = None
+        # Announcement dedupe, in memory on purpose: the hook is the only
+        # writer of the state directory, and a daemon-side read-modify-write
+        # could revert a state the hook had just recorded. The cost is that a
+        # restart may re-announce a session that is STILL waiting, which is
+        # arguably the correct thing to do anyway.
+        self._claude_announced: set = set()
         self._ws_server = None  # set while serve_forever() is running (tests read the bound port)
 
     async def serve_forever(self):
@@ -126,6 +141,8 @@ class JarvisServer:
             self._ha_listener_task = asyncio.create_task(self.ha_listener.run())
         if self.habit_scan is not None:
             self._habit_task = asyncio.create_task(self._habit_tick())
+        if self.notifier is not None:
+            self._claude_watch_task = asyncio.create_task(self._claude_watch_tick())
         try:
             async with websockets.serve(
                 self.handle, self.host, self.port, max_size=MAX_MESSAGE_BYTES
@@ -151,6 +168,12 @@ class JarvisServer:
                 self._habit_task.cancel()
                 try:
                     await self._habit_task
+                except asyncio.CancelledError:
+                    pass
+            if self._claude_watch_task is not None:
+                self._claude_watch_task.cancel()
+                try:
+                    await self._claude_watch_task
                 except asyncio.CancelledError:
                     pass
 
@@ -445,6 +468,85 @@ class JarvisServer:
             except Exception:
                 log.exception("reminder tick failed")
             await asyncio.sleep(REMINDER_TICK_SEC)
+
+    @staticmethod
+    def announcement_for(record: dict) -> str | None:
+        """What to say about one Claude Code session, or None to stay quiet.
+
+        Static and pure so every wording and guard case is testable without a
+        server, a clock or a notifier.
+
+        Two guards decide silence:
+
+          - no `idle_ts`: Claude Code has not reported this session idle, so
+            the user is plausibly sitting in front of it. They can see the
+            screen; an announcement then is noise, and noise is what gets a
+            feature switched off.
+          - `idle_ts < since`: the idle fired, and then the state moved on. The
+            idle describes a state that no longer exists, so announcing it
+            would be announcing something that is no longer true.
+
+        A long turn is not news, so `working` says nothing either.
+        """
+        idle_ts = record.get("idle_ts")
+        since = record.get("since")
+        if not isinstance(idle_ts, (int, float)):
+            return None
+        if isinstance(since, (int, float)) and idle_ts < since:
+            return None
+
+        project = record.get("project") or "an unknown project"
+        state = record.get("state")
+        if state == claude_sessions.WAITING:
+            return f"Claude needs your input in {project}."
+        if state == claude_sessions.DONE:
+            message = record.get("last_message")
+            if not message:
+                return f"Claude finished in {project}."
+            spoken = re.sub(r"\s+", " ", strip_markdown(str(message))).strip()
+            return f"Claude finished in {project}. It said: {spoken}"
+        return None
+
+    def _read_claude_sessions(self) -> list[dict]:
+        """The live session records. A seam the tests replace."""
+        return claude_sessions.read_sessions()
+
+    async def _announce_idle_sessions(self) -> None:
+        """One pass of the watcher: announce each newly idle session once."""
+        if self.notifier is None:
+            return
+        records = self._read_claude_sessions()
+        live_keys = set()
+        for record in records:
+            key = (record.get("session_id"), record.get("state"),
+                   record.get("since"))
+            live_keys.add(key)
+            if key in self._claude_announced:
+                continue
+            text = self.announcement_for(record)
+            if not text:
+                continue
+            self._claude_announced.add(key)
+            try:
+                self.notifier.notify(text, priority="high", perishable=True)
+            except Exception:
+                log.exception("claude announcement failed")
+        # Forget keys whose session has moved on or ended, so the set cannot
+        # grow for as long as the daemon runs.
+        self._claude_announced &= live_keys
+
+    async def _claude_watch_tick(self):
+        """Background watcher: announce unattended Claude Code sessions.
+
+        Mirrors _reminder_tick: one bad pass (a vanished state directory, a
+        notifier hiccup) must not take the loop down for the rest of the day.
+        """
+        while True:
+            try:
+                await self._announce_idle_sessions()
+            except Exception:
+                log.exception("claude watch tick failed")
+            await asyncio.sleep(CLAUDE_WATCH_TICK_SEC)
 
     def _seconds_until_next_scan(self, now: datetime) -> float:
         """Seconds from `now` until the next HABIT_SCAN_HOUR (env, default 3am local).

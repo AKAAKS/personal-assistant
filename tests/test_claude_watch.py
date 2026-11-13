@@ -1,0 +1,259 @@
+"""The announcement tick: told about an unattended session without asking.
+
+The trigger is `idle_ts` -- Claude Code's own "idle ~60s" notification -- which
+is why no debounce is needed here: if the user were at the keyboard they would
+have answered the prompt and it would never have fired. Announcing while they
+are sitting in front of the screen is the design's third anti-goal.
+
+`announcement_for` is static and pure so every wording and guard case is
+checked without a server, a clock or a notifier.
+"""
+
+import asyncio
+
+from jarvisd import claude_sessions as cs
+from jarvisd.server import JarvisServer
+
+
+class FakeAssistant:
+    def process(self, text):
+        return f"echo: {text}"
+
+    def reset_conversation(self):
+        pass
+
+
+class RecordingNotifier:
+    def __init__(self):
+        self.calls = []
+
+    def notify(self, text, priority="low", *, perishable=False):
+        self.calls.append((text, priority, perishable))
+
+    def drain(self):
+        return []
+
+
+def _rec(state, *, idle=True, session_id="s1", project="proj", since=100.0,
+         message=None, idle_ts=None):
+    return {
+        "session_id": session_id,
+        "state": state,
+        "project": project,
+        "since": since,
+        "updated_ts": since,
+        "idle_ts": (idle_ts if idle_ts is not None else (since + 60.0 if idle else None)),
+        "last_message": message,
+        "tool_name": None,
+    }
+
+
+def _server(records, notifier):
+    server = JarvisServer(FakeAssistant(), notifier=notifier, port=0)
+    server._read_claude_sessions = lambda: list(records)
+    return server
+
+
+# --- wording ---------------------------------------------------------------
+
+def test_a_waiting_session_announces_that_it_needs_you():
+    text = JarvisServer.announcement_for(_rec(cs.WAITING))
+    assert text == "Claude needs your input in proj."
+
+
+def test_a_finished_session_announces_what_it_said():
+    text = JarvisServer.announcement_for(_rec(cs.DONE, message="pushed the commit"))
+    assert "Claude finished in proj" in text
+    assert "pushed the commit" in text
+
+
+def test_a_finished_session_with_no_message_still_announces():
+    assert JarvisServer.announcement_for(_rec(cs.DONE)) == "Claude finished in proj."
+
+
+def test_a_markdown_message_is_flattened_for_speech():
+    text = JarvisServer.announcement_for(_rec(cs.DONE, message="**done**\n\n- a\n- b"))
+    assert "\n" not in text and "**" not in text
+
+
+def test_a_session_with_no_project_still_announces():
+    text = JarvisServer.announcement_for(_rec(cs.WAITING, project=None))
+    assert "Claude needs your input" in text
+
+
+def test_a_working_session_announces_nothing():
+    assert JarvisServer.announcement_for(_rec(cs.WORKING, idle=True)) is None
+
+
+def test_no_idle_signal_announces_nothing():
+    """Being at the keyboard must stay silent; idle_prompt is the debounce."""
+    assert JarvisServer.announcement_for(_rec(cs.WAITING, idle=False)) is None
+
+
+def test_a_stale_idle_from_a_previous_state_announces_nothing():
+    """idle_ts < since: the state moved on after the idle fired, so the idle
+    describes a state that is gone."""
+    record = _rec(cs.DONE, since=500.0, idle_ts=400.0, message="old news")
+    assert JarvisServer.announcement_for(record) is None
+
+
+def test_an_idle_at_the_same_moment_as_the_state_change_announces():
+    record = _rec(cs.WAITING, since=500.0, idle_ts=500.0)
+    assert JarvisServer.announcement_for(record) is not None
+
+
+def test_an_unknown_state_announces_nothing():
+    assert JarvisServer.announcement_for(_rec("teleporting")) is None
+
+
+# --- the tick --------------------------------------------------------------
+
+def _tick(server):
+    asyncio.run(server._announce_idle_sessions())
+
+
+def test_a_tick_announces_a_waiting_session():
+    notifier = RecordingNotifier()
+    _tick(_server([_rec(cs.WAITING)], notifier))
+    assert notifier.calls[0][0] == "Claude needs your input in proj."
+
+
+def test_the_announcement_is_perishable():
+    notifier = RecordingNotifier()
+    _tick(_server([_rec(cs.WAITING)], notifier))
+    text, priority, perishable = notifier.calls[0]
+    assert priority == "high"
+    assert perishable is True
+
+
+def test_each_transition_announces_once():
+    notifier = RecordingNotifier()
+    server = _server([_rec(cs.WAITING)], notifier)
+    _tick(server)
+    _tick(server)
+    assert len(notifier.calls) == 1
+
+
+def test_a_new_state_announces_again():
+    notifier = RecordingNotifier()
+    records = [_rec(cs.WAITING, since=100.0)]
+    server = _server(records, notifier)
+    _tick(server)
+    records[:] = [_rec(cs.WORKING, since=200.0)]
+    _tick(server)
+    records[:] = [_rec(cs.WAITING, since=300.0)]
+    _tick(server)
+    assert len(notifier.calls) == 2
+
+
+def test_two_sessions_each_announce():
+    notifier = RecordingNotifier()
+    records = [_rec(cs.WAITING, session_id="s1"),
+               _rec(cs.DONE, session_id="s2", message="done here")]
+    _tick(_server(records, notifier))
+    assert len(notifier.calls) == 2
+
+
+def test_a_working_session_is_never_announced():
+    notifier = RecordingNotifier()
+    _tick(_server([_rec(cs.WORKING)], notifier))
+    assert notifier.calls == []
+
+
+def test_a_notifier_failure_does_not_propagate():
+    class Exploding(RecordingNotifier):
+        def notify(self, *a, **kw):
+            raise RuntimeError("notifier is down")
+
+    _tick(_server([_rec(cs.WAITING)], Exploding()))
+
+
+def test_with_no_notifier_the_tick_is_a_no_op():
+    server = JarvisServer(FakeAssistant(), port=0)
+    server._read_claude_sessions = lambda: [_rec(cs.WAITING)]
+    asyncio.run(server._announce_idle_sessions())
+
+
+def test_a_tick_failure_does_not_kill_the_loop(monkeypatch):
+    """One bad pass must not take the watcher down for the rest of the day."""
+    from jarvisd import server as server_module
+    monkeypatch.setattr(server_module, "CLAUDE_WATCH_TICK_SEC", 0.001)
+    notifier = RecordingNotifier()
+    server = JarvisServer(FakeAssistant(), notifier=notifier, port=0)
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("state directory vanished")
+        return [_rec(cs.WAITING)]
+
+    server._read_claude_sessions = flaky
+
+    async def _run():
+        task = asyncio.create_task(server._claude_watch_tick())
+        for _ in range(200):
+            await asyncio.sleep(0.005)
+            if notifier.calls:
+                break
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_run())
+    assert calls["n"] >= 2
+    assert notifier.calls
+
+
+def test_the_dedupe_set_does_not_grow_without_bound():
+    notifier = RecordingNotifier()
+    records = [_rec(cs.WAITING, since=100.0)]
+    server = _server(records, notifier)
+    _tick(server)
+    records[:] = [_rec(cs.WAITING, since=200.0)]
+    _tick(server)
+    assert len(server._claude_announced) == 1
+
+
+def test_serve_forever_starts_and_cancels_the_watch_task():
+    notifier = RecordingNotifier()
+    server = JarvisServer(FakeAssistant(), notifier=notifier, port=0)
+
+    async def _run():
+        task = asyncio.create_task(server.serve_forever())
+        await asyncio.sleep(0.05)
+        started = server._claude_watch_task is not None
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return started, server._claude_watch_task.cancelled()
+
+    started, cancelled = asyncio.run(_run())
+    assert started is True
+    assert cancelled is True
+
+
+def test_serve_forever_does_not_start_the_watch_task_without_a_notifier():
+    server = JarvisServer(FakeAssistant(), port=0)
+
+    async def _run():
+        task = asyncio.create_task(server.serve_forever())
+        await asyncio.sleep(0.05)
+        started = server._claude_watch_task is not None
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return started
+
+    assert asyncio.run(_run()) is False
+
+
+def test_the_tick_interval_is_fifteen_seconds():
+    from jarvisd import server as server_module
+    assert server_module.CLAUDE_WATCH_TICK_SEC == 15
