@@ -515,7 +515,7 @@ class JarvisServer:
         """One pass of the watcher: announce each newly idle session once."""
         if self.notifier is None:
             return
-        records = self._read_claude_sessions()
+        records = await asyncio.to_thread(self._read_claude_sessions)
         live_keys = set()
         for record in records:
             key = (record.get("session_id"), record.get("state"),
@@ -528,7 +528,21 @@ class JarvisServer:
                 continue
             self._claude_announced.add(key)
             try:
-                self.notifier.notify(text, priority="high", perishable=True)
+                # to_thread is mandatory, not tidiness: notify() calls
+                # push_to_clients, which is _push_from_thread, which blocks the
+                # CALLING thread on a coroutine scheduled on this loop. Called
+                # on the loop thread, the loop cannot run that coroutine, so it
+                # stalls for the full 10s timeout, reaches nobody, and takes
+                # every other task down with it. _fire_due_reminders does the
+                # same for the same reason.
+                #
+                # "urgent" rather than "high" so a perishable notice is not
+                # silently dropped during the default 23:00-08:00 quiet window:
+                # the user works past 02:00, and the idle signal already proves
+                # they are at the PC but away from the keyboard.
+                await asyncio.to_thread(
+                    self.notifier.notify, text, "urgent", perishable=True
+                )
             except Exception:
                 log.exception("claude announcement failed")
         # Forget keys whose session has moved on or ended, so the set cannot

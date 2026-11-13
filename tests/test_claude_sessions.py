@@ -116,6 +116,42 @@ def test_a_new_prompt_clears_the_previous_last_message(tmp_path):
     assert rec["last_message"] is None
 
 
+def test_a_new_prompt_clears_the_tool_it_was_waiting_on(tmp_path):
+    """A stale tool_name is a confident wrong answer: "needs your input to use
+    Bash" when the prompt is about Edit."""
+    _start(tmp_path)
+    cs.apply_event({"hook_event_name": "PermissionRequest", "session_id": "s1",
+                    "tool_name": "Bash"}, directory=tmp_path)
+    cs.apply_event({"hook_event_name": "UserPromptSubmit", "session_id": "s1"},
+                   directory=tmp_path)
+    assert cs.read_raw(directory=tmp_path)[0]["tool_name"] is None
+
+
+def test_finishing_clears_the_tool_it_was_waiting_on(tmp_path):
+    _start(tmp_path)
+    cs.apply_event({"hook_event_name": "PermissionRequest", "session_id": "s1",
+                    "tool_name": "Bash"}, directory=tmp_path)
+    _stop(tmp_path, "approved and done")
+    assert cs.read_raw(directory=tmp_path)[0]["tool_name"] is None
+
+
+def test_a_permission_notification_does_not_inherit_an_old_tool(tmp_path):
+    """PermissionRequest is unconfirmed to fire, so the Notification path is
+    the likely real one; it must not report the previous prompt's tool."""
+    _start(tmp_path)
+    cs.apply_event({"hook_event_name": "PermissionRequest", "session_id": "s1",
+                    "tool_name": "Bash"}, directory=tmp_path)
+    _stop(tmp_path, "done")
+    cs.apply_event({"hook_event_name": "UserPromptSubmit", "session_id": "s1"},
+                   directory=tmp_path)
+    cs.apply_event({"hook_event_name": "Notification", "session_id": "s1",
+                    "message": "Claude needs your permission to use Edit"},
+                   directory=tmp_path)
+    rec = cs.read_raw(directory=tmp_path)[0]
+    assert rec["state"] == cs.WAITING
+    assert rec["tool_name"] is None
+
+
 def test_since_only_moves_when_the_state_changes(tmp_path):
     _start(tmp_path)
     cs.apply_event(

@@ -265,6 +265,11 @@ def apply_event(payload: dict, *, directory=DIR, now=time.time,
         if event in ("SessionStart", "UserPromptSubmit"):
             new_state = WORKING
             record["last_message"] = None
+            # The tool belongs to the prompt that is over. Keeping it would
+            # make the NEXT wait report the wrong tool -- "needs your input to
+            # use Bash" about an Edit prompt -- which is a confident wrong
+            # answer, not a vaguer one.
+            record["tool_name"] = None
         elif event == "PermissionRequest":
             new_state = WAITING
             record["tool_name"] = payload.get("tool_name")
@@ -276,6 +281,7 @@ def apply_event(payload: dict, *, directory=DIR, now=time.time,
                 idle_ts = ts
         elif event == "Stop":
             new_state = DONE
+            record["tool_name"] = None  # the prompt, if any, is answered
             message = payload.get("last_assistant_message")
             record["last_message"] = (
                 str(message)[:MESSAGE_CAP] if message is not None else None

@@ -278,3 +278,30 @@ Also worth recording: in a one-shot `claude -p` run, `Stop` and `SessionEnd`
 land so close together that the `done` record is deleted before any poll sees
 it. That is correct behaviour, not a bug -- an ended session should not be
 reported -- but it means "no record" cannot be read as "Stop did not fire".
+
+## Decisions taken during the build
+
+- **The `Notification` matcher split is not implemented as matchers.** The
+  design table above lists `Notification` twice, by matcher
+  (`permission_prompt` / `idle_prompt`). The hook registers `Notification`
+  once, with no matcher, and decides from the payload text
+  (`_PERMISSION_HINTS` in `jarvisd/claude_sessions.py`); anything that does not
+  look like a permission prompt falls through to idle, which is the quieter
+  answer. The payload shape is unpublished, so sniffing degrades better than a
+  matcher that may never match.
+- **The announcement goes out at `urgent`, not `high`.** A perishable `high`
+  notice is dropped during the default 23:00-08:00 quiet window, which would
+  make the push half of this feature dark for nine hours a day -- and this user
+  routinely works past 02:00 (the same reason timers were exempted). The idle
+  signal already proves the user is at the PC but away from the keyboard, so
+  the notice is either delivered now or forgotten, never banked.
+- **`install_claude_hooks.py` creates `data/claude_sessions/`.** The tool reads
+  a missing directory as "the hooks were never installed", which is deliberate
+  -- but the directory was otherwise created by the first hook write, so
+  installing and then asking before starting a session answered with
+  instructions to install what had just been installed.
+- **The announcement is dispatched through `asyncio.to_thread`.**
+  `notify()` reaches `_push_from_thread`, which blocks its calling thread on a
+  coroutine scheduled on the event loop; called on the loop thread it stalls
+  for the full 10s timeout and reaches nobody. `_fire_due_reminders` already
+  did this; the watcher now does too.

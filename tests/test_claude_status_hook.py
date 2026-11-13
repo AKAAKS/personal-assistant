@@ -83,6 +83,31 @@ def test_it_stays_silent_even_when_the_store_fails(capsys, monkeypatch, tmp_path
     assert out.out == "" and out.err == ""
 
 
+def test_a_hook_whose_repo_is_gone_still_exits_zero_and_says_nothing(tmp_path):
+    """The predicted failure: the hook is registered by absolute path, so if
+    the checkout it points into is moved or deleted, `import jarvisd` fails at
+    module scope -- a traceback on stderr and a non-zero exit inside someone's
+    coding session. The spec allows neither."""
+    import shutil
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    source = Path(hook.__file__)
+    stranded = tmp_path / "scripts" / "claude_status_hook.py"
+    stranded.parent.mkdir(parents=True)
+    shutil.copyfile(source, stranded)
+
+    result = subprocess.run(
+        [sys.executable, "-I", str(stranded)],
+        input='{"hook_event_name":"Stop","session_id":"s1"}',
+        capture_output=True, text=True, cwd=str(tmp_path), timeout=60,
+    )
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
 def test_with_no_directory_it_uses_the_shared_state_directory(monkeypatch, tmp_path):
     seen = {}
 

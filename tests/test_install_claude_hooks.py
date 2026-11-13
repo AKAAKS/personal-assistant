@@ -185,6 +185,31 @@ def test_a_moved_script_path_is_reported(tmp_path):
     assert "updated" in summary.lower()
 
 
+def test_it_creates_the_state_directory_the_hook_will_write_to(tmp_path):
+    """The tool reads a MISSING state directory as "the hooks aren't installed
+    yet". The directory is otherwise created by the first hook write, so
+    installing and then asking before starting a session told the user to go
+    install the thing they had just installed."""
+    path = _settings(tmp_path, {})
+    script = tmp_path / "repo" / "scripts" / "claude_status_hook.py"
+    installer.install(path, script_path=str(script))
+    assert (tmp_path / "repo" / "data" / "claude_sessions").is_dir()
+
+
+def test_the_state_directory_can_be_overridden(tmp_path):
+    path = _settings(tmp_path, {})
+    state = tmp_path / "elsewhere"
+    installer.install(path, script_path=SCRIPT, state_dir=state)
+    assert state.is_dir()
+
+
+def test_a_state_directory_that_cannot_be_created_does_not_fail_the_install(tmp_path):
+    path = _settings(tmp_path, {})
+    installer.install(path, script_path=SCRIPT,
+                      state_dir=tmp_path / "settings.json" / "nope")
+    assert set(_read(path)["hooks"]) == set(EVENTS)
+
+
 def test_the_settings_file_stays_readable_json_with_indentation(tmp_path):
     path = _settings(tmp_path, {"model": "opus"})
     installer.install(path, script_path=SCRIPT)

@@ -28,12 +28,23 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from jarvisd import claude_sessions  # noqa: E402  (after the sys.path fix)
+try:
+    from jarvisd import claude_sessions  # noqa: E402  (after the sys.path fix)
+except Exception:
+    # The hook is registered in ~/.claude/settings.json by absolute path, so a
+    # moved, renamed or deleted checkout makes this import fail. At module
+    # scope that would print a traceback to stderr and exit non-zero inside
+    # someone's coding session, which the spec forbids outright. Degrade to a
+    # no-op instead: the status feature stops working, the coding session does
+    # not notice.
+    claude_sessions = None
 
 
 def main(stdin, *, directory=None) -> int:
     """Record the event on `stdin`. Returns 0 whatever happens."""
     try:
+        if claude_sessions is None:
+            return 0
         raw = stdin.read()
         if not raw or not raw.strip():
             return 0

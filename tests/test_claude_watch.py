@@ -122,8 +122,79 @@ def test_the_announcement_is_perishable():
     notifier = RecordingNotifier()
     _tick(_server([_rec(cs.WAITING)], notifier))
     text, priority, perishable = notifier.calls[0]
-    assert priority == "high"
     assert perishable is True
+
+
+def test_the_announcement_is_not_silenced_by_quiet_hours():
+    """A perishable "high" notice inside the default 23:00-08:00 window is
+    dropped, which would make the feature dark for nine hours a day -- and
+    this user routinely works past 02:00 (see test_timer_urgency). The idle
+    signal already proves they are at the PC but not at the keyboard, so the
+    notice earns the same exemption a timer gets."""
+    notifier = RecordingNotifier()
+    _tick(_server([_rec(cs.WAITING)], notifier))
+    assert notifier.calls[0][1] == "urgent"
+
+
+def test_notify_is_never_called_on_the_event_loop_thread():
+    """push_to_clients is _push_from_thread, which blocks the calling thread
+    on a coroutine scheduled on the loop. Called FROM the loop thread that
+    cannot progress, so it blocks until its 10s timeout and reaches nobody --
+    exactly the spoken announcement this feature exists to deliver."""
+    import threading
+
+    class ThreadRecordingNotifier(RecordingNotifier):
+        def __init__(self):
+            super().__init__()
+            self.threads = []
+
+        def notify(self, text, priority="low", *, perishable=False):
+            self.threads.append(threading.get_ident())
+            super().notify(text, priority, perishable=perishable)
+
+    notifier = ThreadRecordingNotifier()
+    server = _server([_rec(cs.WAITING)], notifier)
+
+    async def _run():
+        server._loop = asyncio.get_running_loop()
+        await server._announce_idle_sessions()
+        return threading.get_ident()
+
+    loop_thread = asyncio.run(_run())
+    assert notifier.threads
+    assert loop_thread not in notifier.threads
+
+
+def test_a_pass_with_the_real_notifier_bridge_does_not_block_the_loop(tmp_path):
+    """The end-to-end shape: a real Notifier wired to the real
+    _push_from_thread bridge must complete promptly and actually reach
+    push_proactive, rather than timing out against a stalled loop."""
+    import time
+
+    from jarvisd import db
+    from jarvisd.notifier import Notifier
+
+    conn = db.connect(str(tmp_path / "jarvis.db"))
+    notifier = Notifier(conn, quiet_hours=None)
+    server = JarvisServer(FakeAssistant(), notifier=notifier, port=0)
+    server._read_claude_sessions = lambda: [_rec(cs.WAITING)]
+    pushed = []
+
+    async def _run():
+        server._loop = asyncio.get_running_loop()
+        notifier.push_to_clients = server._push_from_thread
+        server.push_proactive = lambda text: _record(text)
+        started = time.monotonic()
+        await server._announce_idle_sessions()
+        return time.monotonic() - started
+
+    async def _record(text):
+        pushed.append(text)
+        return 1
+
+    elapsed = asyncio.run(_run())
+    assert pushed == ["Claude needs your input in proj."]
+    assert elapsed < 2.0, f"the pass took {elapsed:.1f}s: the loop was blocked"
 
 
 def test_each_transition_announces_once():

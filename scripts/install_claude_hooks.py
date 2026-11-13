@@ -117,10 +117,30 @@ def _repoint(entries, wanted_hook) -> tuple[list, str]:
     return result, outcome
 
 
-def install(settings_path, *, script_path, backup=True) -> str:
+def state_dir_for(script_path) -> Path:
+    """The state directory the hook at `script_path` will write to.
+
+    Derived the same way the module does it (`<repo>/data/claude_sessions`),
+    but without importing jarvisd, so this script stays runnable on its own.
+    """
+    return Path(script_path).expanduser().resolve().parent.parent / "data" / "claude_sessions"
+
+
+def install(settings_path, *, script_path, backup=True, state_dir=None) -> str:
     """Merge the status hooks into `settings_path`. Returns a summary line."""
     settings_path = Path(settings_path)
     settings = _load(settings_path)
+
+    # Create the state directory here, because `claude_status` reads a MISSING
+    # directory as "the hooks were never installed" -- a deliberately distinct
+    # answer from "nothing is running". It is otherwise created by the first
+    # hook write, so installing and then asking before starting any session
+    # answered with instructions to install what was just installed.
+    try:
+        (state_dir if state_dir is not None else state_dir_for(script_path)).mkdir(
+            parents=True, exist_ok=True)
+    except OSError:
+        pass  # the hook creates it on first write; never fail the install for this
 
     wanted = hook_entries(script_path)
     hooks = settings.get("hooks")
