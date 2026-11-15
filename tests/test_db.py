@@ -181,3 +181,30 @@ def test_existing_database_upgrades_without_losing_reminders(tmp_path):
     conn.close()
     conn2 = db.connect(p)
     assert conn2.execute("SELECT COUNT(*) c FROM reminders").fetchone()["c"] == 1
+
+
+def test_v10_db_upgrades_to_v11_preserving_reminders(tmp_path):
+    path = str(tmp_path / "jarvis.db")
+    # Build a genuine v10 database: migrations 1..10 applied, nothing after.
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+    for v in range(1, 11):
+        conn.executescript(db.MIGRATIONS[v])
+        conn.execute("INSERT INTO schema_version (version) VALUES (?)", (v,))
+    conn.execute(
+        "INSERT INTO reminders (text, due_ts, created_ts) VALUES (?, ?, ?)",
+        ("stretch", "2026-07-05T10:00:00", "2026-07-01T09:00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    upgraded = db.connect(path)
+    tables = {r["name"] for r in upgraded.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "timers" in tables
+    assert "stopwatches" in tables
+    assert upgraded.execute("SELECT MAX(version) v FROM schema_version").fetchone()["v"] == 11
+    row = upgraded.execute("SELECT text, due_ts FROM reminders").fetchone()
+    assert (row["text"], row["due_ts"]) == ("stretch", "2026-07-05T10:00:00")
+    upgraded.close()
