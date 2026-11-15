@@ -157,12 +157,14 @@ def test_a_running_timer_with_null_due_ts_is_retired_not_raised(store, conn):
     assert conn.execute("SELECT status FROM timers").fetchone()["status"] == "invalid"
 
 
-def test_bad_row_is_retired_so_it_warns_only_once(store, conn):
+def test_bad_row_is_retired_so_it_warns_only_once(store, conn, caplog):
     conn.execute("INSERT INTO timers (duration_sec, due_ts, status, created_ts) "
                  "VALUES (60, 'not-a-date', 'running', '2026-11-15T10:00:00')")
     conn.commit()
     store.due(T0)
+    store.due(T0)
     assert conn.execute("SELECT status FROM timers").fetchone()["status"] == "invalid"
+    assert len([r for r in caplog.records if "unusable" in r.getMessage()]) == 1
 
 
 def test_list_live_orders_a_paused_timer_by_its_frozen_remainder(store):
@@ -176,6 +178,7 @@ def test_list_live_orders_a_paused_timer_by_its_frozen_remainder(store):
 
 def test_bump_ring_increments_and_returns_count(store):
     tid = store.add(60, now=T0)
+    store.mark_ringing(tid, T0)
     assert store.bump_ring(tid) == 1
     assert store.bump_ring(tid) == 2
 
@@ -183,3 +186,31 @@ def test_bump_ring_increments_and_returns_count(store):
 def test_snooze_rejected_unless_ringing(store):
     tid = store.add(60, now=T0)
     assert store.snooze(tid, 60, T0) is False
+
+
+def test_bump_ring_leaves_a_dismissed_timer_unchanged(store):
+    tid = store.add(60, now=T0)
+    store.mark_ringing(tid, T0)
+    store.bump_ring(tid)
+    store.dismiss(tid)
+    assert store.bump_ring(tid) == 1
+    assert store.get(tid)["ring_count"] == 1
+
+
+def test_mark_ringing_resets_ring_count_so_a_snooze_gets_a_fresh_budget(store):
+    tid = store.add(60, now=T0)
+    store.mark_ringing(tid, T0)
+    store.bump_ring(tid)
+    store.bump_ring(tid)
+    store.snooze(tid, 60, T0)
+    store.mark_ringing(tid, T0 + timedelta(minutes=1))
+    assert store.get(tid)["ring_count"] == 0
+
+
+def test_an_aware_now_does_not_retire_healthy_timers(store):
+    from datetime import timezone
+    tid = store.add(600, now=T0)
+    aware = datetime(2026, 11, 15, 10, 1, 0).astimezone()
+    assert aware.tzinfo is not None
+    assert [r["id"] for r in store.list_live(aware)] == [tid]
+    assert store.get(tid)["status"] == "running"

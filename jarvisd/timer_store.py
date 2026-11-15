@@ -16,10 +16,6 @@ from jarvisd.reminder_store import BAD_DUE_TS, normalize_due_ts
 
 log = logging.getLogger(__name__)
 
-# A running row whose due_ts is NULL makes fromisoformat raise TypeError, which
-# BAD_DUE_TS does not cover. Treat it as unusable like any other bad value.
-_UNUSABLE = BAD_DUE_TS + (TypeError,)
-
 _LIVE = ("running", "paused", "ringing")
 
 
@@ -27,15 +23,27 @@ def _iso(dt: datetime) -> str:
     return normalize_due_ts(dt.isoformat(timespec="seconds"))
 
 
-def _parse(value: str) -> datetime:
+def _parse(value: str | None) -> datetime:
+    # NULL is handled explicitly: fromisoformat(None) raises TypeError, and
+    # catching TypeError broadly would also swallow a naive/aware comparison
+    # error and wrongly retire healthy rows.
+    if value is None:
+        raise ValueError("timestamp is NULL")
     return datetime.fromisoformat(normalize_due_ts(value))
 
 
+def _naive(now: datetime) -> datetime:
+    """Local naive form of `now`, so subtraction can never raise a naive/aware TypeError."""
+    if now.tzinfo is not None:
+        now = now.astimezone().replace(tzinfo=None)
+    return now
+
+
 def remaining_for(row: sqlite3.Row, now: datetime) -> int:
-    """Seconds left on `row`, clamped at 0. Raises one of _UNUSABLE on a bad due_ts."""
+    """Seconds left on `row`, clamped at 0. Raises one of BAD_DUE_TS on a bad due_ts."""
     if row["status"] == "paused":
         return max(0, int(row["remaining_sec"] or 0))
-    return max(0, int((_parse(row["due_ts"]) - now).total_seconds()))
+    return max(0, int((_parse(row["due_ts"]) - _naive(now)).total_seconds()))
 
 
 class TimerStore:
@@ -51,17 +59,20 @@ class TimerStore:
         """remaining_for, but retire an unusable row and return None instead of raising."""
         try:
             return remaining_for(row, now)
-        except _UNUSABLE:
+        except BAD_DUE_TS:
             # Retired rather than skipped: a skipped row would warn on every
             # tick forever and could never fire.
             log.warning("timer %s has an unusable due_ts %r; marking it invalid",
                         row["id"], row["due_ts"])
-            self._conn.execute(
-                "UPDATE timers SET status = 'invalid' WHERE id = ? AND status IN (?, ?, ?)",
-                (row["id"], *_LIVE),
-            )
-            self._conn.commit()
+            self._retire(row["id"])
             return None
+
+    def _retire(self, timer_id: int) -> None:
+        self._conn.execute(
+            "UPDATE timers SET status = 'invalid' WHERE id = ? AND status IN (?, ?, ?, ?)",
+            (timer_id, *_LIVE, "done"),
+        )
+        self._conn.commit()
 
     def list_live(self, now: datetime) -> list[sqlite3.Row]:
         """Running, paused and ringing timers, least time remaining first.
@@ -86,16 +97,16 @@ class TimerStore:
             "SELECT * FROM timers WHERE fired_ts IS NOT NULL "
             "AND status IN ('ringing', 'done') ORDER BY fired_ts DESC, id DESC"
         ).fetchall()
+        now = _naive(now)
         cutoff = now - timedelta(seconds=within_sec)
         out = []
         for r in rows:
             try:
                 fired = _parse(r["fired_ts"])
-            except _UNUSABLE:
+            except BAD_DUE_TS:
                 log.warning("timer %s has an unusable fired_ts %r; marking it invalid",
                             r["id"], r["fired_ts"])
-                self._conn.execute("UPDATE timers SET status = 'invalid' WHERE id = ?", (r["id"],))
-                self._conn.commit()
+                self._retire(r["id"])
                 continue
             if cutoff <= fired <= now:
                 out.append(r)
@@ -179,13 +190,15 @@ class TimerStore:
             (timer_id, *_LIVE))
 
     def mark_ringing(self, timer_id: int, now: datetime) -> None:
+        """running -> ringing. Resets ring_count: it counts rings in the current
+        ring cycle, so a snoozed alarm gets a fresh budget when it rings again."""
         self._update(
-            "UPDATE timers SET status = 'ringing', fired_ts = ? WHERE id = ? AND status = 'running'",
+            "UPDATE timers SET status = 'ringing', fired_ts = ?, ring_count = 0 WHERE id = ? AND status = 'running'",
             (_iso(now), timer_id))
 
     def bump_ring(self, timer_id: int) -> int:
         self._update(
-            "UPDATE timers SET ring_count = ring_count + 1 WHERE id = ?",
+            "UPDATE timers SET ring_count = ring_count + 1 WHERE id = ? AND status = 'ringing'",
             (timer_id,))
         row = self.get(timer_id)
         return row["ring_count"] if row else 0
