@@ -1,5 +1,11 @@
-"""Reminder tools: set, list, and cancel reminders (plus quick timers)."""
+"""Reminder and timer tools.
 
+Reminders: set, list and cancel (ReminderStore). Timers: set_timer starts a countdown in
+TimerStore, timer_status reports live and recently fired timers, and timer_control
+pauses, resumes, extends, cancels, dismisses or snoozes one.
+"""
+
+import math
 from datetime import datetime
 
 from jarvisd.reminder_store import BAD_DUE_TS, normalize_due_ts
@@ -51,8 +57,8 @@ TOOLS = [
         "description": (
             "Pause, resume, extend, cancel, dismiss or snooze a timer. Name the timer by its "
             "label ('pause the pasta timer') or its timer_id; if neither is given and only one "
-            "timer is live, that one is used. 'dismiss' stops a timer that is ringing; 'snooze' "
-            "makes a ringing timer ring again after 'minutes' (default 5); 'extend' adds 'minutes' "
+            "timer is live, that one is used. 'dismiss' stops a ringing timer (and also ends a running or paused one); "
+            "'snooze' makes a ringing timer ring again after 'minutes' (default 5); 'extend' adds 'minutes' "
             "to a timer. If several timers match, it lists them -- ask the user which."
         ),
         "input_schema": {
@@ -179,10 +185,13 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
         if timer_store is None:
             return "Error: timers are not available right now."
         minutes = ti.get("minutes")
-        seconds = ti.get("seconds", 0)
+        seconds = ti.get("seconds")
+        if seconds is None:  # models routinely send null for an optional field
+            seconds = 0
         for v in (minutes, seconds):
-            if not isinstance(v, (int, float)) or isinstance(v, bool) or v < 0:
-                return "Error: minutes is required, and minutes and seconds must be numbers that are not negative."
+            if (not isinstance(v, (int, float)) or isinstance(v, bool)
+                    or not math.isfinite(v) or v < 0):
+                return "Error: minutes is required, and minutes and seconds must be finite numbers that are not negative."
         total = round(float(minutes) * 60 + float(seconds))
         if total <= 0:
             return "Error: the timer must be longer than zero."
@@ -228,8 +237,10 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
             if not matches:
                 return None, "No timers are running."
             if len(matches) > 1 and action in ("dismiss", "snooze"):
-                # Only a ringing timer can be dismissed or snoozed, so a lone
-                # ringing one is unambiguous even beside running timers.
+                # An untargeted "stop it" means the timer that is making noise.
+                # Prefer a lone ringing one (dismiss also works on running and
+                # paused timers, but those are not what the user is hearing).
+                # Two or more ringing timers stay ambiguous and are listed.
                 ringing = [r for r in matches if r["status"] == "ringing"]
                 if len(ringing) == 1:
                     matches = ringing
@@ -246,8 +257,11 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
         if action not in _ACTIONS:
             return f"Error: action must be one of {', '.join(_ACTIONS)}."
         minutes = ti.get("minutes")
-        if action == "extend" or minutes is not None:
-            if not isinstance(minutes, (int, float)) or isinstance(minutes, bool) or minutes <= 0:
+        # minutes matters only to extend (required) and snooze (optional);
+        # a stray value alongside any other action is ignored.
+        if action == "extend" or (action == "snooze" and minutes is not None):
+            if (not isinstance(minutes, (int, float)) or isinstance(minutes, bool)
+                    or not math.isfinite(minutes) or minutes <= 0):
                 return f"Error: {action} needs minutes, a positive number."
         now = clock()
         row, problem = _resolve(ti, action, now)

@@ -156,6 +156,24 @@ def test_timer_status_description_tells_the_model_to_call_it_for_is_it_done():
     assert "is my timer done" in desc and "how long is left" in desc
 
 
+def test_set_timer_treats_null_seconds_and_null_label_as_absent(h, store):
+    out = h["set_timer"]({"minutes": 20, "seconds": None, "label": None})
+    assert "error" not in out.lower()
+    row = store.list_live(NOW)[0]
+    assert row["duration_sec"] == 1200 and row["label"] == ""
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_set_timer_rejects_non_finite_durations_with_an_error_not_an_exception(h, store, bad):
+    assert "error" in h["set_timer"]({"minutes": bad}).lower()
+    assert "error" in h["set_timer"]({"minutes": 1, "seconds": bad}).lower()
+    assert store.list_live(NOW) == []
+
+
+def test_timer_status_without_a_timer_store_says_so_instead_of_raising(reminders):
+    assert "error" in handlers(reminders)["timer_status"]({}).lower()
+
+
 def test_timer_control_description_says_it_takes_a_label():
     tool = next(t for t in TOOLS if t["name"] == "timer_control")
     assert "label" in tool["description"].lower()

@@ -123,6 +123,43 @@ def test_dismiss_with_no_target_picks_the_one_ringing_timer_beside_running_ones(
     assert store.get(other)["status"] == "running"
 
 
+@pytest.mark.parametrize("action", ["pause", "cancel"])
+def test_a_stray_zero_minutes_is_ignored_by_actions_that_do_not_use_it(h, store, action):
+    tid = store.add(600, "tea", now=NOW)
+    out = h["timer_control"]({"action": action, "label": "tea", "minutes": 0})
+    assert "error" not in out.lower()
+    assert store.get(tid)["status"] == {"pause": "paused", "cancel": "cancelled"}[action]
+
+
+def test_null_minutes_label_and_timer_id_are_treated_as_absent(h, store):
+    tid = store.add(60, "tea", now=NOW)
+    store.mark_ringing(tid, NOW)
+    out = h["timer_control"]({"action": "snooze", "minutes": None, "label": None, "timer_id": None})
+    assert "error" not in out.lower()
+    assert store.get(tid)["due_ts"] == "2026-11-15T10:05:00"
+
+
+def test_extend_rejects_non_finite_minutes(h, store):
+    store.add(600, "tea", now=NOW)
+    assert "error" in h["timer_control"]({"action": "extend", "minutes": float("nan")}).lower()
+
+
+def test_dismiss_with_no_target_and_two_ringing_timers_asks_and_changes_nothing(h, store):
+    a = store.add(60, "tea", now=NOW)
+    b = store.add(60, "eggs", now=NOW)
+    store.mark_ringing(a, NOW)
+    store.mark_ringing(b, NOW)
+    out = h["timer_control"]({"action": "dismiss"})
+    assert "which timer" in out.lower() and "tea" in out and "eggs" in out
+    assert store.get(a)["status"] == "ringing" and store.get(b)["status"] == "ringing"
+
+
+def test_dismiss_with_no_target_ends_a_lone_running_timer(h, store):
+    tid = store.add(600, "tea", now=NOW)
+    assert "dismissed" in h["timer_control"]({"action": "dismiss"}).lower()
+    assert store.get(tid)["status"] == "done"
+
+
 def test_control_on_an_unknown_label_does_not_raise(h):
     assert "no live timer" in h["timer_control"]({"action": "pause", "label": "ghost"}).lower()
 
