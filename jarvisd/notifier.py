@@ -40,6 +40,10 @@ class Notifier:
     client -> local toast+chime on this machine -> Home Assistant phone push ->
     queue for the next turn. Low priority always queues.
 
+    That chain stops at the first channel that works, which suits a nudge.
+    With alarm=True every channel is attempted and the notice is queued only
+    if all of them fail.
+
     The local step exists because the first and third are both routinely
     unavailable: no voice client is connected unless the user launched one, and
     the HA push needs a reachable HA. Without it a timer could come due with
@@ -88,7 +92,8 @@ class Notifier:
             log.error("Failed to enqueue notice: %s", e)
 
     def notify(self, text: str, priority: str = "low", *,
-               perishable: bool = False, local_only: bool = False) -> None:
+               perishable: bool = False, local_only: bool = False,
+               alarm: bool = False) -> None:
         """Deliver or queue a proactive message. Never raises.
 
         `perishable` means the notice is only true now: deliver it through a
@@ -106,6 +111,13 @@ class Notifier:
         ignore quiet hours -- a Claude Code session idling at 3am is worth
         saying out loud to someone sitting here, and not worth buzzing a phone
         on a bedside table.
+
+        `alarm` is for a notice the user is actively waiting on, where one
+        missed channel means a missed timer. It rings EVERY available channel
+        (client push, local toast+chime, HA phone push) instead of stopping at
+        the first that works, and banks the notice only if all of them failed.
+        It composes with the rest: quiet hours, `perishable` and `local_only`
+        apply exactly as above. Keyword-only, default False.
         """
         try:
             now = self.now()
@@ -119,6 +131,9 @@ class Notifier:
                 return
 
             if priority in INTERRUPTING:
+                # delivered: did any channel land. In alarm mode every channel
+                # is attempted regardless, so this decides only whether to bank.
+                delivered = False
                 reached = 0
                 if self.push_to_clients is not None:
                     try:
@@ -130,16 +145,22 @@ class Notifier:
                 if reached > 0:
                     log.info("notify[%s] -> spoken to %d client(s): %s",
                              priority, reached, text)
-                    return
+                    if not alarm:
+                        return
+                    delivered = True
 
-                # Nobody was listening. Make a noise on this machine before
-                # reaching for the phone: the user is most likely sitting here.
+                # Nobody was listening (or this is an alarm). Make a noise on
+                # this machine before reaching for the phone: the user is most
+                # likely sitting here.
                 if self.local_notify is not None:
                     try:
                         if self.local_notify(text):
                             log.info("notify[%s] -> local toast/chime: %s", priority, text)
-                            return
-                        log.info("notify[%s] -> local notifier declined", priority)
+                            if not alarm:
+                                return
+                            delivered = True
+                        else:
+                            log.info("notify[%s] -> local notifier declined", priority)
                     except Exception as e:
                         log.warning("local_notify failed: %s", e)
 
@@ -147,10 +168,14 @@ class Notifier:
                     try:
                         self.ha_client.send_notification(text, title="JARVIS")
                         log.info("notify[%s] -> HA phone push: %s", priority, text)
-                        return
+                        if not alarm:
+                            return
+                        delivered = True
                     except Exception as e:
                         log.warning("ha_client.send_notification failed: %s", e)
 
+                if delivered:
+                    return
                 if perishable:
                     log.info("notify[%s] -> dropped (no route, perishable): %s",
                              priority, text)
