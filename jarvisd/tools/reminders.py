@@ -9,7 +9,7 @@ import math
 from datetime import datetime
 
 from jarvisd.reminder_store import BAD_DUE_TS, normalize_due_ts
-from jarvisd.text_format import speak_duration
+from jarvisd.text_format import speak_duration, speak_recurrence
 from jarvisd.timer_store import _naive, _parse, remaining_for
 
 _ACTIONS = ("pause", "resume", "extend", "cancel", "dismiss", "snooze")
@@ -345,7 +345,7 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
             text = reminder["text"]
             due = reminder["due_ts"]
             recurrence = reminder["recurrence"]
-            recurrence_str = "" if recurrence == "none" else f" (repeats {recurrence})"
+            recurrence_str = "" if recurrence == "none" else f" (repeats {speak_recurrence(recurrence)})"
             lines.append(f"{reminder['id']}. {text} — due {due}{recurrence_str}")
 
         return "\n".join(lines)

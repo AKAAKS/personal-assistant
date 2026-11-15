@@ -2,7 +2,7 @@ import re
 
 import pytest
 
-from jarvisd.text_format import speak_duration, strip_markdown
+from jarvisd.text_format import speak_duration, speak_recurrence, strip_markdown
 
 
 def test_bold_and_italic_markers_removed():
@@ -222,3 +222,57 @@ def test_speak_duration(sec, expected):
 def test_speak_duration_drops_seconds_once_past_an_hour():
     # "2 hours 2 minutes 5 seconds" is noise in speech.
     assert speak_duration(7325) == "2 hours 2 minutes"
+
+
+# --- speak_recurrence -------------------------------------------------------
+
+@pytest.mark.parametrize("plain", ["daily", "weekdays", "weekends", "weekly", "monthly"])
+def test_speak_recurrence_leaves_plain_words_unchanged(plain):
+    assert speak_recurrence(plain) == plain
+
+
+@pytest.mark.parametrize(
+    "stored,spoken",
+    [
+        ("dow:4", "on Fridays"),
+        ("dow:0,2,4", "on Mondays, Wednesdays and Fridays"),
+        ("dow:5,6", "on Saturdays and Sundays"),
+        ("dow:0,1,2,3,4,5,6", "on Mondays, Tuesdays, Wednesdays, Thursdays, Fridays, Saturdays and Sundays"),
+    ],
+)
+def test_speak_recurrence_names_the_weekdays(stored, spoken):
+    assert speak_recurrence(stored) == spoken
+
+
+@pytest.mark.parametrize(
+    "day,ordinal",
+    [(1, "1st"), (2, "2nd"), (3, "3rd"), (4, "4th"), (11, "11th"), (12, "12th"),
+     (13, "13th"), (21, "21st"), (22, "22nd"), (23, "23rd"), (30, "30th"), (31, "31st")],
+)
+def test_speak_recurrence_monthly_anchor_uses_the_right_ordinal(day, ordinal):
+    assert speak_recurrence(f"monthly:{day}") == f"monthly on the {ordinal}"
+
+
+@pytest.mark.parametrize("stored", ["dow:0,2,4", "dow:4", "dow:0,1,2,3,4,5,6", "monthly:31", "monthly:2"])
+def test_speak_recurrence_never_leaks_machine_syntax(stored):
+    spoken = speak_recurrence(stored)
+    assert ":" not in spoken
+    # The only digits allowed are an ordinal's ("31st"); never a "0,2,4" run.
+    without_ordinals = re.sub(r"\d+(st|nd|rd|th)\b", "", spoken)
+    assert not re.search(r"\d", without_ordinals)
+
+
+def test_list_reminders_speaks_the_recurrence(tmp_path):
+    from jarvisd import db
+    from jarvisd.reminder_store import ReminderStore
+    from jarvisd.tools import reminders as reminders_tools
+
+    store = ReminderStore(db.connect(str(tmp_path / "jarvis.db")))
+    store.add("gym", "2026-12-01T07:00:00", "dow:0,2,4")
+    store.add("rent", "2026-12-31T09:00:00", "monthly")
+    store.add("pills", "2026-12-02T08:00:00", "daily")
+    out = reminders_tools.handlers(store)["list_reminders"]({})
+    assert "(repeats on Mondays, Wednesdays and Fridays)" in out
+    assert "(repeats monthly on the 31st)" in out
+    assert "(repeats daily)" in out
+    assert "dow" not in out and "monthly:" not in out

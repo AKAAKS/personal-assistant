@@ -129,3 +129,36 @@ def speak_duration(total_sec: int) -> str:
         for n, unit in units
         if n
     )
+
+
+_WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def _ordinal(n: int) -> str:
+    # 11, 12 and 13 take "th" despite ending in 1, 2 and 3.
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def speak_recurrence(recurrence: str) -> str:
+    """Render a stored recurrence for speech, so a TTS never reads machine
+    syntax aloud: 'dow:0,2,4' -> 'on Mondays, Wednesdays and Fridays',
+    'monthly:31' -> 'monthly on the 31st'. Plain words ('daily', 'monthly', ...)
+    and anything unrecognised are returned unchanged.
+    """
+    from jarvisd.reminder_store import parse_recurrence  # local: avoid a hard import cycle
+
+    try:
+        kind, arg = parse_recurrence(recurrence)
+    except ValueError:
+        return recurrence
+    if kind == "dow":
+        names = [f"{_WEEKDAY_NAMES[d]}s" for d in arg]
+        joined = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+        return f"on {joined}"
+    if kind == "monthly" and arg is not None:
+        return f"monthly on the {_ordinal(arg)}"
+    return recurrence
