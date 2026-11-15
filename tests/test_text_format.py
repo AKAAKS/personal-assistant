@@ -1,6 +1,8 @@
 import re
 
-from jarvisd.text_format import strip_markdown
+import pytest
+
+from jarvisd.text_format import speak_duration, speak_recurrence, strip_markdown
 
 
 def test_bold_and_italic_markers_removed():
@@ -199,3 +201,125 @@ def test_no_stray_markup_characters_survive():
 
     # The one sanctioned carve-out must still survive intact.
     assert strip_markdown("snake_case_name") == "snake_case_name"
+
+
+@pytest.mark.parametrize("sec,expected", [
+    (0, "no time"),
+    (1, "1 second"),
+    (45, "45 seconds"),
+    (60, "1 minute"),
+    (90, "1 minute 30 seconds"),
+    (270, "4 minutes 30 seconds"),
+    (600, "10 minutes"),
+    (3600, "1 hour"),
+    (3660, "1 hour 1 minute"),
+    (7325, "2 hours 2 minutes"),
+])
+def test_speak_duration(sec, expected):
+    assert speak_duration(sec) == expected
+
+
+def test_speak_duration_drops_seconds_once_past_an_hour():
+    # "2 hours 2 minutes 5 seconds" is noise in speech.
+    assert speak_duration(7325) == "2 hours 2 minutes"
+
+
+# --- speak_recurrence -------------------------------------------------------
+
+@pytest.mark.parametrize("plain", ["daily", "weekdays", "weekends", "weekly", "monthly"])
+def test_speak_recurrence_leaves_plain_words_unchanged(plain):
+    assert speak_recurrence(plain) == plain
+
+
+@pytest.mark.parametrize(
+    "stored,spoken",
+    [
+        ("dow:4", "on Fridays"),
+        ("dow:0,2,4", "on Mondays, Wednesdays and Fridays"),
+        ("dow:5,6", "on Saturdays and Sundays"),
+        ("dow:0,1,2,3,4,5,6", "on Mondays, Tuesdays, Wednesdays, Thursdays, Fridays, Saturdays and Sundays"),
+    ],
+)
+def test_speak_recurrence_names_the_weekdays(stored, spoken):
+    assert speak_recurrence(stored) == spoken
+
+
+@pytest.mark.parametrize(
+    "day,ordinal",
+    [(1, "1st"), (2, "2nd"), (3, "3rd"), (4, "4th"), (11, "11th"), (12, "12th"),
+     (13, "13th"), (21, "21st"), (22, "22nd"), (23, "23rd"), (30, "30th"), (31, "31st")],
+)
+def test_speak_recurrence_monthly_anchor_uses_the_right_ordinal(day, ordinal):
+    assert speak_recurrence(f"monthly:{day}") == f"monthly on the {ordinal}"
+
+
+@pytest.mark.parametrize("stored", ["dow:0,2,4", "dow:4", "dow:0,1,2,3,4,5,6", "monthly:31", "monthly:2"])
+def test_speak_recurrence_never_leaks_machine_syntax(stored):
+    spoken = speak_recurrence(stored)
+    assert ":" not in spoken
+    # The only digits allowed are an ordinal's ("31st"); never a "0,2,4" run.
+    without_ordinals = re.sub(r"\d+(st|nd|rd|th)\b", "", spoken)
+    assert not re.search(r"\d", without_ordinals)
+
+
+def test_list_reminders_speaks_the_recurrence(tmp_path):
+    from jarvisd import db
+    from jarvisd.reminder_store import ReminderStore
+    from jarvisd.tools import reminders as reminders_tools
+
+    store = ReminderStore(db.connect(str(tmp_path / "jarvis.db")))
+    store.add("gym", "2026-12-01T07:00:00", "dow:0,2,4")
+    store.add("rent", "2026-12-31T09:00:00", "monthly")
+    store.add("pills", "2026-12-02T08:00:00", "daily")
+    out = reminders_tools.handlers(store)["list_reminders"]({})
+    assert "(repeats on Mondays, Wednesdays and Fridays)" in out
+    assert "(repeats monthly on the 31st)" in out
+    assert "(repeats daily)" in out
+    assert "dow" not in out and "monthly:" not in out
+
+
+def test_list_reminders_speaks_the_due_time_not_an_iso_timestamp(tmp_path):
+    from datetime import datetime
+    from jarvisd import db
+    from jarvisd.reminder_store import ReminderStore
+    from jarvisd.tools import reminders as reminders_tools
+
+    store = ReminderStore(db.connect(str(tmp_path / "jarvis.db")))
+    store.add("gym", "2026-11-16T07:00:00", "none")       # tomorrow
+    store.add("rent", "2026-11-21T21:30:00", "none")      # Saturday, within a week
+    store.add("tax", "2026-12-31T09:00:00", "none")       # far out
+    store.add("pills", "2026-11-15T18:00:00", "none")     # today
+    now = datetime(2026, 11, 15, 10, 0, 0)
+    out = reminders_tools.handlers(store, clock=lambda: now)["list_reminders"]({})
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", out)
+    assert "gym — due tomorrow at 7am" in out
+    assert "rent — due Saturday at 9:30pm" in out
+    assert "tax — due December 31 at 9am" in out
+    assert "pills — due today at 6pm" in out
+
+
+# --- speak_due: the year is spoken only when it is not this year -------------
+
+def test_a_far_date_in_the_same_year_omits_the_year():
+    from datetime import datetime
+    from jarvisd.text_format import speak_due
+    assert speak_due("2026-12-31T09:00:00", datetime(2026, 11, 15, 10, 0)) == "December 31 at 9am"
+
+
+def test_a_date_in_a_later_year_says_the_year():
+    from datetime import datetime
+    from jarvisd.text_format import speak_due
+    assert speak_due("2027-11-16T07:00:00", datetime(2026, 11, 15, 10, 0)) == "November 16, 2027 at 7am"
+
+
+def test_a_date_in_the_previous_year_says_the_year():
+    from datetime import datetime
+    from jarvisd.text_format import speak_due
+    assert speak_due("2025-12-31T09:00:00", datetime(2026, 1, 3, 10, 0)) == "December 31, 2025 at 9am"
+
+
+def test_a_near_date_across_new_year_keeps_its_relative_wording_without_a_year():
+    from datetime import datetime
+    from jarvisd.text_format import speak_due
+    # Jan 2 is 3 days after Dec 30: still a weekday name, never "January 2, 2027".
+    assert speak_due("2027-01-02T09:00:00", datetime(2026, 12, 30, 10, 0)) == "Saturday at 9am"

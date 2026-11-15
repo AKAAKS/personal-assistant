@@ -85,6 +85,7 @@ def test_every_capability_gate_names_a_real_tool():
         proposal_store=SimpleNamespace(), google_client=SimpleNamespace(),
         location_provider=SimpleNamespace(), food_service=SimpleNamespace(),
         pantry_store=SimpleNamespace(), meal_log_conn=SimpleNamespace(),
+        timer_store=SimpleNamespace(), stopwatch_store=SimpleNamespace(),
     )
     # SERVER_SIDE_TOOLS (web_search) are supplied per-request by _call_model,
     # not by the registry, so they are legitimate gates too.
@@ -142,3 +143,55 @@ def test_directions_capability_names_travelmode():
 def render_capability_text():
     from jarvisd.core import render_system_prompt
     return render_system_prompt({"open_url_browser"})
+
+
+# -- timers and stopwatch ------------------------------------------------------
+
+TIMER_TOOLS = {"set_timer", "timer_status", "timer_control"}
+
+
+def test_the_prompt_tells_the_model_what_timer_control_can_do():
+    from jarvisd.core import render_system_prompt
+    low = render_system_prompt(TIMER_TOOLS).lower()
+    for ability in ("pause", "extend", "snooze", "dismiss", "label"):
+        assert ability in low, ability
+
+
+def test_the_prompt_says_timer_status_answers_is_my_timer_done():
+    from jarvisd.core import render_system_prompt
+    low = render_system_prompt(TIMER_TOOLS).lower()
+    assert "timer_status" in low
+    assert "is my timer done" in low
+    assert "never answer from memory" in low
+
+
+def test_no_timer_capability_line_without_the_timer_tools():
+    from jarvisd.core import render_system_prompt
+    low = render_system_prompt({"get_weather"}).lower()
+    assert "snooze" not in low
+    assert "timer_status" not in low
+
+
+def test_a_partial_set_of_timer_tools_drops_the_timer_line():
+    from jarvisd.core import render_system_prompt
+    assert "snooze" not in render_system_prompt({"set_timer", "timer_status"}).lower()
+
+
+def test_the_reminder_line_survives_without_the_timer_tools():
+    from jarvisd.core import render_system_prompt
+    low = render_system_prompt({"set_reminder", "list_reminders", "cancel_reminder"}).lower()
+    assert "reminder" in low
+    assert "snooze" not in low
+
+
+def test_the_stopwatch_line_appears_only_with_the_stopwatch_tool():
+    from jarvisd.core import render_system_prompt
+    assert "stopwatch_control" in render_system_prompt({"stopwatch_control"})
+    assert "stopwatch" not in render_system_prompt(TIMER_TOOLS).lower()
+
+
+def test_an_assistant_with_timer_stores_registers_and_advertises_the_tools():
+    ai = make_assistant(timer_store=SimpleNamespace(), stopwatch_store=SimpleNamespace())
+    assert TIMER_TOOLS | {"stopwatch_control"} <= set(ai._handlers)
+    text = prompt_text(ai).lower()
+    assert "snooze" in text and "stopwatch_control" in text

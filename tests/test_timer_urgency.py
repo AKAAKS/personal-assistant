@@ -72,14 +72,6 @@ def test_pre_existing_rows_read_as_reminders(tmp_path):
 # --- the tools set it ------------------------------------------------------
 
 
-def test_set_timer_records_kind_timer(tmp_path):
-    s, conn = store(tmp_path)
-    tools = build_reminder_tools(s)
-    tools["set_timer"]({"minutes": 10})
-    row = conn.execute("SELECT kind FROM reminders ORDER BY id DESC LIMIT 1").fetchone()
-    assert row["kind"] == "timer"
-
-
 def test_set_reminder_records_kind_reminder(tmp_path):
     s, conn = store(tmp_path)
     tools = build_reminder_tools(s)

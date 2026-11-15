@@ -415,3 +415,56 @@ def test_registry_file_tools_after_meals():
     last_meal_idx = max(tool_names.index(n) for n in meal_tools)
     first_file_idx = min(tool_names.index(n) for n in file_tool_names)
     assert first_file_idx > last_meal_idx, "File tools should come after meal tools"
+
+
+def _names(tools):
+    return {t["name"] for t in tools}
+
+
+TIMER_TOOLS = {"set_timer", "timer_status", "timer_control"}
+
+
+def test_timer_and_stopwatch_tools_are_registered_when_their_stores_exist():
+    tools, handlers = build_registry(
+        FakeHA(), FakeSystem(),
+        reminder_store=SimpleNamespace(),
+        timer_store=SimpleNamespace(), stopwatch_store=SimpleNamespace(),
+    )
+    wanted = TIMER_TOOLS | {"stopwatch_control"}
+    assert wanted <= _names(tools)
+    assert wanted <= handlers.keys()
+    assert _names(tools) == set(handlers.keys())
+    assert len(tools) == len(_names(tools))
+
+
+def test_timer_tools_are_absent_without_a_timer_store():
+    # A reminder store alone must not expose tools that could only answer "unavailable".
+    tools, handlers = build_registry(FakeHA(), FakeSystem(), reminder_store=SimpleNamespace())
+    assert "set_reminder" in _names(tools)
+    assert not TIMER_TOOLS & _names(tools)
+    assert not TIMER_TOOLS & handlers.keys()
+
+
+def test_the_stopwatch_tool_is_absent_without_a_stopwatch_store():
+    tools, handlers = build_registry(
+        FakeHA(), FakeSystem(), reminder_store=SimpleNamespace(), timer_store=SimpleNamespace())
+    assert "stopwatch_control" not in _names(tools)
+    assert "stopwatch_control" not in handlers
+    assert TIMER_TOOLS <= _names(tools)
+
+
+def test_a_timer_store_without_a_reminder_store_still_registers_the_timer_tools():
+    tools, handlers = build_registry(FakeHA(), FakeSystem(), timer_store=SimpleNamespace())
+    assert TIMER_TOOLS <= _names(tools)
+    assert TIMER_TOOLS <= handlers.keys()
+    assert "set_reminder" not in _names(tools)
+
+
+def test_every_tool_in_reminders_tools_is_classified_as_timer_or_reminder():
+    # build_registry gates timer tools on the timer store and the rest on the
+    # reminder store. An unclassified new tool would silently be gated on the wrong
+    # store, so adding one to reminders.TOOLS must fail here until it is classified.
+    from jarvisd.tools import reminders
+    names = {t["name"] for t in reminders.TOOLS}
+    assert names == set(reminders.TIMER_TOOL_NAMES) | set(reminders.REMINDER_TOOL_NAMES)
+    assert not set(reminders.TIMER_TOOL_NAMES) & set(reminders.REMINDER_TOOL_NAMES)

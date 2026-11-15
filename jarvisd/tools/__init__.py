@@ -1,6 +1,6 @@
 """Tool registry — assembles definitions + handlers for the available clients."""
 
-from jarvisd.tools import ha, spotify, system, tv, memory, reminders, rules, meals, files, proposals, gmail, calendar, terminal, clipboard, dev_status, weather, food, pantry, meal_log, suggest, prep
+from jarvisd.tools import ha, spotify, system, tv, memory, reminders, stopwatch, rules, meals, files, proposals, gmail, calendar, terminal, clipboard, dev_status, weather, food, pantry, meal_log, suggest, prep
 
 
 def build_registry(
@@ -11,6 +11,8 @@ def build_registry(
     profile_store=None,
     memory_store=None,
     reminder_store=None,
+    timer_store=None,
+    stopwatch_store=None,
     rules_store=None,
     meal_store=None,
     file_tools: bool = False,
@@ -32,7 +34,7 @@ def build_registry(
     2. spotify (if spotify_client)
     3. tv (if tv_client)
     4. memory (if profile_store and memory_store)
-    5. reminder (if reminder_store)
+    5. reminder (if reminder_store); timers (if timer_store); stopwatch (if stopwatch_store)
     6. rules (if rules_store)
     7. meals (if meal_store)
     8. files (if file_tools is True; file_summarizer may still be None)
@@ -55,9 +57,19 @@ def build_registry(
     if profile_store is not None and memory_store is not None:
         tools += list(memory.TOOLS)
         handler_map.update(memory.handlers(profile_store, memory_store))
-    if reminder_store is not None:
-        tools += list(reminders.TOOLS)
-        handler_map.update(reminders.handlers(reminder_store))
+    # reminders.TOOLS holds the reminder tools AND the timer tools. Timer tools are
+    # gated on timer_store alone: a reminder store without one must not advertise
+    # tools whose handlers can only answer "timers are unavailable".
+    if reminder_store is not None or timer_store is not None:
+        reminder_handlers = reminders.handlers(reminder_store, timer_store)
+        for tool in reminders.TOOLS:
+            is_timer = tool["name"] in reminders.TIMER_TOOL_NAMES
+            if (is_timer and timer_store is not None) or (not is_timer and reminder_store is not None):
+                tools.append(tool)
+                handler_map[tool["name"]] = reminder_handlers[tool["name"]]
+    if stopwatch_store is not None:
+        tools += list(stopwatch.TOOLS)
+        handler_map.update(stopwatch.handlers(stopwatch_store))
     if rules_store is not None:
         tools += list(rules.TOOLS)
         handler_map.update(rules.handlers(rules_store))

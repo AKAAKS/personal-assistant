@@ -19,6 +19,9 @@ recur.
 """
 
 import re
+from datetime import datetime
+
+from jarvisd.reminder_store import BAD_DUE_TS, normalize_due_ts
 
 # Broad emoji / pictograph / dingbat ranges + variation selector.
 _EMOJI_RE = re.compile(
@@ -107,3 +110,90 @@ def strip_markdown(text: str) -> str:
     text = re.sub(r"\n{2,}", "\n", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     return text.strip()
+
+
+def speak_duration(total_sec: int) -> str:
+    """Render a duration as natural spoken English, e.g. "4 minutes 30 seconds".
+
+    At most two units, largest first. A zero unit is omitted and a unit of 1 is
+    singular. Once hours are present the seconds are dropped, since they are
+    noise in speech. Zero (or less) renders as "no time".
+    """
+    if total_sec <= 0:
+        return "no time"
+    hours, rest = divmod(total_sec, 3600)
+    minutes, seconds = divmod(rest, 60)
+    if hours:
+        units = [(hours, "hour"), (minutes, "minute")]
+    else:
+        units = [(minutes, "minute"), (seconds, "second")]
+    return " ".join(
+        f"{n} {unit}" if n == 1 else f"{n} {unit}s"
+        for n, unit in units
+        if n
+    )
+
+
+_WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def _ordinal(n: int) -> str:
+    # 11, 12 and 13 take "th" despite ending in 1, 2 and 3.
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def speak_recurrence(recurrence: str) -> str:
+    """Render a stored recurrence for speech, so a TTS never reads machine
+    syntax aloud: 'dow:0,2,4' -> 'on Mondays, Wednesdays and Fridays',
+    'monthly:31' -> 'monthly on the 31st'. Plain words ('daily', 'monthly', ...)
+    and anything unrecognised are returned unchanged.
+    """
+    from jarvisd.reminder_store import parse_recurrence  # local: avoid a hard import cycle
+
+    try:
+        kind, arg = parse_recurrence(recurrence)
+    except ValueError:
+        return recurrence
+    if kind == "dow":
+        names = [f"{_WEEKDAY_NAMES[d]}s" for d in arg]
+        joined = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+        return f"on {joined}"
+    if kind == "monthly" and arg is not None:
+        return f"monthly on the {_ordinal(arg)}"
+    return recurrence
+
+
+_MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July",
+                "August", "September", "October", "November", "December")
+
+
+def speak_due(due_ts: str, now: datetime) -> str:
+    """Render a stored due timestamp for speech, so a TTS never reads ISO aloud:
+    'today at 6pm', 'tomorrow at 7am', 'Sunday at 9:30pm' (within the next week),
+    otherwise 'December 31 at 9am', with the year ('November 16, 2027 at 7am')
+    when it is not the current one. An unparseable stamp is returned unchanged.
+    """
+    try:
+        due = datetime.fromisoformat(normalize_due_ts(due_ts))
+    except BAD_DUE_TS:
+        return due_ts
+    hour = due.hour % 12 or 12
+    clock = f"{hour}{':%02d' % due.minute if due.minute else ''}{'am' if due.hour < 12 else 'pm'}"
+    days = (due.date() - now.date()).days
+    if days == 0:
+        day = "today"
+    elif days == 1:
+        day = "tomorrow"
+    elif 1 < days < 7:
+        day = _WEEKDAY_NAMES[due.weekday()]
+    else:
+        day = f"{_MONTH_NAMES[due.month - 1]} {due.day}"
+        if due.year != now.year:
+            # Without it "November 16" reads as the coming one, which is how a
+            # reminder due next year got spoken as imminent in the briefing.
+            day += f", {due.year}"
+    return f"{day} at {clock}"

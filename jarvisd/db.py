@@ -10,7 +10,7 @@ from nutrition_core.store.schema import (
     SEED_GOALS_FROM_TARGETS_SQL,
 )
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # version -> SQL script. Later phases append entries and bump SCHEMA_VERSION.
 MIGRATIONS = {
@@ -105,6 +105,32 @@ MIGRATIONS = {
     # default backfills existing rows as 'reminder', which is the safe reading:
     # pre-existing rows keep respecting the quiet window.
     10: "ALTER TABLE reminders ADD COLUMN kind TEXT NOT NULL DEFAULT 'reminder';",
+    # Timers left the reminders table: pause, resume, extend, ring and snooze
+    # each need state a due-date row cannot carry (remaining time while paused,
+    # the ring count that drives re-rings, the fire time they re-ring from).
+    # Stopwatches count up rather than down, so they get their own table too.
+    # due_ts is NULL while paused and remaining_sec is NULL otherwise; status
+    # has no CHECK so 'invalid' can mark a row with an unparseable timestamp.
+    11: """
+        CREATE TABLE timers (
+          id INTEGER PRIMARY KEY,
+          label TEXT NOT NULL DEFAULT '',
+          duration_sec INTEGER NOT NULL,
+          due_ts TEXT,
+          remaining_sec INTEGER,
+          status TEXT NOT NULL DEFAULT 'running',
+          created_ts TEXT NOT NULL,
+          fired_ts TEXT,
+          ring_count INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE stopwatches (
+          id INTEGER PRIMARY KEY,
+          label TEXT NOT NULL DEFAULT '',
+          started_ts TEXT NOT NULL,
+          accumulated_sec INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'running'
+        );
+    """,
 }
 
 

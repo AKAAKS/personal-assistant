@@ -43,7 +43,7 @@ def test_migration_reaches_current_version():
     conn = db.connect(":memory:")
     row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
     assert row["v"] == db.SCHEMA_VERSION
-    assert db.SCHEMA_VERSION == 10
+    assert db.SCHEMA_VERSION == 11
     conn.close()
 
 
@@ -156,3 +156,55 @@ def test_v4_db_upgrades_to_v5(tmp_path):
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "habit_proposals" in tables
     conn.close()
+
+
+def test_migration_11_creates_timers_and_stopwatches(tmp_path):
+    conn = db.connect(str(tmp_path / "t.db"))
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(timers)")}
+    assert cols == {"id", "label", "duration_sec", "due_ts", "remaining_sec",
+                    "status", "created_ts", "fired_ts", "ring_count"}
+    assert {r["name"] for r in conn.execute("PRAGMA table_info(stopwatches)")} == {
+        "id", "label", "started_ts", "accumulated_sec", "status"}
+
+
+def test_schema_version_is_11(tmp_path):
+    conn = db.connect(str(tmp_path / "t.db"))
+    assert conn.execute("SELECT MAX(version) v FROM schema_version").fetchone()["v"] == 11
+
+
+def test_existing_database_upgrades_without_losing_reminders(tmp_path):
+    # An existing install is at version 10 with live reminder rows.
+    p = str(tmp_path / "t.db")
+    conn = db.connect(p)
+    conn.execute("INSERT INTO reminders (text, due_ts, created_ts) VALUES ('x','2026-01-01T00:00:00','2026-01-01T00:00:00')")
+    conn.commit()
+    conn.close()
+    conn2 = db.connect(p)
+    assert conn2.execute("SELECT COUNT(*) c FROM reminders").fetchone()["c"] == 1
+
+
+def test_v10_db_upgrades_to_v11_preserving_reminders(tmp_path):
+    path = str(tmp_path / "jarvis.db")
+    # Build a genuine v10 database: migrations 1..10 applied, nothing after.
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+    for v in range(1, 11):
+        conn.executescript(db.MIGRATIONS[v])
+        conn.execute("INSERT INTO schema_version (version) VALUES (?)", (v,))
+    conn.execute(
+        "INSERT INTO reminders (text, due_ts, created_ts) VALUES (?, ?, ?)",
+        ("stretch", "2026-07-05T10:00:00", "2026-07-01T09:00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    upgraded = db.connect(path)
+    tables = {r["name"] for r in upgraded.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "timers" in tables
+    assert "stopwatches" in tables
+    assert upgraded.execute("SELECT MAX(version) v FROM schema_version").fetchone()["v"] == 11
+    row = upgraded.execute("SELECT text, due_ts FROM reminders").fetchone()
+    assert (row["text"], row["due_ts"]) == ("stretch", "2026-07-05T10:00:00")
+    upgraded.close()

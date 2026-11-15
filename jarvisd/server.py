@@ -38,12 +38,24 @@ from datetime import datetime, timedelta
 import websockets
 
 from jarvisd import claude_sessions
+from jarvisd.reminder_store import BAD_DUE_TS
 from jarvisd.text_format import strip_markdown
+# Parsing and naive-ising are reused from the store, not re-implemented: its
+# parse_ts guards NULL (raising ValueError) and to_naive guards tz-aware values.
+from jarvisd.timer_store import parse_ts, to_naive
 
 log = logging.getLogger(__name__)
 
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024  # 15s of 16kHz int16 is ~0.5MB; generous cap
 REMINDER_TICK_SEC = 15
+# A ringing timer is the one thing here that must not be missed, so it has its
+# own, faster loop. It rings every RING_INTERVAL_SEC until the user dismisses
+# it, and gives up after MAX_RINGS ring ATTEMPTS (a 9m30s window: ring 1 at
+# offset 0, ring 20 at 19 x 30s) so it can never ring forever, even if every
+# attempt fails.
+TIMER_TICK_SEC = 5
+RING_INTERVAL_SEC = 30
+MAX_RINGS = 20
 # How often to look for a Claude Code session that has gone unattended. The
 # debounce is Claude Code's own idle notification, not this interval, so this
 # only bounds how late an announcement can be.
@@ -73,6 +85,7 @@ class JarvisServer:
         port=8765,
         notifier=None,
         reminder_store=None,
+        timer_store=None,
         assistant_lock_holder=None,
         ha_listener=None,
         meal_store=None,
@@ -89,6 +102,7 @@ class JarvisServer:
         self.port = port
         self.notifier = notifier
         self.reminder_store = reminder_store
+        self.timer_store = timer_store
         # Optional MealStore; used only to evaluate the "meal_not_logged_today"
         # standing-nudge condition in _fire_due_reminders. May be None (e.g. before
         # bootstrap wires it up) -- conditional reminders then fail open (fire anyway).
@@ -112,6 +126,12 @@ class JarvisServer:
         # appended.
         self.proposal_store = proposal_store
         self._lock = asyncio.Lock()  # one conversation; serialize agent access
+        # {timer_id: when it last rang}. In memory on purpose: ring timing is
+        # derived from fired_ts and ring_count (no column), which has no memory
+        # of a stalled tick loop, so this is the floor that keeps two rings of
+        # one timer RING_INTERVAL_SEC apart. After a restart it is empty, so the
+        # first tick rings once straight away and everything after is paced.
+        self._last_ring: dict[int, datetime] = {}
         # Reserved hook for a future multi-server topology that would share one
         # assistant/lock. Currently unused by the wiring: __main__'s HA-rule
         # callables serialize on `server._lock` directly to match _process (see
@@ -132,6 +152,9 @@ class JarvisServer:
         self._pending_interrupt: dict = {}
         self._loop = None  # captured in serve_forever(); lets worker threads push safely
         self._reminder_task = None
+        # Its own task, like the Claude watcher: a reminder-tick failure must
+        # not silence a ringing alarm, nor the reverse.
+        self._timer_task = None
         # The Claude Code watcher: its own task rather than folded into
         # _reminder_tick, so a failure in one cannot take the other down.
         self._claude_watch_task = None
@@ -149,6 +172,8 @@ class JarvisServer:
             self.notifier.push_to_clients = self._push_from_thread
         if self.reminder_store is not None and self.notifier is not None:
             self._reminder_task = asyncio.create_task(self._reminder_tick())
+        if self.timer_store is not None and self.notifier is not None:
+            self._timer_task = asyncio.create_task(self._timer_tick())
         if self.ha_listener is not None:
             self._ha_listener_task = asyncio.create_task(self.ha_listener.run())
         if self.habit_scan is not None:
@@ -168,6 +193,12 @@ class JarvisServer:
                 self._reminder_task.cancel()
                 try:
                     await self._reminder_task
+                except asyncio.CancelledError:
+                    pass
+            if self._timer_task is not None:
+                self._timer_task.cancel()
+                try:
+                    await self._timer_task
                 except asyncio.CancelledError:
                     pass
             if self._ha_listener_task is not None:
@@ -480,6 +511,124 @@ class JarvisServer:
             except Exception:
                 log.exception("reminder tick failed")
             await asyncio.sleep(REMINDER_TICK_SEC)
+
+    async def _fire_due_timers(self, now=None):
+        """One timer tick: start ringing every due timer, re-ring the ringing ones.
+
+        Ring timing is derived, not stored: a timer rings, then rings again once
+        `now >= fired_ts + ring_count * RING_INTERVAL_SEC`. `mark_ringing` sets
+        fired_ts and resets ring_count to 0; `notify` rings; `bump_ring` records
+        the attempt, success or not. So the Nth ring lands at
+        fired_ts + (N-1)*RING_INTERVAL_SEC. After MAX_RINGS attempts the timer
+        is dismissed.
+
+        That schedule is absolute, so after a stall shorter than the stranded
+        window (a laptop asleep for a few minutes) it would be "owed" several
+        rings and fire one per tick. `_last_ring` is the floor: a timer that
+        rang less than RING_INTERVAL_SEC ago waits, whatever the schedule says.
+        """
+        now = now or datetime.now()
+        store = self.timer_store
+        # Snapshot the already-ringing rows BEFORE marking new ones, so a timer
+        # that just started ringing is not rung a second time in the same tick.
+        live = await asyncio.to_thread(store.list_live, now)
+        ringing = [t for t in live if t["status"] == "ringing"]
+        due = await asyncio.to_thread(store.due, now)
+        for t in due:
+            await asyncio.to_thread(store.mark_ringing, t["id"], now)
+            self._last_ring.pop(t["id"], None)  # a new cycle: no floor from an old one
+            await self._ring(t, now)
+        for t in ringing:
+            verdict = self._ring_verdict(t, now)
+            if verdict == "ring" and self._rang_recently(t["id"], now):
+                verdict = "wait"
+            if verdict == "stranded":
+                log.info("timer #%s was still ringing %s after it fired (the daemon was "
+                         "not running to advance it); dismissing instead of re-ringing",
+                         t["id"], t["fired_ts"])
+                await asyncio.to_thread(self.timer_store.dismiss_ringing, t["id"])
+                self._last_ring.pop(t["id"], None)
+            elif verdict == "ring":
+                await self._ring(t, now)
+        # Forget timers that are no longer ringing (dismissed, cancelled,
+        # snoozed, stranded, finished), so the map cannot grow without bound.
+        # `due` ones just started ringing, so they are kept alongside.
+        keep = {t["id"] for t in ringing} | {t["id"] for t in due}
+        for tid in [k for k in self._last_ring if k not in keep]:
+            del self._last_ring[tid]
+
+    def _rang_recently(self, timer_id, now) -> bool:
+        last = self._last_ring.get(timer_id)
+        return last is not None and to_naive(now) - last < timedelta(seconds=RING_INTERVAL_SEC)
+
+    @staticmethod
+    def _ring_verdict(t, now) -> str:
+        """'ring' (an attempt is due), 'wait' (not yet) or 'stranded' (outlived its window).
+
+        A row can only still be `ringing` once the whole ring window has passed if
+        nothing was running to advance it (daemon killed, lid closed), so it is
+        dismissed rather than re-rung at full volume for a timer nobody wants.
+        """
+        try:
+            fired = parse_ts(t["fired_ts"])  # NULL raises ValueError, in BAD_DUE_TS
+        except BAD_DUE_TS:
+            log.warning("timer #%s has an unusable fired_ts %r; ringing it now",
+                        t["id"], t["fired_ts"])
+            return "ring"  # bounded: ring_count still climbs to MAX_RINGS
+        now = to_naive(now)
+        if now - fired > timedelta(seconds=MAX_RINGS * RING_INTERVAL_SEC):
+            return "stranded"
+        due_at = fired + timedelta(seconds=t["ring_count"] * RING_INTERVAL_SEC)
+        return "ring" if now >= due_at else "wait"
+
+    async def _ring(self, t, now=None):
+        """Ring one timer once and count the attempt; dismiss it when the budget is spent.
+
+        `ring_count` counts ring ATTEMPTS in the current cycle. It is bumped
+        whether or not notify succeeds, so a persistently failing channel still
+        ends at MAX_RINGS. Attempts are RING_INTERVAL_SEC apart: when fired_ts is
+        unusable `_ring_verdict` answers "ring" on every tick, but `_last_ring`
+        still holds each timer to one attempt per interval.
+
+        The first attempt may be banked in the notice queue if no channel is
+        reached, so the user still learns the timer went off; later attempts are
+        perishable, so a persistently failing channel banks one notice, not 20.
+        """
+        # Re-read: a dismiss or pause may have landed since the snapshot, and an
+        # alarm that sounds after the user said stop is the complaint we exist to fix.
+        current = await asyncio.to_thread(self.timer_store.get, t["id"])
+        if current is None or current["status"] != "ringing":
+            return
+        label = t["label"]
+        text = f"Timer's up — {label}." if label else "Timer's up."
+        # `current` is post-mark_ringing, so ring_count 0 is this cycle's first ring.
+        first_ring = current["ring_count"] == 0
+        self._last_ring[t["id"]] = to_naive(now or datetime.now())
+        try:
+            await asyncio.to_thread(
+                self.notifier.notify, text, "urgent", alarm=True,
+                perishable=not first_ring,
+            )
+        except Exception:
+            # One timer's failing notify must not starve the others of their
+            # ring. Logged, not swallowed; the attempt is still counted below.
+            log.exception("ringing timer #%s failed", t["id"])
+        rings = await asyncio.to_thread(self.timer_store.bump_ring, t["id"])
+        if rings >= MAX_RINGS:
+            log.info("timer #%s used all %d ring attempts; dismissing", t["id"], rings)
+            # Guarded to a still-ringing row: a snooze landing since bump_ring
+            # must survive, which plain dismiss() (any live status) would cancel.
+            await asyncio.to_thread(self.timer_store.dismiss_ringing, t["id"])
+            self._last_ring.pop(t["id"], None)
+
+    async def _timer_tick(self):
+        """Background timer loop: mirrors _reminder_tick, on TIMER_TICK_SEC."""
+        while True:
+            try:
+                await self._fire_due_timers()
+            except Exception:
+                log.exception("timer tick failed")
+            await asyncio.sleep(TIMER_TICK_SEC)
 
     @staticmethod
     def _announce_snippet(message) -> str:

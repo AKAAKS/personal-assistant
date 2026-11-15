@@ -61,3 +61,4 @@ librosa>=0.10.0
 
 # Dev / test
 pytest>=8.0
+anyio>=4
