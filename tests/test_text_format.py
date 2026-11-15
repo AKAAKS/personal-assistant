@@ -1,6 +1,8 @@
 import re
 
-from jarvisd.text_format import strip_markdown
+import pytest
+
+from jarvisd.text_format import speak_duration, strip_markdown
 
 
 def test_bold_and_italic_markers_removed():
@@ -199,3 +201,24 @@ def test_no_stray_markup_characters_survive():
 
     # The one sanctioned carve-out must still survive intact.
     assert strip_markdown("snake_case_name") == "snake_case_name"
+
+
+@pytest.mark.parametrize("sec,expected", [
+    (0, "no time"),
+    (1, "1 second"),
+    (45, "45 seconds"),
+    (60, "1 minute"),
+    (90, "1 minute 30 seconds"),
+    (270, "4 minutes 30 seconds"),
+    (600, "10 minutes"),
+    (3600, "1 hour"),
+    (3660, "1 hour 1 minute"),
+    (7325, "2 hours 2 minutes"),
+])
+def test_speak_duration(sec, expected):
+    assert speak_duration(sec) == expected
+
+
+def test_speak_duration_drops_seconds_once_past_an_hour():
+    # "2 hours 2 minutes 5 seconds" is noise in speech.
+    assert speak_duration(7325) == "2 hours 2 minutes"

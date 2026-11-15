@@ -107,3 +107,25 @@ def strip_markdown(text: str) -> str:
     text = re.sub(r"\n{2,}", "\n", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     return text.strip()
+
+
+def speak_duration(total_sec: int) -> str:
+    """Render a duration as natural spoken English, e.g. "4 minutes 30 seconds".
+
+    At most two units, largest first. A zero unit is omitted and a unit of 1 is
+    singular. Once hours are present the seconds are dropped, since they are
+    noise in speech. Zero (or less) renders as "no time".
+    """
+    if total_sec <= 0:
+        return "no time"
+    hours, rest = divmod(total_sec, 3600)
+    minutes, seconds = divmod(rest, 60)
+    if hours:
+        units = [(hours, "hour"), (minutes, "minute")]
+    else:
+        units = [(minutes, "minute"), (seconds, "second")]
+    return " ".join(
+        f"{n} {unit}" if n == 1 else f"{n} {unit}s"
+        for n, unit in units
+        if n
+    )
