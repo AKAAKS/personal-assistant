@@ -170,7 +170,16 @@ def test_serve_forever_wires_push_to_clients_and_starts_reminder_task():
             return []
 
     notifier = NoOpNotifier()
-    server = JarvisServer(FakeAssistant(), notifier=notifier, reminder_store=EmptyReminderStore())
+    class EmptyTimerStore:
+        def due(self, now):
+            return []
+
+        def list_live(self, now):
+            return []
+
+    # port=0: an ephemeral port, so this never collides with a running daemon.
+    server = JarvisServer(FakeAssistant(), notifier=notifier, reminder_store=EmptyReminderStore(),
+                          timer_store=EmptyTimerStore(), port=0)
 
     async def _run():
         task = asyncio.create_task(server.serve_forever())
@@ -178,6 +187,7 @@ def test_serve_forever_wires_push_to_clients_and_starts_reminder_task():
         assert notifier.push_to_clients == server._push_from_thread
         assert server._loop is not None
         assert server._reminder_task is not None
+        assert server._timer_task is not None
         task.cancel()
         try:
             await task
@@ -600,3 +610,30 @@ def test_fire_due_reminders_no_condition_notifies_normally(tmp_path):
     asyncio.run(server._fire_due_reminders())
 
     assert notifier.notify_calls == [("Reminder: call mom", "high")]
+
+
+def test_serve_forever_starts_no_timer_task_without_a_timer_store_or_notifier():
+    class NoOpNotifier:
+        push_to_clients = None
+
+        def drain(self):
+            return []
+
+    class EmptyTimerStore:
+        pass
+
+    async def _run(server):
+        task = asyncio.create_task(server.serve_forever())
+        await asyncio.sleep(0.05)
+        started = server._timer_task is not None
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return started
+
+    no_store = JarvisServer(FakeAssistant(), notifier=NoOpNotifier(), port=0)
+    no_notifier = JarvisServer(FakeAssistant(), timer_store=EmptyTimerStore(), port=0)
+    assert asyncio.run(_run(no_store)) is False
+    assert asyncio.run(_run(no_notifier)) is False

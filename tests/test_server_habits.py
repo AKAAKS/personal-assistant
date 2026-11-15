@@ -132,7 +132,7 @@ def test_seconds_until_next_scan_tolerates_malformed_hour_env(monkeypatch):
 
 
 def test_serve_forever_starts_habit_task_only_when_habit_scan_set():
-    server = JarvisServer(FakeAssistant(), habit_scan=lambda: 0)
+    server = JarvisServer(FakeAssistant(), habit_scan=lambda: 0, port=0)
 
     async def _run():
         task = asyncio.create_task(server.serve_forever())
@@ -149,7 +149,7 @@ def test_serve_forever_starts_habit_task_only_when_habit_scan_set():
 
 
 def test_serve_forever_does_not_start_habit_task_when_habit_scan_none():
-    server = JarvisServer(FakeAssistant())
+    server = JarvisServer(FakeAssistant(), port=0)
 
     async def _run():
         task = asyncio.create_task(server.serve_forever())
