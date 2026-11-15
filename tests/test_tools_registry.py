@@ -458,3 +458,13 @@ def test_a_timer_store_without_a_reminder_store_still_registers_the_timer_tools(
     assert TIMER_TOOLS <= _names(tools)
     assert TIMER_TOOLS <= handlers.keys()
     assert "set_reminder" not in _names(tools)
+
+
+def test_every_tool_in_reminders_tools_is_classified_as_timer_or_reminder():
+    # build_registry gates timer tools on the timer store and the rest on the
+    # reminder store. An unclassified new tool would silently be gated on the wrong
+    # store, so adding one to reminders.TOOLS must fail here until it is classified.
+    from jarvisd.tools import reminders
+    names = {t["name"] for t in reminders.TOOLS}
+    assert names == set(reminders.TIMER_TOOL_NAMES) | set(reminders.REMINDER_TOOL_NAMES)
+    assert not set(reminders.TIMER_TOOL_NAMES) & set(reminders.REMINDER_TOOL_NAMES)

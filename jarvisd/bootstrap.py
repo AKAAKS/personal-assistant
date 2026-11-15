@@ -20,9 +20,9 @@ from jarvisd.pantry_store import PantryStore
 from jarvisd.profile_store import ProfileStore
 from jarvisd.proposal_store import ProposalStore
 from jarvisd.reminder_store import ReminderStore
+from jarvisd.rules_store import RulesStore
 from jarvisd.stopwatch_store import StopwatchStore
 from jarvisd.timer_store import TimerStore
-from jarvisd.rules_store import RulesStore
 from spotify_client import SpotifyClient
 from tv_client import AndroidTVClient
 
@@ -38,9 +38,9 @@ def create_assistant():
     (all-or-nothing, same as the Phase 2 memory wiring). ha_client is always the same
     HomeAssistantClient instance already wired into the assistant -- returned so
     __main__ can reuse it for the Notifier and HA event listener without opening a
-    second connection. meal_store, then proposal_store, then habit_scan are appended
-    LAST (in that order) to the returned tuple to preserve the existing unpacking
-    order for callers. habit_scan is a zero-arg callable (or None if proposal_store
+    second connection. meal_store, proposal_store, habit_scan, then timer_store are
+    appended LAST (in that order) to the returned tuple to preserve the existing
+    unpacking order for callers. habit_scan is a zero-arg callable (or None if proposal_store
     is unavailable) that JarvisServer's nightly job runs via asyncio.to_thread.
     """
     load_dotenv()

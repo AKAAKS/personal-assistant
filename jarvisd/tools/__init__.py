@@ -1,6 +1,6 @@
 """Tool registry — assembles definitions + handlers for the available clients."""
 
-from jarvisd.tools import stopwatch, ha, spotify, system, tv, memory, reminders, rules, meals, files, proposals, gmail, calendar, terminal, clipboard, dev_status, weather, food, pantry, meal_log, suggest, prep
+from jarvisd.tools import ha, spotify, system, tv, memory, reminders, stopwatch, rules, meals, files, proposals, gmail, calendar, terminal, clipboard, dev_status, weather, food, pantry, meal_log, suggest, prep
 
 
 def build_registry(
@@ -61,10 +61,9 @@ def build_registry(
     # gated on timer_store alone: a reminder store without one must not advertise
     # tools whose handlers can only answer "timers are unavailable".
     if reminder_store is not None or timer_store is not None:
-        timer_names = {"set_timer", "timer_status", "timer_control"}
         reminder_handlers = reminders.handlers(reminder_store, timer_store)
         for tool in reminders.TOOLS:
-            is_timer = tool["name"] in timer_names
+            is_timer = tool["name"] in reminders.TIMER_TOOL_NAMES
             if (is_timer and timer_store is not None) or (not is_timer and reminder_store is not None):
                 tools.append(tool)
                 handler_map[tool["name"]] = reminder_handlers[tool["name"]]

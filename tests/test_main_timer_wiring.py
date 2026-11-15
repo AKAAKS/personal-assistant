@@ -35,9 +35,20 @@ def anyio_backend():
     return "asyncio"
 
 
-def _run_entry_point(monkeypatch, tmp_path, *, with_conn=True):
+@pytest.fixture
+def open_conns():
+    """Connections the test opened; closed afterwards so tmp_path cleans up on Windows."""
+    conns = []
+    yield conns
+    for c in conns:
+        c.close()
+
+
+def _run_entry_point(monkeypatch, tmp_path, open_conns, *, with_conn=True):
     """Run entry.run() up to serve_forever; return (server, timer_store, drive)."""
     conn = db.connect(str(tmp_path / "jarvis.db")) if with_conn else None
+    if conn is not None:
+        open_conns.append(conn)
     timer_store = TimerStore(conn) if with_conn else None
     created = {}
 
@@ -73,21 +84,23 @@ async def _serve_briefly(server, coro):
     return running
 
 
-async def test_the_entry_point_passes_the_real_timer_store_to_the_server(monkeypatch, tmp_path):
-    server, timer_store, coro = _run_entry_point(monkeypatch, tmp_path)
+async def test_the_entry_point_passes_the_real_timer_store_to_the_server(
+        monkeypatch, tmp_path, open_conns):
+    server, timer_store, coro = _run_entry_point(monkeypatch, tmp_path, open_conns)
     coro.close()
     assert server.timer_store is timer_store
     assert server.notifier is not None
 
 
 async def test_the_ring_loop_is_actually_running_once_the_entry_point_has_wired_the_server(
-        monkeypatch, tmp_path):
-    server, _, coro = _run_entry_point(monkeypatch, tmp_path)
+        monkeypatch, tmp_path, open_conns):
+    server, _, coro = _run_entry_point(monkeypatch, tmp_path, open_conns)
     assert await _serve_briefly(server, coro) is True
     assert server._timer_task.cancelled()  # and it is torn down with the server
 
 
-async def test_without_a_database_there_is_no_ring_loop_and_no_crash(monkeypatch, tmp_path):
-    server, _, coro = _run_entry_point(monkeypatch, tmp_path, with_conn=False)
+async def test_without_a_database_there_is_no_ring_loop_and_no_crash(
+        monkeypatch, tmp_path, open_conns):
+    server, _, coro = _run_entry_point(monkeypatch, tmp_path, open_conns, with_conn=False)
     assert server.timer_store is None
     assert await _serve_briefly(server, coro) is False

@@ -15,6 +15,12 @@ from jarvisd.timer_store import _naive, _parse, remaining_for
 _ACTIONS = ("pause", "resume", "extend", "cancel", "dismiss", "snooze")
 _DEFAULT_SNOOZE_MIN = 5
 
+# The timer tools in TOOLS below. build_registry gates these on the timer store and
+# every other tool in TOOLS on the reminder store, so a new tool must be classified:
+# list it here if it needs timers, or in REMINDER_TOOL_NAMES if it needs reminders.
+TIMER_TOOL_NAMES = frozenset({"set_timer", "timer_status", "timer_control"})
+REMINDER_TOOL_NAMES = frozenset({"set_reminder", "list_reminders", "cancel_reminder"})
+
 TOOLS = [
     {
         "name": "set_timer",

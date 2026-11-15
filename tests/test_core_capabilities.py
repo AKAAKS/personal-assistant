@@ -159,7 +159,10 @@ def test_the_prompt_tells_the_model_what_timer_control_can_do():
 
 def test_the_prompt_says_timer_status_answers_is_my_timer_done():
     from jarvisd.core import render_system_prompt
-    assert "timer_status" in render_system_prompt(TIMER_TOOLS)
+    low = render_system_prompt(TIMER_TOOLS).lower()
+    assert "timer_status" in low
+    assert "is my timer done" in low
+    assert "never answer from memory" in low
 
 
 def test_no_timer_capability_line_without_the_timer_tools():
