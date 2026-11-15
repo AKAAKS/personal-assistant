@@ -146,7 +146,7 @@ async def test_a_snoozed_timer_gets_a_fresh_ring_budget(server, timer_store, spy
     assert len(spy_notifier.calls) == 2
 
 
-async def test_a_failed_notify_is_retried_next_tick_and_spares_other_timers(
+async def test_a_failed_notify_spares_other_timers_and_the_next_ring_is_on_schedule(
         server, timer_store, spy_notifier):
     timer_store.add(60, "bad", now=T0)
     timer_store.add(60, "good", now=T0)
@@ -155,5 +155,48 @@ async def test_a_failed_notify_is_retried_next_tick_and_spares_other_timers(
     await server._fire_due_timers(now=t)
     assert [c.args[0] for c in spy_notifier.calls] == ["Timer's up — good."]
     spy_notifier.fail_for = None
+    # The failed attempt used up its slot: no hot 5-second retry loop...
     await server._fire_due_timers(now=t + timedelta(seconds=5))
+    assert not any("bad" in c.args[0] for c in spy_notifier.calls)
+    # ...the next attempt is on the normal 30-second schedule.
+    await server._fire_due_timers(now=t + timedelta(seconds=30))
     assert any("bad" in c.args[0] for c in spy_notifier.calls)
+
+
+@pytest.mark.parametrize("bad_fired", [None, "not-a-date"])
+async def test_a_ringing_row_with_a_bad_fired_ts_does_not_silence_the_others(
+        server, timer_store, spy_notifier, conn, bad_fired):
+    # Inserted ringing (not running): list_live would retire a bad running row
+    # before the ring loop is ever reached, so only this shape tests the loop.
+    conn.execute("INSERT INTO timers (label, duration_sec, due_ts, status, created_ts, fired_ts) "
+                 "VALUES ('bad', 60, '2026-11-15T10:01:00', 'ringing', '2026-11-15T10:00:00', ?)",
+                 (bad_fired,))
+    conn.commit()
+    good = timer_store.add(60, "good", now=T0)
+    t = T0 + timedelta(minutes=2)
+    timer_store.mark_ringing(good, t)
+    await server._fire_due_timers(now=t + timedelta(seconds=1))
+    assert any("good" in c.args[0] for c in spy_notifier.calls) or \
+        timer_store.get(good)["ring_count"] == 0
+    # The good timer is not yet due to re-ring (count 0 -> due at fired+0): it rings.
+    assert any("good" in c.args[0] for c in spy_notifier.calls)
+
+
+async def test_a_timer_dismissed_mid_tick_is_not_rung(server, timer_store, spy_notifier):
+    tid = timer_store.add(60, "tea", now=T0)
+    t = T0 + timedelta(minutes=2)
+    timer_store.mark_ringing(tid, t)
+    ringing_row = timer_store.get(tid)
+    timer_store.dismiss(tid)
+    await server._ring(ringing_row)
+    assert spy_notifier.calls == []
+
+
+async def test_a_persistently_failing_notify_still_ends_at_max_rings(
+        server, timer_store, spy_notifier):
+    tid = timer_store.add(60, "bad", now=T0)
+    spy_notifier.fail_for = "bad"
+    t = T0 + timedelta(minutes=2)
+    for i in range(MAX_RINGS + 5):
+        await server._fire_due_timers(now=t + timedelta(seconds=30 * i))
+    assert timer_store.get(tid)["status"] == "done"

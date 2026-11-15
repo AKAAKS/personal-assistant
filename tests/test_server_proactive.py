@@ -157,7 +157,7 @@ def test_push_from_thread_bridges_to_connected_client():
     assert msg["text"] == "hi from thread"
 
 
-def test_serve_forever_wires_push_to_clients_and_starts_reminder_task():
+def test_serve_forever_wires_push_to_clients_and_starts_reminder_and_timer_tasks():
     class NoOpNotifier:
         def __init__(self):
             self.push_to_clients = None

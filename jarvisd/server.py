@@ -38,8 +38,11 @@ from datetime import datetime, timedelta
 import websockets
 
 from jarvisd import claude_sessions
-from jarvisd.reminder_store import BAD_DUE_TS, normalize_due_ts
+from jarvisd.reminder_store import BAD_DUE_TS
 from jarvisd.text_format import strip_markdown
+# Parsing and naive-ising are reused from the store, not re-implemented: its
+# _parse guards NULL (raising ValueError) and _naive guards tz-aware values.
+from jarvisd.timer_store import _naive, _parse
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +50,9 @@ MAX_MESSAGE_BYTES = 32 * 1024 * 1024  # 15s of 16kHz int16 is ~0.5MB; generous c
 REMINDER_TICK_SEC = 15
 # A ringing timer is the one thing here that must not be missed, so it has its
 # own, faster loop. It rings every RING_INTERVAL_SEC until the user dismisses
-# it, and gives up after MAX_RINGS (10 minutes) so it can never ring forever.
+# it, and gives up after MAX_RINGS ring ATTEMPTS (a 9m30s window: ring 1 at
+# offset 0, ring 20 at 19 x 30s) so it can never ring forever, even if every
+# attempt fails.
 TIMER_TICK_SEC = 5
 RING_INTERVAL_SEC = 30
 MAX_RINGS = 20
@@ -507,9 +512,9 @@ class JarvisServer:
         Ring timing is derived, not stored: a timer rings, then rings again once
         `now >= fired_ts + ring_count * RING_INTERVAL_SEC`. `mark_ringing` sets
         fired_ts and resets ring_count to 0; `notify` rings; `bump_ring` records
-        it. So the Nth ring lands at fired_ts + (N-1)*RING_INTERVAL_SEC, and if a
-        notify fails the count is not bumped and the next tick simply retries.
-        After MAX_RINGS rings the timer is dismissed.
+        the attempt, success or not. So the Nth ring lands at
+        fired_ts + (N-1)*RING_INTERVAL_SEC. After MAX_RINGS attempts the timer
+        is dismissed.
         """
         now = now or datetime.now()
         store = self.timer_store
@@ -528,15 +533,26 @@ class JarvisServer:
     @staticmethod
     def _ring_is_due(t, now) -> bool:
         try:
-            fired = datetime.fromisoformat(normalize_due_ts(t["fired_ts"]))
+            fired = _parse(t["fired_ts"])  # NULL raises ValueError, in BAD_DUE_TS
         except BAD_DUE_TS:
             log.warning("timer #%s has an unusable fired_ts %r; ringing it now",
                         t["id"], t["fired_ts"])
             return True  # bounded: ring_count still climbs to MAX_RINGS
-        return now >= fired + timedelta(seconds=t["ring_count"] * RING_INTERVAL_SEC)
+        return _naive(now) >= fired + timedelta(seconds=t["ring_count"] * RING_INTERVAL_SEC)
 
     async def _ring(self, t):
-        """Ring one timer once, then count it; dismiss it when the budget is spent."""
+        """Ring one timer once and count the attempt; dismiss it when the budget is spent.
+
+        `ring_count` counts ring ATTEMPTS in the current cycle. It is bumped
+        whether or not notify succeeds, so a persistently failing channel still
+        ends at MAX_RINGS and retries at the normal RING_INTERVAL_SEC spacing
+        rather than every tick.
+        """
+        # Re-read: a dismiss or pause may have landed since the snapshot, and an
+        # alarm that sounds after the user said stop is the complaint we exist to fix.
+        current = await asyncio.to_thread(self.timer_store.get, t["id"])
+        if current is None or current["status"] != "ringing":
+            return
         label = t["label"]
         text = f"Timer's up — {label}." if label else "Timer's up."
         try:
@@ -545,13 +561,11 @@ class JarvisServer:
             )
         except Exception:
             # One timer's failing notify must not starve the others of their
-            # ring. Logged, not swallowed: ring_count is not bumped, so this
-            # timer is retried on the next tick.
+            # ring. Logged, not swallowed; the attempt is still counted below.
             log.exception("ringing timer #%s failed", t["id"])
-            return
         rings = await asyncio.to_thread(self.timer_store.bump_ring, t["id"])
         if rings >= MAX_RINGS:
-            log.info("timer #%s rang %d times unanswered; dismissing", t["id"], rings)
+            log.info("timer #%s used all %d ring attempts; dismissing", t["id"], rings)
             await asyncio.to_thread(self.timer_store.dismiss, t["id"])
 
     async def _timer_tick(self):
