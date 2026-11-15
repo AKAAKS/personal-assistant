@@ -101,11 +101,19 @@ TOOLS = [
                 },
                 "recurrence": {
                     "type": "string",
-                    "enum": ["none", "daily", "weekdays", "weekends", "weekly", "monthly"],
+                    # No `enum`: an enum would forbid the parameterised forms.
+                    "pattern": (
+                        "^(none|daily|weekdays|weekends|weekly|monthly"
+                        "|monthly:([1-9]|[12][0-9]|3[01])"
+                        "|dow:[0-6](,[0-6])*)$"
+                    ),
                     "description": (
-                        "Recurrence type: 'none' (one-time), 'daily', 'weekdays' (Mon-Fri), "
-                        "'weekends' (Sat-Sun), 'weekly', or 'monthly' (same day of the month; "
-                        "clamped to the last day in shorter months). Default: 'none'."
+                        "How the reminder repeats. Plain values: 'none' (one-time, the default), "
+                        "'daily', 'weekdays' (Mon-Fri), 'weekends' (Sat-Sun), 'weekly', "
+                        "'monthly' (same day of the month; clamped to the last day in shorter months). "
+                        "For specific days of the week use 'dow:' followed by comma-separated "
+                        "numbers where Monday=0, Tuesday=1, Wednesday=2, Thursday=3, Friday=4, "
+                        "Saturday=5, Sunday=6, e.g. 'dow:0,2,4' for every Monday, Wednesday and Friday."
                     ),
                 },
                 "condition": {

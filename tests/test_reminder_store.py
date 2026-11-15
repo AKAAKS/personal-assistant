@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from jarvisd import db
-from jarvisd.reminder_store import ReminderStore, _next_occurrence
+from jarvisd.reminder_store import ReminderStore, _next_occurrence, parse_recurrence
 
 
 def make_store(tmp_path):
@@ -452,21 +452,6 @@ def test_monthly_rolls_the_year():
     assert _next_occurrence(d, "monthly", d) == datetime(2027, 1, 15, 9, 0)
 
 
-def test_monthly_with_a_31_anchor_never_drifts_over_a_year():
-    """Advancing repeatedly with the original anchor day returns to the 31st
-    in every 31-day month instead of sticking on the clamped 28th."""
-    cur = datetime(2026, 1, 31, 9, 0)
-    seen = []
-    for _ in range(12):
-        cur = _next_occurrence(cur, "monthly", cur, anchor_day=31)
-        seen.append((cur.year, cur.month, cur.day))
-    assert seen == [
-        (2026, 2, 28), (2026, 3, 31), (2026, 4, 30), (2026, 5, 31),
-        (2026, 6, 30), (2026, 7, 31), (2026, 8, 31), (2026, 9, 30),
-        (2026, 10, 31), (2026, 11, 30), (2026, 12, 31), (2027, 1, 31),
-    ]
-
-
 def test_monthly_catch_up_computes_from_the_original_due_not_cumulatively():
     past = datetime(2026, 1, 31, 9, 0)
     now = datetime(2026, 3, 15, 12, 0)
@@ -504,11 +489,41 @@ def test_next_occurrence_rejects_an_unknown_recurrence():
         _next_occurrence(FRI, "none", FRI)
 
 
-def test_set_reminder_schema_offers_the_new_recurrences():
+@pytest.mark.parametrize(
+    "value,ok",
+    [(v, True) for v in ("none", "daily", "weekdays", "weekends", "weekly", "monthly", "monthly:31", "dow:0,2,4", "dow:6")]
+    + [(v, False) for v in ("fortnightly", "dow:", "dow:7", "monthly:0", "monthly:32", "dow:1,", "monthly:", "dow:0,2,4x")],
+)
+def test_set_reminder_schema_pattern_agrees_with_the_parser(value, ok):
+    import re
     from jarvisd.tools.reminders import TOOLS
     schema = next(t for t in TOOLS if t["name"] == "set_reminder")
-    enum = schema["input_schema"]["properties"]["recurrence"]["enum"]
-    assert set(enum) == {"none", "daily", "weekdays", "weekends", "weekly", "monthly"}
+    prop = schema["input_schema"]["properties"]["recurrence"]
+    assert "enum" not in prop  # an enum would make dow:/monthly:N unreachable
+    assert bool(re.search(prop["pattern"], value)) is ok
+    try:
+        parse_recurrence(value)
+        parsed = True
+    except ValueError:
+        parsed = False
+    assert parsed is ok
+
+
+def test_set_reminder_description_teaches_the_dow_syntax():
+    from jarvisd.tools.reminders import TOOLS
+    schema = next(t for t in TOOLS if t["name"] == "set_reminder")
+    desc = schema["input_schema"]["properties"]["recurrence"]["description"]
+    assert "dow:0,2,4" in desc and "Monday=0" in desc and "weekdays" in desc
+
+
+def test_set_reminder_handler_stores_a_dow_recurrence(tmp_path):
+    from jarvisd.tools import reminders as reminders_tools
+
+    store, conn = make_store(tmp_path)
+    handlers = reminders_tools.handlers(store)
+    result = handlers["set_reminder"]({"text": "gym", "due": "2026-12-01T07:00:00", "recurrence": "dow:4,0"})
+    assert result.startswith("Reminder #")
+    assert conn.execute("SELECT recurrence FROM reminders").fetchone()["recurrence"] == "dow:0,4"
 
 
 def test_an_invalid_recurrence_is_still_rejected(tmp_path):
@@ -557,3 +572,145 @@ def test_mark_fired_retires_a_row_with_an_unknown_recurrence(tmp_path):
     rid = conn.execute("SELECT id FROM reminders").fetchone()["id"]
     store.mark_fired(rid, datetime(2026, 1, 2))  # must not raise
     assert conn.execute("SELECT status FROM reminders").fetchone()["status"] == "invalid"
+
+
+# --- Task 8 fix round: parameterised recurrence ----------------------------
+
+@pytest.mark.parametrize(
+    "value",
+    ["none", "daily", "weekdays", "weekends", "weekly", "monthly", "monthly:31", "monthly:1", "dow:0,2,4", "dow:6"],
+)
+def test_parse_recurrence_accepts_valid_values(value):
+    parse_recurrence(value)  # must not raise
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["fortnightly", "dow:", "dow:7", "dow:-1", "dow:a", "dow:1,,2", "dow:1.5", "monthly:0", "monthly:32", "monthly:", "monthly:x", "", None, "daily:3", "dow"],
+)
+def test_parse_recurrence_rejects_invalid_values(value):
+    with pytest.raises(ValueError):
+        parse_recurrence(value)
+
+
+def test_dow_is_normalised_sorted_and_deduplicated_on_store(tmp_path):
+    store, conn = make_store(tmp_path)
+    store.add("x", "2026-12-01T09:00:00", "dow:4,0,2,0")
+    assert conn.execute("SELECT recurrence FROM reminders").fetchone()["recurrence"] == "dow:0,2,4"
+
+
+@pytest.mark.parametrize("bad", ["dow:", "dow:7", "monthly:0", "fortnightly"])
+def test_add_rejects_bad_parameterised_recurrence(tmp_path, bad):
+    store, _ = make_store(tmp_path)
+    with pytest.raises(ValueError):
+        store.add("x", "2026-12-01T09:00:00", bad)
+
+
+def test_add_derives_the_monthly_anchor_from_a_31st_due(tmp_path):
+    store, conn = make_store(tmp_path)
+    store.add("rent", "2026-01-31T09:00:00", "monthly")
+    assert conn.execute("SELECT recurrence FROM reminders").fetchone()["recurrence"] == "monthly:31"
+
+
+def test_add_keeps_plain_monthly_when_no_clamp_can_happen(tmp_path):
+    store, conn = make_store(tmp_path)
+    store.add("x", "2026-01-15T09:00:00", "monthly")
+    assert conn.execute("SELECT recurrence FROM reminders").fetchone()["recurrence"] == "monthly"
+
+
+def test_add_accepts_an_explicit_monthly_anchor(tmp_path):
+    store, conn = make_store(tmp_path)
+    store.add("x", "2026-01-31T09:00:00", "monthly:30")
+    assert conn.execute("SELECT recurrence FROM reminders").fetchone()["recurrence"] == "monthly:30"
+
+
+def test_monthly_31_anchor_returns_to_the_31st_after_february_over_14_months(tmp_path):
+    """The ratchet regression: via the store (stateless mark_fired) a 31st
+    reminder must be back on the 31st in March, not stuck on the 28th."""
+    store, conn = make_store(tmp_path)
+    rid = store.add("rent", "2026-01-31T09:00:00", "monthly")
+    seen = []
+    for _ in range(14):
+        due = datetime.fromisoformat(
+            conn.execute("SELECT due_ts FROM reminders WHERE id=?", (rid,)).fetchone()["due_ts"]
+        )
+        store.mark_fired(rid, due)
+        row = conn.execute("SELECT due_ts, status FROM reminders WHERE id=?", (rid,)).fetchone()
+        assert row["status"] == "active"
+        seen.append(row["due_ts"][:10])
+    assert seen == [
+        "2026-02-28", "2026-03-31", "2026-04-30", "2026-05-31", "2026-06-30",
+        "2026-07-31", "2026-08-31", "2026-09-30", "2026-10-31", "2026-11-30",
+        "2026-12-31", "2027-01-31", "2027-02-28", "2027-03-31",
+    ]
+
+
+def test_legacy_plain_monthly_row_uses_the_due_days_day_of_month(tmp_path):
+    """A pre-existing plain 'monthly' row (no anchor) behaves as before: the
+    day-of-month comes from its current due_ts."""
+    store, conn = make_store(tmp_path)
+    conn.execute(
+        "INSERT INTO reminders (text, due_ts, recurrence, status, created_ts) "
+        "VALUES ('old', '2026-02-28T09:00:00', 'monthly', 'active', '2026-01-01T00:00:00')"
+    )
+    conn.commit()
+    rid = conn.execute("SELECT id FROM reminders").fetchone()["id"]
+    store.mark_fired(rid, datetime(2026, 2, 28, 9, 0))
+    row = conn.execute("SELECT due_ts, recurrence FROM reminders").fetchone()
+    assert row["due_ts"] == "2026-03-28T09:00:00"
+    assert row["recurrence"] == "monthly"
+
+
+@pytest.mark.parametrize(
+    "rec,due",
+    [("monthly:31", "2026-01-31T09:00:00"), ("dow:0,2,4", "2026-11-13T09:00:00")],
+)
+def test_mark_fired_does_not_retire_a_parameterised_row(tmp_path, rec, due):
+    store, conn = make_store(tmp_path)
+    rid = store.add("x", due, rec)
+    store.mark_fired(rid, datetime.fromisoformat(due))
+    row = conn.execute("SELECT status, due_ts, recurrence FROM reminders WHERE id=?", (rid,)).fetchone()
+    assert row["status"] == "active"
+    assert row["due_ts"] > due
+    assert row["recurrence"] == rec
+
+
+def test_stored_parameterised_rows_inserted_directly_survive_mark_fired(tmp_path):
+    """Not via add(): rows written straight to the DB must not be treated as unknown."""
+    store, conn = make_store(tmp_path)
+    for rec in ("monthly:31", "dow:0,2,4"):
+        conn.execute(
+            "INSERT INTO reminders (text, due_ts, recurrence, status, created_ts) "
+            "VALUES (?, '2026-01-31T09:00:00', ?, 'active', '2026-01-01T00:00:00')",
+            (rec, rec),
+        )
+    conn.commit()
+    for r in conn.execute("SELECT id FROM reminders").fetchall():
+        store.mark_fired(r["id"], datetime(2026, 2, 1))
+    assert [r["status"] for r in conn.execute("SELECT status FROM reminders")] == ["active", "active"]
+
+
+@pytest.mark.parametrize(
+    "start,expected",
+    [
+        (datetime(2026, 11, 9, 7, 30), datetime(2026, 11, 11, 7, 30)),   # Mon -> Wed
+        (datetime(2026, 11, 11, 7, 30), datetime(2026, 11, 13, 7, 30)),  # Wed -> Fri
+        (datetime(2026, 11, 13, 7, 30), datetime(2026, 11, 16, 7, 30)),  # Fri -> Mon over weekend
+        (datetime(2026, 11, 14, 7, 30), datetime(2026, 11, 16, 7, 30)),  # Sat -> Mon
+        (datetime(2026, 12, 30, 7, 30), datetime(2027, 1, 1, 7, 30)),    # Wed -> Fri over year end
+        (datetime(2026, 12, 31, 7, 30), datetime(2027, 1, 1, 7, 30)),    # Thu -> Fri
+    ],
+)
+def test_dow_mon_wed_fri_picks_the_next_named_weekday_keeping_time_of_day(start, expected):
+    assert _next_occurrence(start, "dow:0,2,4", start) == expected
+
+
+def test_dow_single_day_is_a_week_later():
+    mon = datetime(2026, 11, 9, 8, 0)
+    assert _next_occurrence(mon, "dow:0", mon) == datetime(2026, 11, 16, 8, 0)
+
+
+def test_dow_catch_up_lands_on_a_named_weekday_in_the_future():
+    now = datetime(2026, 11, 15, 12, 0)  # Sunday
+    nxt = _next_occurrence(datetime(2020, 1, 1, 6, 15), "dow:1,3", now)  # Tue/Thu
+    assert nxt == datetime(2026, 11, 17, 6, 15)
