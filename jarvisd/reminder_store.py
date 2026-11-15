@@ -1,13 +1,20 @@
 """Reminders: durable, restart-safe due-date tracking with catch-up recurrence."""
 
+import calendar
 import logging
 import sqlite3
 from datetime import datetime, timedelta
 
 log = logging.getLogger(__name__)
 
-_VALID_RECURRENCES = {"none", "daily", "weekly"}
+_VALID_RECURRENCES = {"none", "daily", "weekdays", "weekends", "weekly", "monthly"}
 _STEP = {"daily": timedelta(days=1), "weekly": timedelta(days=7)}
+_DAY = timedelta(days=1)
+# datetime.weekday(): Monday == 0 ... Sunday == 6
+_DAY_FILTER = {
+    "weekdays": lambda d: d.weekday() < 5,
+    "weekends": lambda d: d.weekday() >= 5,
+}
 
 # astimezone() on Windows raises OSError [Errno 22] for an aware value outside
 # the platform's supported range (pre-1970, or near datetime.max), so parsing a
@@ -42,6 +49,58 @@ def normalize_due_ts(due_ts: str) -> str:
     is safe. Raises one of BAD_DUE_TS if the value is unusable.
     """
     return _to_local_naive(due_ts).isoformat(timespec="seconds")
+
+
+def _add_months(due: datetime, months: int, anchor_day: int) -> datetime:
+    """`due` moved forward `months` calendar months, on `anchor_day` clamped to
+    the target month's length. Wall-clock time-of-day is kept."""
+    index = due.year * 12 + (due.month - 1) + months
+    year, month = divmod(index, 12)
+    month += 1
+    day = min(anchor_day, calendar.monthrange(year, month)[1])
+    return due.replace(year=year, month=month, day=day)
+
+
+def _next_occurrence(
+    due: datetime, recurrence: str, now: datetime, anchor_day: int | None = None
+) -> datetime:
+    """The first occurrence of a recurring reminder strictly after `now`.
+
+    All values are local naive, so adding days/months preserves the wall-clock
+    time-of-day across DST changes (no elapsed-duration arithmetic on aware
+    datetimes). If `due` is already in the future and valid for the recurrence
+    it is returned unchanged for daily/weekly (the historical catch-up loop's
+    behaviour); a due on the wrong side of the week for weekdays/weekends is
+    moved to the next valid day.
+
+    monthly: the same day-of-month, clamped to the last day of a shorter month
+    (31 Jan -> 28 Feb). Every candidate is computed from the original `due` and
+    `anchor_day` (default due.day) rather than cumulatively, so clamping never
+    ratchets the day downward when the caller supplies the anchor.
+
+    Raises ValueError for 'none' or an unknown recurrence.
+    """
+    if recurrence in _STEP:
+        step = _STEP[recurrence]
+        while due <= now:
+            due += step
+        return due
+    if recurrence in _DAY_FILTER:
+        ok = _DAY_FILTER[recurrence]
+        # Strictly after the original due, so a reminder created on a valid day
+        # at `now` does not fire again the same day.
+        while due <= now or not ok(due):
+            due += _DAY
+        return due
+    if recurrence == "monthly":
+        anchor = due.day if anchor_day is None else anchor_day
+        months = 0
+        candidate = due
+        while candidate <= now:
+            months += 1
+            candidate = _add_months(due, months, anchor)
+        return candidate
+    raise ValueError(f"no next occurrence for recurrence {recurrence!r}")
 
 
 class ReminderStore:
@@ -136,7 +195,15 @@ class ReminderStore:
                 (reminder_id,),
             )
         else:
-            step = _STEP[recurrence]
+            if recurrence not in _VALID_RECURRENCES:
+                # A hand-edited/legacy value. Not 'none' (that would silently
+                # complete it) and must not raise out of the reminder tick.
+                log.warning(
+                    "reminder %s has an unknown recurrence %r; marking it invalid",
+                    reminder_id, recurrence,
+                )
+                self._retire_invalid(reminder_id)
+                return
             try:
                 due_ts = _to_local_naive(row["due_ts"])
             except BAD_DUE_TS:
@@ -149,8 +216,7 @@ class ReminderStore:
                 )
                 self._retire_invalid(reminder_id)
                 return
-            while due_ts <= now:
-                due_ts += step
+            due_ts = _next_occurrence(due_ts, recurrence, now)
             self._conn.execute(
                 "UPDATE reminders SET due_ts = ? WHERE id = ? AND status = 'active'",
                 (due_ts.isoformat(timespec="seconds"), reminder_id),

@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from jarvisd import db
-from jarvisd.reminder_store import ReminderStore
+from jarvisd.reminder_store import ReminderStore, _next_occurrence
 
 
 def make_store(tmp_path):
@@ -72,7 +72,7 @@ def test_add_stores_recurrence(tmp_path):
 def test_add_rejects_bad_recurrence(tmp_path):
     store, conn = make_store(tmp_path)
     with pytest.raises(ValueError):
-        store.add("x", "2026-07-05T10:00:00", recurrence="monthly")
+        store.add("x", "2026-07-05T10:00:00", recurrence="fortnightly")
 
 
 def test_add_rejects_unparseable_due_ts(tmp_path):
@@ -392,3 +392,168 @@ def test_set_reminder_echoes_the_normalized_time(tmp_path):
     expected = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
     assert expected.isoformat(timespec="seconds") in result
     assert "+00:00" not in result and "Z" not in result
+
+
+# --- Task 8: extended recurrence -------------------------------------------
+
+FRI = datetime(2026, 11, 13, 9, 0)  # Friday
+SAT = datetime(2026, 11, 14, 9, 0)  # Saturday
+
+
+def test_weekdays_skips_the_weekend():
+    assert _next_occurrence(FRI, "weekdays", FRI) == datetime(2026, 11, 16, 9, 0)
+
+
+def test_weekdays_created_on_a_saturday_lands_on_monday():
+    assert _next_occurrence(SAT, "weekdays", SAT) == datetime(2026, 11, 16, 9, 0)
+
+
+def test_weekdays_midweek_advances_exactly_one_day():
+    wed = datetime(2026, 11, 11, 9, 0)
+    assert _next_occurrence(wed, "weekdays", wed) == datetime(2026, 11, 12, 9, 0)
+
+
+def test_weekends_from_friday_and_saturday():
+    assert _next_occurrence(SAT, "weekends", SAT) == datetime(2026, 11, 15, 9, 0)
+    assert _next_occurrence(FRI, "weekends", FRI) == datetime(2026, 11, 14, 9, 0)
+
+
+def test_weekends_from_sunday_skips_the_working_week():
+    sun = datetime(2026, 11, 15, 9, 0)
+    assert _next_occurrence(sun, "weekends", sun) == datetime(2026, 11, 21, 9, 0)
+
+
+def test_monthly_advances_one_month():
+    d = datetime(2026, 1, 15, 9, 0)
+    assert _next_occurrence(d, "monthly", d) == datetime(2026, 2, 15, 9, 0)
+
+
+def test_monthly_on_the_31st_clamps_to_the_last_day_of_february():
+    d = datetime(2026, 1, 31, 9, 0)
+    assert _next_occurrence(d, "monthly", d) == datetime(2026, 2, 28, 9, 0)
+
+
+def test_monthly_on_the_29th_of_february_in_a_leap_year():
+    d = datetime(2028, 2, 29, 9, 0)
+    # next month has 31 days: the 29th exists, no clamp
+    assert _next_occurrence(d, "monthly", d) == datetime(2028, 3, 29, 9, 0)
+    # a 31st anchor clamps to the leap-year 29th
+    jan = datetime(2028, 1, 31, 9, 0)
+    assert _next_occurrence(jan, "monthly", jan) == datetime(2028, 2, 29, 9, 0)
+
+
+def test_monthly_from_march_31_clamps_to_april_30():
+    d = datetime(2026, 3, 31, 9, 0)
+    assert _next_occurrence(d, "monthly", d) == datetime(2026, 4, 30, 9, 0)
+
+
+def test_monthly_rolls_the_year():
+    d = datetime(2026, 12, 15, 9, 0)
+    assert _next_occurrence(d, "monthly", d) == datetime(2027, 1, 15, 9, 0)
+
+
+def test_monthly_with_a_31_anchor_never_drifts_over_a_year():
+    """Advancing repeatedly with the original anchor day returns to the 31st
+    in every 31-day month instead of sticking on the clamped 28th."""
+    cur = datetime(2026, 1, 31, 9, 0)
+    seen = []
+    for _ in range(12):
+        cur = _next_occurrence(cur, "monthly", cur, anchor_day=31)
+        seen.append((cur.year, cur.month, cur.day))
+    assert seen == [
+        (2026, 2, 28), (2026, 3, 31), (2026, 4, 30), (2026, 5, 31),
+        (2026, 6, 30), (2026, 7, 31), (2026, 8, 31), (2026, 9, 30),
+        (2026, 10, 31), (2026, 11, 30), (2026, 12, 31), (2027, 1, 31),
+    ]
+
+
+def test_monthly_catch_up_computes_from_the_original_due_not_cumulatively():
+    past = datetime(2026, 1, 31, 9, 0)
+    now = datetime(2026, 3, 15, 12, 0)
+    assert _next_occurrence(past, "monthly", now) == datetime(2026, 3, 31, 9, 0)
+
+
+def test_every_recurrence_terminates_and_lands_strictly_after_now():
+    now = datetime(2026, 11, 15, 12, 0)
+    past = datetime(2020, 1, 1, 9, 0)
+    for rec in ("daily", "weekdays", "weekends", "weekly", "monthly"):
+        nxt = _next_occurrence(past, rec, now)
+        assert nxt > now, rec
+        assert nxt.time() == past.time(), rec  # wall-clock time-of-day preserved
+
+
+def test_catch_up_lands_on_the_correct_weekday_not_just_the_future():
+    # Sat 2026-11-14 is "now" at noon; weekdays catch-up must pick Mon the 16th.
+    now = datetime(2026, 11, 14, 12, 0)
+    past = datetime(2026, 10, 1, 9, 0)
+    assert _next_occurrence(past, "weekdays", now) == datetime(2026, 11, 16, 9, 0)
+    assert _next_occurrence(past, "weekends", now) == datetime(2026, 11, 15, 9, 0)
+
+
+def test_wall_clock_time_survives_a_dst_boundary():
+    # US clocks fall back 2026-11-01; a naive 07:00 reminder must stay at 07:00.
+    d = datetime(2026, 10, 31, 7, 0)
+    assert _next_occurrence(d, "daily", d) == datetime(2026, 11, 1, 7, 0)
+    assert _next_occurrence(d, "weekly", d) == datetime(2026, 11, 7, 7, 0)
+
+
+def test_next_occurrence_rejects_an_unknown_recurrence():
+    with pytest.raises(ValueError):
+        _next_occurrence(FRI, "fortnightly", FRI)
+    with pytest.raises(ValueError):
+        _next_occurrence(FRI, "none", FRI)
+
+
+def test_set_reminder_schema_offers_the_new_recurrences():
+    from jarvisd.tools.reminders import TOOLS
+    schema = next(t for t in TOOLS if t["name"] == "set_reminder")
+    enum = schema["input_schema"]["properties"]["recurrence"]["enum"]
+    assert set(enum) == {"none", "daily", "weekdays", "weekends", "weekly", "monthly"}
+
+
+def test_an_invalid_recurrence_is_still_rejected(tmp_path):
+    store, _ = make_store(tmp_path)
+    with pytest.raises(ValueError):
+        store.add("x", "2026-12-01T09:00:00", "fortnightly")
+
+
+def test_set_reminder_tolerates_an_explicit_null_recurrence(tmp_path):
+    from jarvisd.tools import reminders as reminders_tools
+
+    store, conn = make_store(tmp_path)
+    handlers = reminders_tools.handlers(store)
+    result = handlers["set_reminder"](
+        {"text": "x", "due": "2026-12-01T09:00:00", "recurrence": None}
+    )
+    assert result.startswith("Reminder #")
+    assert conn.execute("SELECT recurrence FROM reminders").fetchone()["recurrence"] == "none"
+
+
+@pytest.mark.parametrize(
+    "rec,due,now,expected",
+    [
+        ("weekdays", datetime(2026, 11, 13, 9, 0), datetime(2026, 11, 13, 9, 0), "2026-11-16T09:00:00"),
+        ("weekends", datetime(2026, 11, 13, 9, 0), datetime(2026, 11, 13, 9, 0), "2026-11-14T09:00:00"),
+        ("monthly", datetime(2026, 1, 31, 9, 0), datetime(2026, 1, 31, 9, 0), "2026-02-28T09:00:00"),
+    ],
+)
+def test_mark_fired_applies_the_new_recurrences(tmp_path, rec, due, now, expected):
+    store, conn = make_store(tmp_path)
+    rid = store.add("x", due.isoformat(timespec="seconds"), recurrence=rec)
+    store.mark_fired(rid, now)
+    row = conn.execute("SELECT due_ts, status FROM reminders WHERE id=?", (rid,)).fetchone()
+    assert (row["due_ts"], row["status"]) == (expected, "active")
+
+
+def test_mark_fired_retires_a_row_with_an_unknown_recurrence(tmp_path):
+    """A hand-edited/legacy recurrence must not raise out of the tick, and must
+    not silently behave like 'none' (done) either."""
+    store, conn = make_store(tmp_path)
+    conn.execute(
+        "INSERT INTO reminders (text, due_ts, recurrence, status, created_ts) "
+        "VALUES ('odd', '2026-01-01T09:00:00', 'fortnightly', 'active', '2026-01-01T00:00:00')"
+    )
+    conn.commit()
+    rid = conn.execute("SELECT id FROM reminders").fetchone()["id"]
+    store.mark_fired(rid, datetime(2026, 1, 2))  # must not raise
+    assert conn.execute("SELECT status FROM reminders").fetchone()["status"] == "invalid"

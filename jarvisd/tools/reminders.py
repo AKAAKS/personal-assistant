@@ -87,7 +87,7 @@ TOOLS = [
     },
     {
         "name": "set_reminder",
-        "description": "Set a reminder for a specific time. Supports one-time, daily, or weekly recurring reminders.",
+        "description": "Set a reminder for a specific time. Supports one-time reminders and recurring ones: daily, weekdays (Mon-Fri), weekends (Sat-Sun), weekly, or monthly.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -101,8 +101,12 @@ TOOLS = [
                 },
                 "recurrence": {
                     "type": "string",
-                    "enum": ["none", "daily", "weekly"],
-                    "description": "Recurrence type: 'none' (one-time), 'daily', or 'weekly'. Default: 'none'.",
+                    "enum": ["none", "daily", "weekdays", "weekends", "weekly", "monthly"],
+                    "description": (
+                        "Recurrence type: 'none' (one-time), 'daily', 'weekdays' (Mon-Fri), "
+                        "'weekends' (Sat-Sun), 'weekly', or 'monthly' (same day of the month; "
+                        "clamped to the last day in shorter months). Default: 'none'."
+                    ),
                 },
                 "condition": {
                     "type": "string",
@@ -298,7 +302,7 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
         """Set a reminder."""
         text = ti.get("text", "").strip()
         due = ti.get("due", "").strip()
-        recurrence = ti.get("recurrence", "none")
+        recurrence = ti.get("recurrence") or "none"
         condition = ti.get("condition") or None
 
         if not text:
