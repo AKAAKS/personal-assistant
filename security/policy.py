@@ -47,7 +47,13 @@ TOOL_PERMISSIONS = {
     "remember": "write",
     "recall": "read_only",
     # Proactivity
+    # Timers/stopwatch. NEVER "destructive": only that tier prompts for confirmation,
+    # and a prompt before every timer (or before dismissing a ringing alarm) is the
+    # bug these tools exist to fix. timer_control's cancel/dismiss is write on purpose.
     "set_timer": "write",
+    "timer_status": "read_only",
+    "timer_control": "write",
+    "stopwatch_control": "write",
     "set_reminder": "write",
     "list_reminders": "read_only",
     "cancel_reminder": "write",

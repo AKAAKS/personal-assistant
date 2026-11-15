@@ -200,3 +200,21 @@ async def test_a_persistently_failing_notify_still_ends_at_max_rings(
     for i in range(MAX_RINGS + 5):
         await server._fire_due_timers(now=t + timedelta(seconds=30 * i))
     assert timer_store.get(tid)["status"] == "done"
+
+
+async def test_a_user_turn_runs_the_assistant_off_the_event_loop_thread(timer_store, spy_notifier):
+    """Timer and stopwatch handlers are synchronous sqlite calls made from inside
+    Assistant.process. They are only safe because _process hands that to a worker
+    thread; on the loop thread a slow query would freeze the whole daemon."""
+    import threading
+
+    seen = {}
+
+    class ThreadSpyAssistant(FakeAssistant):
+        def process(self, text):
+            seen["thread"] = threading.get_ident()
+            return "ok"
+
+    server = JarvisServer(ThreadSpyAssistant(), notifier=spy_notifier, timer_store=timer_store)
+    assert await server._process("set a timer") == "ok"
+    assert seen["thread"] != threading.get_ident()

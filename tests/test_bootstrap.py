@@ -6,6 +6,7 @@ new arity/contents directly rather than relying on the per-module tests
 (core/tools/meal_store/proposal_store) to catch a caller-side unpacking break.
 """
 
+from datetime import datetime
 import sqlite3
 
 
@@ -48,8 +49,8 @@ def test_create_assistant_returns_meal_store(monkeypatch, tmp_path):
 
     result = bootstrap.create_assistant()
 
-    assert len(result) == 9
-    ai, features, conn, reminder_store, rules_store, ha, meal_store, proposal_store, habit_scan = result
+    assert len(result) == 10
+    ai, features, conn, reminder_store, rules_store, ha, meal_store, proposal_store, habit_scan, timer_store = result
 
     assert conn is not None
     assert meal_store is not None
@@ -68,6 +69,14 @@ def test_create_assistant_returns_meal_store(monkeypatch, tmp_path):
     assert "list_proposals" in ai._handlers
     assert "accept_proposal" in ai._handlers
     assert "dismiss_proposal" in ai._handlers
+
+    # Timers: the same conn feeds the store the server's ring loop will poll and
+    # the tools the model calls, so a timer set by voice is the one that rings.
+    from jarvisd.timer_store import TimerStore
+    assert isinstance(timer_store, TimerStore)
+    assert {"set_timer", "timer_status", "timer_control", "stopwatch_control"} <= set(ai._handlers)
+    ai._handlers["set_timer"]({"minutes": 5, "label": "tea"})
+    assert [t["label"] for t in timer_store.list_live(datetime.now())] == ["tea"]
 
     conn.close()
 

@@ -20,6 +20,8 @@ from jarvisd.pantry_store import PantryStore
 from jarvisd.profile_store import ProfileStore
 from jarvisd.proposal_store import ProposalStore
 from jarvisd.reminder_store import ReminderStore
+from jarvisd.stopwatch_store import StopwatchStore
+from jarvisd.timer_store import TimerStore
 from jarvisd.rules_store import RulesStore
 from spotify_client import SpotifyClient
 from tv_client import AndroidTVClient
@@ -31,7 +33,7 @@ def create_assistant():
     """Initialize clients and create assistant.
 
     Returns (assistant, active_features, conn, reminder_store, rules_store, ha_client,
-    meal_store, proposal_store, habit_scan). conn/reminder_store/rules_store/meal_store/
+    meal_store, proposal_store, habit_scan, timer_store). conn/reminder_store/rules_store/meal_store/
     proposal_store are None together if the DB/memory layer failed to initialize
     (all-or-nothing, same as the Phase 2 memory wiring). ha_client is always the same
     HomeAssistantClient instance already wired into the assistant -- returned so
@@ -102,6 +104,8 @@ def create_assistant():
     memory_store = None
     profile_store = None
     reminder_store = None
+    timer_store = None
+    stopwatch_store = None
     rules_store = None
     meal_store = None
     proposal_store = None
@@ -112,6 +116,8 @@ def create_assistant():
         memory_store = MemoryStore(conn)
         profile_store = ProfileStore()
         reminder_store = ReminderStore(conn)
+        timer_store = TimerStore(conn)
+        stopwatch_store = StopwatchStore(conn)
         rules_store = RulesStore(conn)
         meal_store = MealStore(conn)
         proposal_store = ProposalStore(conn)
@@ -128,6 +134,8 @@ def create_assistant():
         memory_store = None
         profile_store = None
         reminder_store = None
+        timer_store = None
+        stopwatch_store = None
         rules_store = None
         meal_store = None
         proposal_store = None
@@ -150,6 +158,8 @@ def create_assistant():
         profile_store=profile_store,
         memory_store=memory_store,
         reminder_store=reminder_store,
+        timer_store=timer_store,
+        stopwatch_store=stopwatch_store,
         rules_store=rules_store,
         enable_web_search=True,
         search_monthly_cap=search_cap,
@@ -209,4 +219,5 @@ def create_assistant():
             return run_habit_scan(AUDIT_PATH, proposal_store, phraser)
         features.append("Habits")
 
-    return ai, features, conn, reminder_store, rules_store, ha, meal_store, proposal_store, habit_scan
+    return (ai, features, conn, reminder_store, rules_store, ha, meal_store, proposal_store,
+            habit_scan, timer_store)

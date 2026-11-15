@@ -104,7 +104,8 @@ def main():
 
 
 def run(args, log):
-    ai, features, conn, reminder_store, rules_store, ha, meal_store, proposal_store, habit_scan = create_assistant()
+    (ai, features, conn, reminder_store, rules_store, ha, meal_store, proposal_store,
+     habit_scan, timer_store) = create_assistant()
 
     tts_backend = os.getenv("TTS_BACKEND", "pyttsx3")
     stt = tts = None
@@ -151,6 +152,7 @@ def run(args, log):
         port=int(os.getenv("JARVIS_PORT", "8765")),
         notifier=notifier,
         reminder_store=reminder_store,
+        timer_store=timer_store,
         meal_store=meal_store,
         proposal_store=proposal_store,
         habit_scan=habit_scan,
