@@ -126,6 +126,12 @@ class JarvisServer:
         # appended.
         self.proposal_store = proposal_store
         self._lock = asyncio.Lock()  # one conversation; serialize agent access
+        # {timer_id: when it last rang}. In memory on purpose: ring timing is
+        # derived from fired_ts and ring_count (no column), which has no memory
+        # of a stalled tick loop, so this is the floor that keeps two rings of
+        # one timer RING_INTERVAL_SEC apart. After a restart it is empty, so the
+        # first tick rings once straight away and everything after is paced.
+        self._last_ring: dict[int, datetime] = {}
         # Reserved hook for a future multi-server topology that would share one
         # assistant/lock. Currently unused by the wiring: __main__'s HA-rule
         # callables serialize on `server._lock` directly to match _process (see
@@ -515,6 +521,11 @@ class JarvisServer:
         the attempt, success or not. So the Nth ring lands at
         fired_ts + (N-1)*RING_INTERVAL_SEC. After MAX_RINGS attempts the timer
         is dismissed.
+
+        That schedule is absolute, so after a stall shorter than the stranded
+        window (a laptop asleep for a few minutes) it would be "owed" several
+        rings and fire one per tick. `_last_ring` is the floor: a timer that
+        rang less than RING_INTERVAL_SEC ago waits, whatever the schedule says.
         """
         now = now or datetime.now()
         store = self.timer_store
@@ -525,16 +536,30 @@ class JarvisServer:
         due = await asyncio.to_thread(store.due, now)
         for t in due:
             await asyncio.to_thread(store.mark_ringing, t["id"], now)
-            await self._ring(t)
+            self._last_ring.pop(t["id"], None)  # a new cycle: no floor from an old one
+            await self._ring(t, now)
         for t in ringing:
             verdict = self._ring_verdict(t, now)
+            if verdict == "ring" and self._rang_recently(t["id"], now):
+                verdict = "wait"
             if verdict == "stranded":
                 log.info("timer #%s was still ringing %s after it fired (the daemon was "
                          "not running to advance it); dismissing instead of re-ringing",
                          t["id"], t["fired_ts"])
                 await asyncio.to_thread(self.timer_store.dismiss_ringing, t["id"])
+                self._last_ring.pop(t["id"], None)
             elif verdict == "ring":
-                await self._ring(t)
+                await self._ring(t, now)
+        # Forget timers that are no longer ringing (dismissed, cancelled,
+        # snoozed, stranded, finished), so the map cannot grow without bound.
+        # `due` ones just started ringing, so they are kept alongside.
+        keep = {t["id"] for t in ringing} | {t["id"] for t in due}
+        for tid in [k for k in self._last_ring if k not in keep]:
+            del self._last_ring[tid]
+
+    def _rang_recently(self, timer_id, now) -> bool:
+        last = self._last_ring.get(timer_id)
+        return last is not None and to_naive(now) - last < timedelta(seconds=RING_INTERVAL_SEC)
 
     @staticmethod
     def _ring_verdict(t, now) -> str:
@@ -556,15 +581,18 @@ class JarvisServer:
         due_at = fired + timedelta(seconds=t["ring_count"] * RING_INTERVAL_SEC)
         return "ring" if now >= due_at else "wait"
 
-    async def _ring(self, t):
+    async def _ring(self, t, now=None):
         """Ring one timer once and count the attempt; dismiss it when the budget is spent.
 
         `ring_count` counts ring ATTEMPTS in the current cycle. It is bumped
         whether or not notify succeeds, so a persistently failing channel still
-        ends at MAX_RINGS. Normally the attempts are RING_INTERVAL_SEC apart, but
-        when fired_ts is unusable `_ring_verdict` answers "ring" on every tick, so
-        the spacing collapses to TIMER_TICK_SEC: all MAX_RINGS attempts (and
-        warnings) land within about 100 seconds. Bounded, not paced.
+        ends at MAX_RINGS. Attempts are RING_INTERVAL_SEC apart: when fired_ts is
+        unusable `_ring_verdict` answers "ring" on every tick, but `_last_ring`
+        still holds each timer to one attempt per interval.
+
+        The first attempt may be banked in the notice queue if no channel is
+        reached, so the user still learns the timer went off; later attempts are
+        perishable, so a persistently failing channel banks one notice, not 20.
         """
         # Re-read: a dismiss or pause may have landed since the snapshot, and an
         # alarm that sounds after the user said stop is the complaint we exist to fix.
@@ -573,9 +601,13 @@ class JarvisServer:
             return
         label = t["label"]
         text = f"Timer's up — {label}." if label else "Timer's up."
+        # `current` is post-mark_ringing, so ring_count 0 is this cycle's first ring.
+        first_ring = current["ring_count"] == 0
+        self._last_ring[t["id"]] = to_naive(now or datetime.now())
         try:
             await asyncio.to_thread(
-                self.notifier.notify, text, "urgent", alarm=True
+                self.notifier.notify, text, "urgent", alarm=True,
+                perishable=not first_ring,
             )
         except Exception:
             # One timer's failing notify must not starve the others of their
@@ -587,6 +619,7 @@ class JarvisServer:
             # Guarded to a still-ringing row: a snooze landing since bump_ring
             # must survive, which plain dismiss() (any live status) would cancel.
             await asyncio.to_thread(self.timer_store.dismiss_ringing, t["id"])
+            self._last_ring.pop(t["id"], None)
 
     async def _timer_tick(self):
         """Background timer loop: mirrors _reminder_tick, on TIMER_TICK_SEC."""

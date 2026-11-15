@@ -259,3 +259,109 @@ async def test_a_snooze_landing_during_the_last_ring_is_not_cancelled(
     monkeypatch.setattr(timer_store, "bump_ring", bump_then_user_snoozes)
     await server._fire_due_timers(now=t + timedelta(seconds=30))
     assert timer_store.get(tid)["status"] == "running"
+
+
+# --- ring pacing across a stalled tick loop, and one banked notice ------------
+
+async def _drive(server, spy_notifier, start, seconds, step=5):
+    """Tick every `step` seconds; return the offsets (from `start`) that rang."""
+    rang = []
+    for off in range(0, seconds + 1, step):
+        before = len(spy_notifier.calls)
+        await server._fire_due_timers(now=start + timedelta(seconds=off))
+        if len(spy_notifier.calls) > before:
+            rang.append(off)
+    return rang
+
+
+async def test_a_sub_window_stall_does_not_collapse_the_ring_to_the_tick_interval(
+        server, timer_store, spy_notifier):
+    timer_store.add(60, "tea", now=T0)
+    fire = T0 + timedelta(minutes=2)
+    await server._fire_due_timers(now=fire)          # ring 1 at offset 0
+    resume = fire + timedelta(seconds=150)           # laptop slept 150s (< 600s window)
+    rang = await _drive(server, spy_notifier, resume, 70)
+    gaps = [b - a for a, b in zip(rang, rang[1:])]
+    assert rang[0] == 0 and gaps and all(g == 30 for g in gaps)
+    assert rang == [0, 30, 60]
+
+
+async def test_an_unstalled_ring_keeps_its_30_second_cadence(server, timer_store, spy_notifier):
+    timer_store.add(60, "tea", now=T0)
+    fire = T0 + timedelta(minutes=2)
+    rang = await _drive(server, spy_notifier, fire, 120)
+    assert rang == [0, 30, 60, 90, 120]
+
+
+async def test_a_stall_followed_by_a_fresh_daemon_rings_once_then_paces(
+        server, timer_store, spy_notifier):
+    timer_store.add(60, "tea", now=T0)
+    fire = T0 + timedelta(minutes=2)
+    await server._fire_due_timers(now=fire)
+    # The daemon restarts: a new server, an empty pacing memory, the same DB.
+    fresh = JarvisServer(FakeAssistant(), notifier=spy_notifier, timer_store=timer_store)
+    spy_notifier.calls.clear()
+    rang = await _drive(fresh, spy_notifier, fire + timedelta(seconds=150), 70)
+    assert rang == [0, 30, 60]
+
+
+async def test_the_pacing_memory_is_dropped_when_a_timer_stops_ringing(
+        server, timer_store, spy_notifier):
+    tid = timer_store.add(60, "tea", now=T0)
+    fire = T0 + timedelta(minutes=2)
+    await server._fire_due_timers(now=fire)
+    await server._fire_due_timers(now=fire + timedelta(seconds=30))
+    assert tid in server._last_ring
+    timer_store.dismiss(tid)
+    await server._fire_due_timers(now=fire + timedelta(seconds=35))
+    assert tid not in server._last_ring
+
+
+async def test_a_snoozed_timer_that_rings_again_is_not_held_back_by_its_old_ring(
+        server, timer_store, spy_notifier):
+    tid = timer_store.add(60, "tea", now=T0)
+    fire = T0 + timedelta(minutes=2)
+    await server._fire_due_timers(now=fire)
+    timer_store.snooze(tid, 1, fire + timedelta(seconds=2))
+    spy_notifier.calls.clear()
+    await server._fire_due_timers(now=fire + timedelta(seconds=10))  # due again, 10s after ring
+    assert len(spy_notifier.calls) == 1
+
+
+def _real_notifier(conn, **kw):
+    from jarvisd.notifier import Notifier
+    return Notifier(conn, quiet_hours=None, now=lambda: T0, **kw)
+
+
+def _queued(conn):
+    return [r["text"] for r in conn.execute("SELECT text FROM notice_queue ORDER BY id")]
+
+
+async def test_every_channel_failing_banks_exactly_one_notice_over_a_full_window(
+        conn, timer_store):
+    notifier = _real_notifier(conn, local_notify=lambda text: False)
+    server = JarvisServer(FakeAssistant(), notifier=notifier, timer_store=timer_store)
+    timer_store.add(60, "tea", now=T0)
+    fire = T0 + timedelta(minutes=2)
+    for i in range(MAX_RINGS + 3):
+        await server._fire_due_timers(now=fire + timedelta(seconds=30 * i))
+    assert _queued(conn) == ["Timer's up — tea."]
+
+
+async def test_a_ring_that_reaches_a_channel_banks_nothing(conn, timer_store):
+    notifier = _real_notifier(conn, local_notify=lambda text: True)
+    server = JarvisServer(FakeAssistant(), notifier=notifier, timer_store=timer_store)
+    timer_store.add(60, "tea", now=T0)
+    fire = T0 + timedelta(minutes=2)
+    for i in range(5):
+        await server._fire_due_timers(now=fire + timedelta(seconds=30 * i))
+    assert _queued(conn) == []
+
+
+async def test_only_the_first_ring_may_be_banked(server, timer_store, spy_notifier):
+    timer_store.add(60, "tea", now=T0)
+    fire = T0 + timedelta(minutes=2)
+    for i in range(3):
+        await server._fire_due_timers(now=fire + timedelta(seconds=30 * i))
+    flags = [c.kwargs.get("perishable", False) for c in spy_notifier.calls]
+    assert flags == [False, True, True]

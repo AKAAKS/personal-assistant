@@ -714,3 +714,24 @@ def test_dow_catch_up_lands_on_a_named_weekday_in_the_future():
     now = datetime(2026, 11, 15, 12, 0)  # Sunday
     nxt = _next_occurrence(datetime(2020, 1, 1, 6, 15), "dow:1,3", now)  # Tue/Thu
     assert nxt == datetime(2026, 11, 17, 6, 15)
+
+
+@pytest.mark.parametrize("bad", ["dow:7", "biweekly", "monthly:0"])
+def test_set_reminder_names_the_recurrence_when_the_recurrence_is_invalid(tmp_path, bad):
+    from jarvisd.tools import reminders as reminders_tools
+
+    store, conn = make_store(tmp_path)
+    result = reminders_tools.handlers(store)["set_reminder"](
+        {"text": "gym", "due": "2026-11-16T07:00:00", "recurrence": bad})
+    assert result.startswith("Error:") and "recurrence" in result
+    assert "not a valid ISO datetime" not in result
+    assert conn.execute("SELECT COUNT(*) AS n FROM reminders").fetchone()["n"] == 0
+
+
+def test_set_reminder_still_names_the_timestamp_when_the_timestamp_is_invalid(tmp_path):
+    from jarvisd.tools import reminders as reminders_tools
+
+    store, _ = make_store(tmp_path)
+    result = reminders_tools.handlers(store)["set_reminder"](
+        {"text": "gym", "due": "next tuesday", "recurrence": "daily"})
+    assert "due is not a valid ISO datetime" in result

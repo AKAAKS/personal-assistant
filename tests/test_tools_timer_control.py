@@ -206,3 +206,22 @@ def test_a_non_integer_timer_id_is_an_error(h):
 def test_control_without_a_timer_store_says_so_instead_of_raising():
     out = handlers(None)["timer_control"]({"action": "pause"})
     assert "error" in out.lower()
+
+
+@pytest.mark.parametrize("action", ["extend", "snooze"])
+@pytest.mark.parametrize("minutes", [1e30, 1e308])
+def test_an_absurdly_large_duration_is_a_clean_error_not_an_exception(h, store, action, minutes):
+    h["set_timer"]({"minutes": 10, "label": "tea"})
+    tid = store.list_live(NOW)[0]["id"]
+    if action == "snooze":
+        store.mark_ringing(tid, NOW)
+    result = h["timer_control"]({"action": action, "label": "tea", "minutes": minutes})
+    assert result.startswith("Error:") and "minutes" in result
+    assert store.get(tid)["status"] == ("ringing" if action == "snooze" else "running")
+
+
+def test_extending_a_paused_timer_by_an_absurd_duration_is_a_clean_error(h, store):
+    h["set_timer"]({"minutes": 10, "label": "tea"})
+    h["timer_control"]({"action": "pause", "label": "tea"})
+    result = h["timer_control"]({"action": "extend", "label": "tea", "minutes": 1e30})
+    assert result.startswith("Error:") and "minutes" in result

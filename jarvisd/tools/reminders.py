@@ -8,7 +8,7 @@ pauses, resumes, extends, cancels, dismisses or snoozes one.
 import math
 from datetime import datetime
 
-from jarvisd.reminder_store import BAD_DUE_TS, normalize_due_ts
+from jarvisd.reminder_store import BAD_DUE_TS, normalize_due_ts, parse_recurrence
 from jarvisd.text_format import speak_due, speak_duration, speak_recurrence
 from jarvisd.timer_store import parse_ts, remaining_for, to_naive
 
@@ -269,6 +269,13 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
             return None, f"Which timer? Several match. {listing}"
         return matches[0], None
 
+    # What a huge `minutes` raises: round(inf), timedelta, datetime + timedelta,
+    # and an int too big for SQLite. The same set set_timer guards.
+    _TOO_LARGE = (ValueError, OSError, OverflowError)
+
+    def _too_large(action):
+        return f"Error: minutes is too large to {action} by."
+
     def timer_control(ti):
         """Pause, resume, extend, cancel, dismiss or snooze a timer."""
         if timer_store is None:
@@ -297,8 +304,12 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
                 return f"Resumed {name} (#{tid})."
             return f"Couldn't resume {name} (#{tid}); it isn't paused."
         if action == "extend":
-            extra = round(float(minutes) * 60)
-            if not timer_store.extend(tid, extra, now):
+            try:
+                extra = round(float(minutes) * 60)
+                extended = timer_store.extend(tid, extra, now)
+            except _TOO_LARGE:
+                return _too_large(action)
+            if not extended:
                 return f"Couldn't extend {name} (#{tid}); it isn't running or paused."
             return f"Added {speak_duration(extra)} to {name} (#{tid}). {_describe(timer_store.get(tid), now)}"
         if action == "cancel":
@@ -309,8 +320,12 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
             if timer_store.dismiss(tid):
                 return f"Dismissed {name} (#{tid})."
             return f"Couldn't dismiss {name} (#{tid}); it is already finished."
-        snooze_sec = round((float(minutes) if minutes is not None else _DEFAULT_SNOOZE_MIN) * 60)
-        if timer_store.snooze(tid, snooze_sec, now):
+        try:
+            snooze_sec = round((float(minutes) if minutes is not None else _DEFAULT_SNOOZE_MIN) * 60)
+            snoozed = timer_store.snooze(tid, snooze_sec, now)
+        except _TOO_LARGE:
+            return _too_large(action)
+        if snoozed:
             return f"Snoozed {name} (#{tid}) for {speak_duration(snooze_sec)}."
         return f"Couldn't snooze {name} (#{tid}); it isn't ringing."
 
@@ -327,6 +342,13 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
             return "Error: due datetime is required."
 
         try:
+            # Checked first so a bad recurrence is reported as one: BAD_DUE_TS
+            # includes ValueError, so the handler below would blame the timestamp.
+            parse_recurrence(recurrence)
+        except ValueError as exc:
+            return f"Error: {exc}"
+
+        try:
             # Echo the NORMALIZED time, not the raw input: add() rewrites an
             # offset-aware due to local naive, so echoing `due` would confirm a
             # different time than the one that actually fires.
@@ -334,9 +356,8 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
             reminder_id = reminder_store.add(text, due, recurrence, condition=condition)
             return f"Reminder #{reminder_id} set for {due}"
         except BAD_DUE_TS as exc:
+            # The recurrence was validated above, so what is left is the timestamp.
             return f"Error: due is not a valid ISO datetime: {due!r} ({exc})"
-        except ValueError as exc:
-            return f"Error: {exc}"
 
     def list_reminders(ti):
         """List active reminders."""

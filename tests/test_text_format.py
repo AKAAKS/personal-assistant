@@ -296,3 +296,30 @@ def test_list_reminders_speaks_the_due_time_not_an_iso_timestamp(tmp_path):
     assert "rent — due Saturday at 9:30pm" in out
     assert "tax — due December 31 at 9am" in out
     assert "pills — due today at 6pm" in out
+
+
+# --- speak_due: the year is spoken only when it is not this year -------------
+
+def test_a_far_date_in_the_same_year_omits_the_year():
+    from datetime import datetime
+    from jarvisd.text_format import speak_due
+    assert speak_due("2026-12-31T09:00:00", datetime(2026, 11, 15, 10, 0)) == "December 31 at 9am"
+
+
+def test_a_date_in_a_later_year_says_the_year():
+    from datetime import datetime
+    from jarvisd.text_format import speak_due
+    assert speak_due("2027-11-16T07:00:00", datetime(2026, 11, 15, 10, 0)) == "November 16, 2027 at 7am"
+
+
+def test_a_date_in_the_previous_year_says_the_year():
+    from datetime import datetime
+    from jarvisd.text_format import speak_due
+    assert speak_due("2025-12-31T09:00:00", datetime(2026, 1, 3, 10, 0)) == "December 31, 2025 at 9am"
+
+
+def test_a_near_date_across_new_year_keeps_its_relative_wording_without_a_year():
+    from datetime import datetime
+    from jarvisd.text_format import speak_due
+    # Jan 2 is 3 days after Dec 30: still a weekday name, never "January 2, 2027".
+    assert speak_due("2027-01-02T09:00:00", datetime(2026, 12, 30, 10, 0)) == "Saturday at 9am"

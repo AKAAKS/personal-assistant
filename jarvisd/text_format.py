@@ -174,7 +174,8 @@ _MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July",
 def speak_due(due_ts: str, now: datetime) -> str:
     """Render a stored due timestamp for speech, so a TTS never reads ISO aloud:
     'today at 6pm', 'tomorrow at 7am', 'Sunday at 9:30pm' (within the next week),
-    otherwise 'December 31 at 9am'. An unparseable stamp is returned unchanged.
+    otherwise 'December 31 at 9am', with the year ('November 16, 2027 at 7am')
+    when it is not the current one. An unparseable stamp is returned unchanged.
     """
     try:
         due = datetime.fromisoformat(normalize_due_ts(due_ts))
@@ -191,4 +192,8 @@ def speak_due(due_ts: str, now: datetime) -> str:
         day = _WEEKDAY_NAMES[due.weekday()]
     else:
         day = f"{_MONTH_NAMES[due.month - 1]} {due.day}"
+        if due.year != now.year:
+            # Without it "November 16" reads as the coming one, which is how a
+            # reminder due next year got spoken as imminent in the briefing.
+            day += f", {due.year}"
     return f"{day} at {clock}"
