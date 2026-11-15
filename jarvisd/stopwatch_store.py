@@ -38,22 +38,17 @@ def _parse(value: str | None) -> datetime:
     return datetime.fromisoformat(normalize_due_ts(value))
 
 
-def _span(row, now: datetime) -> int:
-    """Seconds of the current running span, clamped at 0 (clock may step back).
-
-    Raises one of BAD_DUE_TS if started_ts is unusable. The parse is the only
-    thing a caller should catch around; the arithmetic here is not guarded.
-    """
-    started = _parse(row["started_ts"])
-    return max(0, int((_naive(now) - started).total_seconds()))
-
-
 def elapsed_sec(row, now: datetime) -> int:
-    """Total running seconds for `row` as of `now`. Raises BAD_DUE_TS on a bad started_ts."""
+    """Total running seconds for `row` as of `now`; the running span is clamped at 0.
+
+    Raises one of BAD_DUE_TS on an unusable started_ts, and OSError/OverflowError
+    for an absurd tz-aware `now`. Callers that retire rows must not treat the
+    latter as a bad row (see StopwatchStore._elapsed_or_retire).
+    """
     banked = max(0, int(row["accumulated_sec"] or 0))
     if row["status"] != "running":
         return banked
-    return banked + _span(row, now)
+    return banked + max(0, int((_naive(now) - _parse(row["started_ts"])).total_seconds()))
 
 
 class StopwatchStore:
@@ -70,14 +65,21 @@ class StopwatchStore:
         self._conn.commit()
 
     def _elapsed_or_retire(self, row: sqlite3.Row, now: datetime) -> int | None:
-        """elapsed_sec, but retire an unusable row and return None instead of raising."""
-        try:
-            return elapsed_sec(row, now)
-        except BAD_DUE_TS:
-            log.warning("stopwatch %s has an unusable started_ts %r; marking it invalid",
-                        row["id"], row["started_ts"])
-            self._retire(row["id"])
-            return None
+        """elapsed_sec, but retire a row whose started_ts is unusable and return None.
+
+        Only the started_ts parse is guarded. `now` is converted first, outside
+        the guard, so a bad `now` raises loudly instead of retiring live rows.
+        """
+        now = _naive(now)
+        if row["status"] == "running":
+            try:
+                _parse(row["started_ts"])
+            except BAD_DUE_TS:
+                log.warning("stopwatch %s has an unusable started_ts %r; marking it invalid",
+                            row["id"], row["started_ts"])
+                self._retire(row["id"])
+                return None
+        return elapsed_sec(row, now)
 
     def _update(self, sql: str, params: tuple) -> bool:
         cur = self._conn.execute(sql, params)

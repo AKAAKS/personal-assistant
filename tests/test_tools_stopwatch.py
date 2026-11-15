@@ -47,7 +47,8 @@ def test_tool_is_registered_with_a_distinguishing_description():
     (tool,) = sw_tools.TOOLS
     assert tool["name"] == "stopwatch_control"
     desc = tool["description"].lower()
-    assert "count" in desc and "up" in desc
+    assert "counts up" in desc
+    assert "not a countdown" in desc
     assert "set_timer" in tool["description"]
     assert tool["input_schema"]["properties"]["action"]["enum"] == [
         "start", "pause", "resume", "stop", "check"]
@@ -171,5 +172,100 @@ def test_check_with_several_lists_each_with_its_time(h, store, clock):
     store.start("b", now=T0)
     clock.advance(minutes=2)
     out = h["stopwatch_control"]({"action": "check"})
-    assert "a" in out and "b" in out
-    assert out.count("2 minutes") == 2
+    assert "The a stopwatch is at 2 minutes." in out
+    assert "The b stopwatch is at 2 minutes." in out
+
+
+# ---- duplicate / unaddressable guard ------------------------------------
+
+@pytest.mark.parametrize("label", [None, "run", "RUN"])
+def test_two_starts_then_a_bare_stop_cannot_reach_an_unaddressable_state(h, store, clock, label):
+    first = {"action": "start", "label": "run" if label else None}
+    h["stopwatch_control"](first)
+    clock.advance(seconds=5)
+    again = h["stopwatch_control"]({"action": "start", "label": label})
+    assert "already running" in again
+    assert len(store.active(clock())) == 1
+    clock.advance(seconds=5)
+    out = h["stopwatch_control"]({"action": "stop", "label": label})
+    assert "10 seconds" in out
+    assert store.active(clock()) == []
+
+
+def test_start_on_a_paused_label_reports_paused_and_makes_no_duplicate(h, store, clock):
+    h["stopwatch_control"]({"action": "start", "label": "run"})
+    clock.advance(seconds=30)
+    h["stopwatch_control"]({"action": "pause", "label": "run"})
+    out = h["stopwatch_control"]({"action": "start", "label": "run"})
+    assert "already paused" in out
+    assert len(store.active(clock())) == 1
+
+
+def test_different_labels_still_start_separately(h, store, clock):
+    h["stopwatch_control"]({"action": "start", "label": "a"})
+    h["stopwatch_control"]({"action": "start", "label": "b"})
+    h["stopwatch_control"]({"action": "start"})
+    assert len(store.active(clock())) == 3
+
+
+# ---- spoken wording -----------------------------------------------------
+
+def test_a_label_keeps_its_case_in_the_resume_reply(h, store, clock):
+    h["stopwatch_control"]({"action": "start", "label": "NYC"})
+    h["stopwatch_control"]({"action": "pause"})
+    assert "NYC" in h["stopwatch_control"]({"action": "resume"})
+
+
+def test_zero_elapsed_never_speaks_no_time(h):
+    h["stopwatch_control"]({"action": "start"})
+    out = h["stopwatch_control"]({"action": "check"})
+    assert "no time" not in out
+    assert "hasn't counted" in out
+    stopped = h["stopwatch_control"]({"action": "stop"})
+    assert "no time" not in stopped
+    assert "less than a second" in stopped
+
+
+def test_pause_reply_starts_with_paused_and_speaks_the_time(h, store, clock):
+    store.start(now=T0)
+    clock.advance(seconds=30)
+    out = h["stopwatch_control"]({"action": "pause"})
+    assert out.startswith("Paused.")
+    assert "30 seconds" in out
+
+
+# ---- failure branches ---------------------------------------------------
+
+class RefusingStore(StopwatchStore):
+    """A store whose mutation is lost to a race after the handler picked the row."""
+
+    def pause(self, sw_id, now):
+        return False
+
+    def resume(self, sw_id, now):
+        return False
+
+    def stop(self, sw_id, now):
+        return None
+
+
+@pytest.mark.parametrize("action,expected", [
+    ("pause", "could not be paused"),
+    ("resume", "could not be resumed"),
+    ("stop", "could not be stopped"),
+])
+def test_a_lost_mutation_is_reported_not_raised(conn, clock, action, expected):
+    rs = RefusingStore(conn)
+    sid = rs.start(now=T0)
+    if action == "resume":
+        conn.execute("UPDATE stopwatches SET status = 'paused' WHERE id = ?", (sid,))
+        conn.commit()
+    out = sw_tools.handlers(rs, clock=clock)["stopwatch_control"]({"action": action})
+    assert expected in out
+
+
+def test_a_row_with_a_bad_started_ts_is_skipped_by_the_tool(h, conn):
+    conn.execute(
+        "INSERT INTO stopwatches (label, started_ts, status) VALUES ('bad', 'garbage', 'running')")
+    conn.commit()
+    assert "no stopwatch" in h["stopwatch_control"]({"action": "stop"}).lower()

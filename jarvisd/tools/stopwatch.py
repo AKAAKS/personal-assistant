@@ -18,7 +18,9 @@ TOOLS = [
             "20 minutes' or 'set a 10-minute timer' use set_timer instead. Actions: start, "
             "pause, resume, stop (reports the final time and ends it), check (reports the "
             "elapsed time without stopping). Optional label names it ('run'); with several "
-            "stopwatches, name the one you mean by label, otherwise the only one is used."
+            "stopwatches, name the one you mean by label, otherwise the only one is used. "
+            "Starting a stopwatch whose label is already in use reports that one instead of "
+            "making a duplicate."
         ),
         "input_schema": {
             "type": "object",
@@ -51,23 +53,29 @@ def handlers(stopwatch_store, clock=datetime.now):
             secs = elapsed_sec(row, now)
         except BAD_DUE_TS:
             return f"{_name(row)} has an unreadable time."
+        if secs <= 0:
+            return f"{_name(row)} hasn't counted any time yet."
         state = "paused at" if row["status"] == "paused" else "at"
         return f"{_name(row)} is {state} {speak_duration(secs)}."
 
     def _pick(label, now, verb):
-        """Return (row, None) or (None, message) for the stopwatch an action targets."""
+        """Return (row, message, candidates): the one target, or a message.
+
+        `candidates` is the list of matches, so callers can tell "ambiguous"
+        (more than one) from "nothing" without parsing the message.
+        """
         rows = stopwatch_store.active(now)
         if not rows:
-            return None, f"There is no stopwatch to {verb}."
+            return None, f"There is no stopwatch to {verb}.", []
         if label:
             wanted = label.casefold()
             rows = [r for r in rows if r["label"].casefold() == wanted]
             if not rows:
-                return None, f"There is no stopwatch called {label}."
+                return None, f"There is no stopwatch called {label}.", []
         if len(rows) > 1:
             names = ", ".join(r["label"] or "unnamed" for r in rows)
-            return None, f"Which stopwatch do you mean? You have: {names}."
-        return rows[0], None
+            return None, f"Which stopwatch do you mean? You have: {names}.", rows
+        return rows[0], None, rows
 
     def stopwatch_control(ti):
         action = ti.get("action")
@@ -78,14 +86,18 @@ def handlers(stopwatch_store, clock=datetime.now):
         now = clock()
 
         if action == "start":
+            # One active stopwatch per label (empty included): two identical ones
+            # could never be told apart, leaving both unaddressable.
+            for r in stopwatch_store.active(now):
+                if r["label"].casefold() == label.casefold():
+                    state = "paused" if r["status"] == "paused" else "running"
+                    return f"{_name(r)} is already {state}. {_line(r, now)}"
             stopwatch_store.start(label, now=now)
             return f"Started the {label} stopwatch." if label else "Started the stopwatch."
 
-        row, msg = _pick(label, now, "check" if action == "check" else action)
-        if action == "check" and row is None and msg.startswith("Which"):
-            lines = [_line(r, now) for r in stopwatch_store.active(now)
-                     if not label or r["label"].casefold() == label.casefold()]
-            return " ".join(lines)
+        row, msg, candidates = _pick(label, now, action)
+        if action == "check" and len(candidates) > 1:
+            return " ".join(_line(r, now) for r in candidates)
         if row is None:
             return msg
 
@@ -101,11 +113,13 @@ def handlers(stopwatch_store, clock=datetime.now):
             if row["status"] == "running":
                 return f"{_name(row)} is already running."
             if stopwatch_store.resume(row["id"], now):
-                return f"Resumed {_name(row).lower()}."
+                return f"Resumed. {_line(stopwatch_store.get(row['id']), now)}"
             return f"{_name(row)} could not be resumed."
-        total = stopwatch_store.stop(row["id"], now)  # stop
+        total = stopwatch_store.stop(row["id"], now)  # action == "stop"
         if total is None:
             return f"{_name(row)} could not be stopped."
+        if total <= 0:
+            return f"Stopped. {_name(row)} ran for less than a second."
         return f"Stopped. {_name(row)} ran for {speak_duration(total)}."
 
     return {"stopwatch_control": stopwatch_control}

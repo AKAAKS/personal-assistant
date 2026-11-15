@@ -143,3 +143,37 @@ def test_active_retires_a_running_row_with_an_unparseable_started_ts(conn, store
     assert [r["id"] for r in store.active(T0 + timedelta(seconds=1))] == [good]
     assert store.get(bad)["status"] == "invalid"
     assert store.get(good)["status"] == "running"
+
+
+def _insert_bad(conn):
+    cur = conn.execute(
+        "INSERT INTO stopwatches (label, started_ts, status) VALUES ('bad', 'garbage', 'running')")
+    conn.commit()
+    return cur.lastrowid
+
+
+def test_pause_and_stop_on_an_unparseable_row_retire_it_and_report_failure(conn, store):
+    a, b = _insert_bad(conn), _insert_bad(conn)
+    assert store.pause(a, T0) is False
+    assert store.get(a)["status"] == "invalid"
+    assert store.stop(b, T0) is None
+    assert store.get(b)["status"] == "invalid"
+
+
+def test_pause_stop_resume_on_an_invalid_row_do_nothing(conn, store):
+    bad = _insert_bad(conn)
+    store.active(T0)  # retires it
+    assert store.pause(bad, T0) is False
+    assert store.resume(bad, T0) is False
+    assert store.stop(bad, T0) is None
+    assert store.get(bad)["status"] == "invalid"
+
+
+def test_an_absurd_aware_now_raises_and_does_not_retire_live_rows(store):
+    sid = store.start(now=T0)
+    bad_now = datetime.min.replace(tzinfo=timezone.utc)
+    with pytest.raises((OSError, OverflowError, ValueError)):
+        store.active(bad_now)
+    with pytest.raises((OSError, OverflowError, ValueError)):
+        store.pause(sid, bad_now)
+    assert store.get(sid)["status"] == "running"
