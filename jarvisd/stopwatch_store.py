@@ -14,6 +14,7 @@ import sqlite3
 from datetime import datetime
 
 from jarvisd.reminder_store import BAD_DUE_TS, normalize_due_ts
+from jarvisd.timer_store import parse_ts, to_naive
 
 log = logging.getLogger(__name__)
 
@@ -22,20 +23,6 @@ _ACTIVE = ("running", "paused")
 
 def _iso(dt: datetime) -> str:
     return normalize_due_ts(dt.isoformat(timespec="seconds"))
-
-
-def _naive(now: datetime) -> datetime:
-    if now.tzinfo is not None:
-        now = now.astimezone().replace(tzinfo=None)
-    return now
-
-
-def _parse(value: str | None) -> datetime:
-    # NULL guarded explicitly: fromisoformat(None) raises TypeError, which is not
-    # in BAD_DUE_TS and would escape every handler.
-    if value is None:
-        raise ValueError("timestamp is NULL")
-    return datetime.fromisoformat(normalize_due_ts(value))
 
 
 def elapsed_sec(row, now: datetime) -> int:
@@ -48,7 +35,7 @@ def elapsed_sec(row, now: datetime) -> int:
     banked = max(0, int(row["accumulated_sec"] or 0))
     if row["status"] != "running":
         return banked
-    return banked + max(0, int((_naive(now) - _parse(row["started_ts"])).total_seconds()))
+    return banked + max(0, int((to_naive(now) - parse_ts(row["started_ts"])).total_seconds()))
 
 
 class StopwatchStore:
@@ -70,10 +57,10 @@ class StopwatchStore:
         Only the started_ts parse is guarded. `now` is converted first, outside
         the guard, so a bad `now` raises loudly instead of retiring live rows.
         """
-        now = _naive(now)
+        now = to_naive(now)
         if row["status"] == "running":
             try:
-                _parse(row["started_ts"])
+                parse_ts(row["started_ts"])
             except BAD_DUE_TS:
                 log.warning("stopwatch %s has an unusable started_ts %r; marking it invalid",
                             row["id"], row["started_ts"])

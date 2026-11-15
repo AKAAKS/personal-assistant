@@ -218,3 +218,44 @@ async def test_a_user_turn_runs_the_assistant_off_the_event_loop_thread(timer_st
     server = JarvisServer(ThreadSpyAssistant(), notifier=spy_notifier, timer_store=timer_store)
     assert await server._process("set a timer") == "ok"
     assert seen["thread"] != threading.get_ident()
+
+
+async def test_a_ringing_timer_stranded_by_an_outage_is_dismissed_not_rung(
+        server, timer_store, spy_notifier):
+    # Lid closed / daemon killed mid-ring: the row is still 'ringing' hours later.
+    tid = timer_store.add(60, "old", now=T0)
+    timer_store.mark_ringing(tid, T0)
+    for _ in range(3):
+        timer_store.bump_ring(tid)
+    await server._fire_due_timers(now=T0 + timedelta(hours=1))
+    assert spy_notifier.calls == []
+    assert timer_store.get(tid)["status"] == "done"
+
+
+async def test_a_ringing_timer_inside_the_ring_window_still_rings(
+        server, timer_store, spy_notifier):
+    # The counterpart to the outage test: the staleness bound must not be over-broad.
+    tid = timer_store.add(60, "fresh", now=T0)
+    timer_store.mark_ringing(tid, T0)
+    timer_store.bump_ring(tid)  # 1 ring done; the 2nd lands at T0 + 30s
+    await server._fire_due_timers(now=T0 + timedelta(seconds=30))
+    assert [c.args[0] for c in spy_notifier.calls] == ["Timer's up — fresh."]
+    assert timer_store.get(tid)["status"] == "ringing"
+    assert timer_store.get(tid)["ring_count"] == 2
+
+
+async def test_a_snooze_landing_during_the_last_ring_is_not_cancelled(
+        server, timer_store, spy_notifier, monkeypatch):
+    tid = timer_store.add(60, "tea", now=T0)
+    t = T0 + timedelta(minutes=2)
+    await server._fire_due_timers(now=t)
+    real_bump = timer_store.bump_ring
+
+    def bump_then_user_snoozes(timer_id):
+        real_bump(timer_id)
+        timer_store.snooze(timer_id, 300, t)  # the user's snooze lands in the gap
+        return MAX_RINGS  # this was ring 20 of 20
+
+    monkeypatch.setattr(timer_store, "bump_ring", bump_then_user_snoozes)
+    await server._fire_due_timers(now=t + timedelta(seconds=30))
+    assert timer_store.get(tid)["status"] == "running"

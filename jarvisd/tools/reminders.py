@@ -9,8 +9,8 @@ import math
 from datetime import datetime
 
 from jarvisd.reminder_store import BAD_DUE_TS, normalize_due_ts
-from jarvisd.text_format import speak_duration, speak_recurrence
-from jarvisd.timer_store import _naive, _parse, remaining_for
+from jarvisd.text_format import speak_due, speak_duration, speak_recurrence
+from jarvisd.timer_store import parse_ts, remaining_for, to_naive
 
 _ACTIONS = ("pause", "resume", "extend", "cancel", "dismiss", "snooze")
 _DEFAULT_SNOOZE_MIN = 5
@@ -188,12 +188,14 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
             return f"{name} (#{row['id']}) is ringing now."
         if row["status"] == "paused":
             return f"{name} (#{row['id']}) is paused with {speak_duration(rem)} left."
+        if rem == 0:  # due, not yet ringing; speak_duration(0) would say "no time left"
+            return f"{name} (#{row['id']}) is due now."
         return f"{name} (#{row['id']}) has {speak_duration(rem)} left."
 
     def _fired_line(row, now):
         name = _name(row)
         try:
-            ago = int((_naive(now) - _parse(row["fired_ts"])).total_seconds())
+            ago = int((to_naive(now) - parse_ts(row["fired_ts"])).total_seconds())
         except BAD_DUE_TS:
             return f"{name} (#{row['id']}) went off recently."
         return f"{name} (#{row['id']}) went off {speak_duration(max(ago, 1))} ago and was dismissed."
@@ -343,13 +345,14 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
         if not reminders:
             return "No active reminders."
 
+        now = clock()
         lines = []
         # Show the real DB id (what cancel_reminder takes), never the row
         # position -- after any cancellation they diverge and "cancel reminder
         # 1" would hit the wrong reminder.
         for reminder in reminders:
             text = reminder["text"]
-            due = reminder["due_ts"]
+            due = speak_due(reminder["due_ts"], now)
             recurrence = reminder["recurrence"]
             recurrence_str = "" if recurrence == "none" else f" (repeats {speak_recurrence(recurrence)})"
             lines.append(f"{reminder['id']}. {text} — due {due}{recurrence_str}")

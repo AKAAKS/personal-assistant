@@ -276,3 +276,23 @@ def test_list_reminders_speaks_the_recurrence(tmp_path):
     assert "(repeats monthly on the 31st)" in out
     assert "(repeats daily)" in out
     assert "dow" not in out and "monthly:" not in out
+
+
+def test_list_reminders_speaks_the_due_time_not_an_iso_timestamp(tmp_path):
+    from datetime import datetime
+    from jarvisd import db
+    from jarvisd.reminder_store import ReminderStore
+    from jarvisd.tools import reminders as reminders_tools
+
+    store = ReminderStore(db.connect(str(tmp_path / "jarvis.db")))
+    store.add("gym", "2026-11-16T07:00:00", "none")       # tomorrow
+    store.add("rent", "2026-11-21T21:30:00", "none")      # Saturday, within a week
+    store.add("tax", "2026-12-31T09:00:00", "none")       # far out
+    store.add("pills", "2026-11-15T18:00:00", "none")     # today
+    now = datetime(2026, 11, 15, 10, 0, 0)
+    out = reminders_tools.handlers(store, clock=lambda: now)["list_reminders"]({})
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", out)
+    assert "gym — due tomorrow at 7am" in out
+    assert "rent — due Saturday at 9:30pm" in out
+    assert "tax — due December 31 at 9am" in out
+    assert "pills — due today at 6pm" in out

@@ -214,3 +214,31 @@ def test_an_aware_now_does_not_retire_healthy_timers(store):
     assert aware.tzinfo is not None
     assert [r["id"] for r in store.list_live(aware)] == [tid]
     assert store.get(tid)["status"] == "running"
+
+
+def test_recently_fired_still_retires_an_unparseable_fired_ts_outside_the_window(store, conn):
+    good = store.add(60, "ok", now=T0)
+    store.mark_ringing(good, T0)
+    old = store.add(60, "old", now=T0)
+    store.mark_ringing(old, T0 - timedelta(days=3))
+    bad = store.add(60, "bad", now=T0)
+    store.mark_ringing(bad, T0)
+    conn.execute("UPDATE timers SET fired_ts = '0000-garbage' WHERE id = ?", (bad,))
+    conn.commit()
+    got = store.recently_fired(T0 + timedelta(minutes=5))
+    assert [r["id"] for r in got] == [good]
+    assert store.get(bad)["status"] == "invalid"
+    assert store.get(old)["status"] == "ringing"  # out of window, left alone
+
+
+def test_recently_fired_does_not_even_parse_rows_older_than_the_window(store, monkeypatch):
+    # Proves the window is applied in SQL: an out-of-window row never reaches Python.
+    from jarvisd import timer_store
+
+    old = store.add(60, "old", now=T0)
+    store.mark_ringing(old, T0 - timedelta(days=3))
+    parsed = []
+    real = timer_store.parse_ts
+    monkeypatch.setattr(timer_store, "parse_ts", lambda v: (parsed.append(v), real(v))[1])
+    assert store.recently_fired(T0 + timedelta(minutes=5)) == []
+    assert parsed == []

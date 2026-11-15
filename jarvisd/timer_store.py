@@ -23,7 +23,8 @@ def _iso(dt: datetime) -> str:
     return normalize_due_ts(dt.isoformat(timespec="seconds"))
 
 
-def _parse(value: str | None) -> datetime:
+def parse_ts(value: str | None) -> datetime:
+    """Parse a stored timestamp. Public because server, tools and stopwatch_store depend on it."""
     # NULL is handled explicitly: fromisoformat(None) raises TypeError, and
     # catching TypeError broadly would also swallow a naive/aware comparison
     # error and wrongly retire healthy rows.
@@ -32,8 +33,11 @@ def _parse(value: str | None) -> datetime:
     return datetime.fromisoformat(normalize_due_ts(value))
 
 
-def _naive(now: datetime) -> datetime:
-    """Local naive form of `now`, so subtraction can never raise a naive/aware TypeError."""
+def to_naive(now: datetime) -> datetime:
+    """Local naive form of `now`, so subtraction can never raise a naive/aware TypeError.
+
+    Public because server, tools and stopwatch_store depend on it.
+    """
     if now.tzinfo is not None:
         now = now.astimezone().replace(tzinfo=None)
     return now
@@ -43,7 +47,7 @@ def remaining_for(row: sqlite3.Row, now: datetime) -> int:
     """Seconds left on `row`, clamped at 0. Raises one of BAD_DUE_TS on a bad due_ts."""
     if row["status"] == "paused":
         return max(0, int(row["remaining_sec"] or 0))
-    return max(0, int((_parse(row["due_ts"]) - _naive(now)).total_seconds()))
+    return max(0, int((parse_ts(row["due_ts"]) - to_naive(now)).total_seconds()))
 
 
 class TimerStore:
@@ -93,16 +97,22 @@ class TimerStore:
 
     def recently_fired(self, now: datetime, within_sec: int = 1800) -> list[sqlite3.Row]:
         """Timers that rang within the window (newest first), including dismissed ones."""
+        # The window is applied in SQL so the scan does not grow with every timer
+        # ever set. `datetime(fired_ts) IS NULL` keeps unparseable stamps in the
+        # result so the loop below still retires them, as it did before.
+        now = to_naive(now)
+        cutoff = now - timedelta(seconds=within_sec)
         rows = self._conn.execute(
             "SELECT * FROM timers WHERE fired_ts IS NOT NULL "
-            "AND status IN ('ringing', 'done') ORDER BY fired_ts DESC, id DESC"
+            "AND status IN ('ringing', 'done') "
+            "AND (fired_ts >= ? OR datetime(fired_ts) IS NULL) "
+            "ORDER BY fired_ts DESC, id DESC",
+            (cutoff.isoformat(timespec="seconds"),),
         ).fetchall()
-        now = _naive(now)
-        cutoff = now - timedelta(seconds=within_sec)
         out = []
         for r in rows:
             try:
-                fired = _parse(r["fired_ts"])
+                fired = parse_ts(r["fired_ts"])
             except BAD_DUE_TS:
                 log.warning("timer %s has an unusable fired_ts %r; marking it invalid",
                             r["id"], r["fired_ts"])
@@ -180,7 +190,7 @@ class TimerStore:
             return False
         if self._remaining_or_retire(row, now) is None:
             return False
-        due = _iso(_parse(row["due_ts"]) + timedelta(seconds=extra_sec))
+        due = _iso(parse_ts(row["due_ts"]) + timedelta(seconds=extra_sec))
         return self._update(
             "UPDATE timers SET due_ts = ? WHERE id = ? AND status = 'running'", (due, timer_id))
 
@@ -207,6 +217,12 @@ class TimerStore:
         return self._update(
             "UPDATE timers SET status = 'done' WHERE id = ? AND status IN (?, ?, ?)",
             (timer_id, *_LIVE))
+
+    def dismiss_ringing(self, timer_id: int) -> bool:
+        """Dismiss only if still ringing; a no-op against a snooze, pause or cancel that got in first."""
+        return self._update(
+            "UPDATE timers SET status = 'done' WHERE id = ? AND status = 'ringing'",
+            (timer_id,))
 
     def snooze(self, timer_id: int, snooze_sec: int, now: datetime) -> bool:
         return self._update(

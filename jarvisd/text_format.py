@@ -19,6 +19,9 @@ recur.
 """
 
 import re
+from datetime import datetime
+
+from jarvisd.reminder_store import BAD_DUE_TS, normalize_due_ts
 
 # Broad emoji / pictograph / dingbat ranges + variation selector.
 _EMOJI_RE = re.compile(
@@ -162,3 +165,30 @@ def speak_recurrence(recurrence: str) -> str:
     if kind == "monthly" and arg is not None:
         return f"monthly on the {_ordinal(arg)}"
     return recurrence
+
+
+_MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July",
+                "August", "September", "October", "November", "December")
+
+
+def speak_due(due_ts: str, now: datetime) -> str:
+    """Render a stored due timestamp for speech, so a TTS never reads ISO aloud:
+    'today at 6pm', 'tomorrow at 7am', 'Sunday at 9:30pm' (within the next week),
+    otherwise 'December 31 at 9am'. An unparseable stamp is returned unchanged.
+    """
+    try:
+        due = datetime.fromisoformat(normalize_due_ts(due_ts))
+    except BAD_DUE_TS:
+        return due_ts
+    hour = due.hour % 12 or 12
+    clock = f"{hour}{':%02d' % due.minute if due.minute else ''}{'am' if due.hour < 12 else 'pm'}"
+    days = (due.date() - now.date()).days
+    if days == 0:
+        day = "today"
+    elif days == 1:
+        day = "tomorrow"
+    elif 1 < days < 7:
+        day = _WEEKDAY_NAMES[due.weekday()]
+    else:
+        day = f"{_MONTH_NAMES[due.month - 1]} {due.day}"
+    return f"{day} at {clock}"

@@ -178,3 +178,12 @@ def test_timer_control_description_says_it_takes_a_label():
     tool = next(t for t in TOOLS if t["name"] == "timer_control")
     assert "label" in tool["description"].lower()
     assert "label" in tool["input_schema"]["properties"]
+
+
+def test_timer_status_says_due_now_never_no_time_for_a_timer_at_zero(store):
+    # Due but not yet marked ringing (tick gap, or no notifier running the loop).
+    store.add(60, "tea", now=NOW)
+    later = handlers(None, store, clock=lambda: NOW + timedelta(seconds=90))
+    out = later["timer_status"]({})
+    assert "no time" not in out
+    assert "tea" in out and "due now" in out

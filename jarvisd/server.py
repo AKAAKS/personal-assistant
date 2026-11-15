@@ -41,8 +41,8 @@ from jarvisd import claude_sessions
 from jarvisd.reminder_store import BAD_DUE_TS
 from jarvisd.text_format import strip_markdown
 # Parsing and naive-ising are reused from the store, not re-implemented: its
-# _parse guards NULL (raising ValueError) and _naive guards tz-aware values.
-from jarvisd.timer_store import _naive, _parse
+# parse_ts guards NULL (raising ValueError) and to_naive guards tz-aware values.
+from jarvisd.timer_store import parse_ts, to_naive
 
 log = logging.getLogger(__name__)
 
@@ -527,26 +527,44 @@ class JarvisServer:
             await asyncio.to_thread(store.mark_ringing, t["id"], now)
             await self._ring(t)
         for t in ringing:
-            if self._ring_is_due(t, now):
+            verdict = self._ring_verdict(t, now)
+            if verdict == "stranded":
+                log.info("timer #%s was still ringing %s after it fired (the daemon was "
+                         "not running to advance it); dismissing instead of re-ringing",
+                         t["id"], t["fired_ts"])
+                await asyncio.to_thread(self.timer_store.dismiss_ringing, t["id"])
+            elif verdict == "ring":
                 await self._ring(t)
 
     @staticmethod
-    def _ring_is_due(t, now) -> bool:
+    def _ring_verdict(t, now) -> str:
+        """'ring' (an attempt is due), 'wait' (not yet) or 'stranded' (outlived its window).
+
+        A row can only still be `ringing` once the whole ring window has passed if
+        nothing was running to advance it (daemon killed, lid closed), so it is
+        dismissed rather than re-rung at full volume for a timer nobody wants.
+        """
         try:
-            fired = _parse(t["fired_ts"])  # NULL raises ValueError, in BAD_DUE_TS
+            fired = parse_ts(t["fired_ts"])  # NULL raises ValueError, in BAD_DUE_TS
         except BAD_DUE_TS:
             log.warning("timer #%s has an unusable fired_ts %r; ringing it now",
                         t["id"], t["fired_ts"])
-            return True  # bounded: ring_count still climbs to MAX_RINGS
-        return _naive(now) >= fired + timedelta(seconds=t["ring_count"] * RING_INTERVAL_SEC)
+            return "ring"  # bounded: ring_count still climbs to MAX_RINGS
+        now = to_naive(now)
+        if now - fired > timedelta(seconds=MAX_RINGS * RING_INTERVAL_SEC):
+            return "stranded"
+        due_at = fired + timedelta(seconds=t["ring_count"] * RING_INTERVAL_SEC)
+        return "ring" if now >= due_at else "wait"
 
     async def _ring(self, t):
         """Ring one timer once and count the attempt; dismiss it when the budget is spent.
 
         `ring_count` counts ring ATTEMPTS in the current cycle. It is bumped
         whether or not notify succeeds, so a persistently failing channel still
-        ends at MAX_RINGS and retries at the normal RING_INTERVAL_SEC spacing
-        rather than every tick.
+        ends at MAX_RINGS. Normally the attempts are RING_INTERVAL_SEC apart, but
+        when fired_ts is unusable `_ring_verdict` answers "ring" on every tick, so
+        the spacing collapses to TIMER_TICK_SEC: all MAX_RINGS attempts (and
+        warnings) land within about 100 seconds. Bounded, not paced.
         """
         # Re-read: a dismiss or pause may have landed since the snapshot, and an
         # alarm that sounds after the user said stop is the complaint we exist to fix.
@@ -566,7 +584,9 @@ class JarvisServer:
         rings = await asyncio.to_thread(self.timer_store.bump_ring, t["id"])
         if rings >= MAX_RINGS:
             log.info("timer #%s used all %d ring attempts; dismissing", t["id"], rings)
-            await asyncio.to_thread(self.timer_store.dismiss, t["id"])
+            # Guarded to a still-ringing row: a snooze landing since bump_ring
+            # must survive, which plain dismiss() (any live status) would cancel.
+            await asyncio.to_thread(self.timer_store.dismiss_ringing, t["id"])
 
     async def _timer_tick(self):
         """Background timer loop: mirrors _reminder_tick, on TIMER_TICK_SEC."""
