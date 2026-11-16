@@ -242,3 +242,35 @@ def test_recently_fired_does_not_even_parse_rows_older_than_the_window(store, mo
     monkeypatch.setattr(timer_store, "parse_ts", lambda v: (parsed.append(v), real(v))[1])
     assert store.recently_fired(T0 + timedelta(minutes=5)) == []
     assert parsed == []
+
+
+# -- rename ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("prep", ["running", "paused", "ringing"])
+def test_rename_changes_the_label_of_a_live_timer(store, prep):
+    tid = store.add(600, "tea", now=T0)
+    if prep == "paused":
+        store.pause(tid, T0)
+    elif prep == "ringing":
+        store.mark_ringing(tid, T0)
+    assert store.rename(tid, "chai") is True
+    row = store.get(tid)
+    assert row["label"] == "chai"
+    assert row["status"] == prep
+
+
+@pytest.mark.parametrize("finish", ["dismiss", "cancel"])
+def test_rename_is_refused_for_a_finished_timer_and_leaves_the_label(store, finish):
+    tid = store.add(600, "tea", now=T0)
+    getattr(store, finish)(tid)
+    assert store.rename(tid, "chai") is False
+    assert store.get(tid)["label"] == "tea"
+
+
+def test_rename_touches_only_the_named_timer_and_unknown_ids_return_false(store):
+    a = store.add(600, "tea", now=T0)
+    b = store.add(600, "pasta", now=T0)
+    assert store.rename(a, "chai") is True
+    assert store.get(b)["label"] == "pasta"
+    assert store.rename(999, "x") is False

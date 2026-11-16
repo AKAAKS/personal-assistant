@@ -67,7 +67,8 @@ TOOLS = [
             "'snooze' makes a ringing timer ring again after 'minutes' (default 5); 'extend' adds 'minutes' "
             "to a timer; 'rename' gives a live timer the name in 'new_label' (not one another live timer already has). "
             "'label' only ever SELECTS a timer, so to name or rename one use action 'rename' with 'new_label' "
-            "-- no other action changes a label, and a 'label' that does not match the timer is an error. "
+            "-- no other action changes a label, and a 'label' that does not match the timer_id's timer is an "
+            "error, except that dismiss or snooze of a RINGING timer still stops it and says the label did not match. "
             "If several timers match, it lists them -- ask the user which."
         ),
         "input_schema": {
@@ -253,43 +254,51 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
         ringing = [r for r in timer_store.list_live(now) if r["status"] == "ringing"]
         return " ".join([message] + [_describe(r, now) for r in ringing])
 
+    # dismiss and snooze are how the user stops an alarm. They never refuse a
+    # RINGING timer over a selector mistake; they act and say what was off.
+    _STOPPERS = ("dismiss", "snooze")
+
     def _resolve(timer_id, label, action, now):
-        """Return (row, None) for the target timer, or (None, message).
+        """Return (row, problem, note): the target timer, or a message when none.
 
         label is a selector here, already stripped ('' when absent). Given with a
         timer_id it must agree with that timer: a label that plays no part in the
-        outcome is reported, never silently dropped.
+        outcome is reported, never silently dropped. The report is an error that
+        changes nothing, except when the action stops a ringing alarm: that acts and
+        returns a note to append. Running or paused timers keep the refusal, since
+        a mistaken selector could otherwise end a timer the user did not mean.
         """
         if timer_id is not None:
-            if not isinstance(timer_id, int) or isinstance(timer_id, bool):
-                return None, "Error: timer_id must be an integer."
             row = timer_store.get(timer_id)
             if row is None or row["status"] not in ("running", "paused", "ringing"):
-                return None, _miss(f"No live timer #{timer_id}.", now)
+                return None, _miss(f"No live timer #{timer_id}.", now), None
             if label and row["label"].casefold() != label.casefold():
-                return None, (f"Error: timer #{timer_id} is {_name(row)}, not {label!r}. "
-                              "Nothing was changed. To rename a timer use action 'rename' with new_label.")
-            return row, None
+                if action in _STOPPERS and row["status"] == "ringing":
+                    return row, None, f"it isn't labelled {label!r}"
+                return None, _miss(
+                    f"Error: timer #{timer_id} is {_name(row)}, not {label!r}. Nothing was changed. "
+                    "To rename a timer use action 'rename' with new_label.", now), None
+            return row, None, None
         if label:
             matches = timer_store.find_by_label(label)
             if not matches:
-                return None, _miss(f"No live timer is labelled {label!r}.", now)
+                return None, _miss(f"No live timer is labelled {label!r}.", now), None
         else:
             matches = timer_store.list_live(now)
             if not matches:
-                return None, "No timers are running."
-            if len(matches) > 1 and action in ("dismiss", "snooze"):
-                # An untargeted "stop it" means the timer that is making noise.
-                # Prefer a lone ringing one (dismiss also works on running and
-                # paused timers, but those are not what the user is hearing).
-                # Two or more ringing timers stay ambiguous and are listed.
-                ringing = [r for r in matches if r["status"] == "ringing"]
-                if len(ringing) == 1:
-                    matches = ringing
+                return None, "No timers are running.", None
+        if len(matches) > 1 and action in _STOPPERS:
+            # "Stop it" means the timer that is making noise, even when several
+            # share a label or none is named. Prefer a lone ringing one (dismiss
+            # also works on running and paused timers, but those are not what the
+            # user is hearing). Two or more ringing stay ambiguous and are listed.
+            ringing = [r for r in matches if r["status"] == "ringing"]
+            if len(ringing) == 1:
+                matches = ringing
         if len(matches) > 1:
             listing = " ".join(_describe(r, now) for r in matches)
-            return None, f"Which timer? Several match. {listing}"
-        return matches[0], None
+            return None, f"Which timer? Several match. {listing}", None
+        return matches[0], None, None
 
     # What a huge `minutes` raises: round(inf), timedelta, datetime + timedelta,
     # and an int too big for SQLite. The same set set_timer guards.
@@ -305,10 +314,19 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
         action = ti.get("action")
         if action not in _ACTIONS:
             return f"Error: action must be one of {', '.join(_ACTIONS)}."
+        stopper = action in _STOPPERS
+        # Argument problems. Before resolving they would refuse outright; for a
+        # stopper they are set aside (the bad argument is dropped) and only count
+        # if the timer turns out not to be ringing.
+        faults = []  # (error, note)
         timer_id = ti.get("timer_id")
+        if timer_id is not None and (not isinstance(timer_id, int) or isinstance(timer_id, bool)):
+            faults.append(("Error: timer_id must be an integer.", "ignored a timer_id that wasn't an integer"))
+            timer_id = None
         label = ti.get("label")
         if label is not None and not isinstance(label, str):
-            return "Error: label must be a string."
+            faults.append(("Error: label must be a string.", "ignored a label that wasn't text"))
+            label = None
         label = label.strip() if label else ""
         new_label = ti.get("new_label")
         if action == "rename":
@@ -323,7 +341,8 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
                 return "Error: rename needs new_label, the timer's new name (a non-blank string)."
             new_label = new_label.strip()
         elif new_label is not None:
-            return f"Error: new_label only applies to action 'rename', not {action!r}."
+            faults.append((f"Error: new_label only applies to action 'rename', not {action!r}.",
+                           "ignored new_label, which only applies to rename"))
         minutes = ti.get("minutes")
         # minutes matters only to extend (required) and snooze (optional);
         # a stray value alongside any other action is ignored.
@@ -332,9 +351,23 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
                     or not math.isfinite(minutes) or minutes <= 0):
                 return f"Error: {action} needs minutes, a positive number."
         now = clock()
-        row, problem = _resolve(timer_id, label, action, now)
+        if faults and not stopper:
+            return faults[0][0]
+        row, problem, note = _resolve(timer_id, label, action, now)
         if row is None:
             return problem
+        notes = [note] if note else []
+        if faults:
+            if row["status"] != "ringing":
+                return faults[0][0]
+            notes += [n for _, n in faults]
+        out = _apply(action, row, minutes, new_label, now)
+        if notes:
+            out = out.rstrip(".") + "; " + "; ".join(notes) + "."
+        return out
+
+    def _apply(action, row, minutes, new_label, now):
+        """Carry out action on the resolved timer row; returns the spoken result."""
         tid, name = row["id"], _name(row)
         if action == "pause":
             if timer_store.pause(tid, now):

@@ -475,3 +475,129 @@ def test_rename_onto_a_finished_timers_name_is_allowed(h, store, finish):
     out = h["timer_control"]({"action": "rename", "timer_id": b, "new_label": "trash"})
     assert out == f"Renamed unnamed timer (#{b}) to 'trash'."
     assert store.get(b)["label"] == "trash"
+
+
+# -- stopping a ringing alarm is never blocked by a bad selector -----------------
+
+
+def test_dismiss_with_a_stale_label_still_stops_a_ringing_timer_and_says_so(h, store):
+    tid = store.add(60, "", now=NOW)
+    store.mark_ringing(tid, NOW)
+    out = h["timer_control"]({"action": "dismiss", "timer_id": tid, "label": "pasta"})
+    assert out == f"Dismissed unnamed timer (#{tid}); it isn't labelled 'pasta'."
+    assert store.get(tid)["status"] == "done"  # the alarm actually stopped
+    assert not [r for r in store.list_live(NOW) if r["status"] == "ringing"]
+
+
+def test_snooze_with_a_stale_label_still_silences_a_ringing_timer_and_says_so(h, store):
+    tid = store.add(60, "tea", now=NOW)
+    store.mark_ringing(tid, NOW)
+    out = h["timer_control"]({"action": "snooze", "timer_id": tid, "label": "pasta", "minutes": 3})
+    assert out == f"Snoozed tea (#{tid}) for 3 minutes; it isn't labelled 'pasta'."
+    assert store.get(tid)["status"] == "running"
+
+
+@pytest.mark.parametrize("pause_first", [False, True])
+def test_dismiss_with_a_contradicting_label_is_refused_on_a_running_or_paused_timer(h, store, pause_first):
+    tid = store.add(600, "tea", now=NOW)
+    if pause_first:
+        store.pause(tid, NOW)
+    before = store.get(tid)["status"]
+    out = h["timer_control"]({"action": "dismiss", "timer_id": tid, "label": "pasta"})
+    assert out.startswith("Error") and "pasta" in out
+    assert store.get(tid)["status"] == before
+
+
+def test_extend_on_a_ringing_timer_with_a_contradicting_label_is_still_refused(h, store):
+    tid = store.add(60, "tea", now=NOW)
+    store.mark_ringing(tid, NOW)
+    out = h["timer_control"]({"action": "extend", "timer_id": tid, "minutes": 1, "label": "pasta"})
+    assert out.startswith("Error") and "pasta" in out
+
+
+def test_a_refused_contradiction_names_the_timer_that_is_ringing(h, store):
+    running = store.add(600, "pasta", now=NOW)
+    ringing = store.add(60, "tea", now=NOW)
+    store.mark_ringing(ringing, NOW)
+    out = h["timer_control"]({"action": "dismiss", "timer_id": running, "label": "ghost"})
+    assert out.startswith("Error")
+    assert f"tea (#{ringing}) is ringing now." in out
+    assert store.get(running)["status"] == "running"
+
+
+def test_after_a_rename_the_old_name_still_stops_the_alarm(h, store):
+    tid = store.add(60, "trash", now=NOW)
+    h["timer_control"]({"action": "rename", "timer_id": tid, "new_label": "bin"})
+    store.mark_ringing(tid, NOW)
+    out = h["timer_control"]({"action": "dismiss", "timer_id": tid, "label": "trash"})
+    assert out.startswith(f"Dismissed bin (#{tid})")
+    assert store.get(tid)["status"] == "done"
+
+
+def test_dismiss_by_a_shared_label_picks_the_one_ringing_timer(h, store):
+    quiet = store.add(600, "tea", now=NOW)
+    ringing = store.add(60, "tea", now=NOW)
+    store.mark_ringing(ringing, NOW)
+    out = h["timer_control"]({"action": "dismiss", "label": "tea"})
+    assert out == f"Dismissed tea (#{ringing})."
+    assert store.get(ringing)["status"] == "done"
+    assert store.get(quiet)["status"] == "running"
+
+
+def test_snooze_by_a_shared_label_picks_the_one_ringing_timer(h, store):
+    store.add(600, "tea", now=NOW)
+    ringing = store.add(60, "tea", now=NOW)
+    store.mark_ringing(ringing, NOW)
+    assert h["timer_control"]({"action": "snooze", "label": "tea"}).startswith(f"Snoozed tea (#{ringing})")
+
+
+def test_a_shared_label_stays_ambiguous_when_nothing_or_several_ring_or_for_other_actions(h, store):
+    a = store.add(600, "tea", now=NOW)
+    b = store.add(600, "tea", now=NOW)
+    assert h["timer_control"]({"action": "dismiss", "label": "tea"}).startswith("Which timer?")
+    store.mark_ringing(a, NOW)
+    store.mark_ringing(b, NOW)
+    assert h["timer_control"]({"action": "dismiss", "label": "tea"}).startswith("Which timer?")
+    assert store.get(a)["status"] == "ringing" and store.get(b)["status"] == "ringing"
+
+
+def test_a_shared_label_with_one_ringing_is_still_ambiguous_for_cancel(h, store):
+    store.add(600, "tea", now=NOW)
+    ringing = store.add(60, "tea", now=NOW)
+    store.mark_ringing(ringing, NOW)
+    assert h["timer_control"]({"action": "cancel", "label": "tea"}).startswith("Which timer?")
+    assert store.get(ringing)["status"] == "ringing"
+
+
+@pytest.mark.parametrize("extra, note", [
+    ({"label": 7}, "label"),
+    ({"new_label": "x"}, "new_label"),
+    ({"timer_id": "2"}, "timer_id"),
+])
+def test_junk_arguments_do_not_stop_a_ringing_dismiss(h, store, extra, note):
+    tid = store.add(60, "", now=NOW)
+    store.mark_ringing(tid, NOW)
+    out = h["timer_control"]({"action": "dismiss", **extra})
+    assert out.startswith(f"Dismissed unnamed timer (#{tid});")
+    assert note in out
+    assert store.get(tid)["status"] == "done"
+
+
+@pytest.mark.parametrize("extra", [{"label": 7}, {"new_label": "x"}, {"timer_id": "2"}])
+def test_junk_arguments_still_refuse_a_dismiss_of_a_running_timer(h, store, extra):
+    tid = store.add(600, "", now=NOW)
+    out = h["timer_control"]({"action": "dismiss", **extra})
+    assert out.startswith("Error")
+    assert store.get(tid)["status"] == "running"
+
+
+def test_two_ringing_timers_stay_ambiguous_and_the_listing_includes_every_live_match(h, store):
+    a = store.add(60, "", now=NOW)
+    b = store.add(60, "", now=NOW)
+    quiet = store.add(600, "pasta", now=NOW)
+    store.mark_ringing(a, NOW)
+    store.mark_ringing(b, NOW)
+    out = h["timer_control"]({"action": "dismiss"})
+    assert out.startswith("Which timer?")
+    assert f"pasta (#{quiet})" in out
+    assert store.get(a)["status"] == "ringing" and store.get(b)["status"] == "ringing"

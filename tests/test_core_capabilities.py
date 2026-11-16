@@ -203,4 +203,4 @@ def test_the_prompt_forces_a_timer_control_call_for_stop_requests():
     assert "never report a timer stopped, paused, snoozed or cancelled without calling timer_control" in low
     assert 'unqualified "stop the timer", "stop the alerts" or "turn it off" means dismiss the ringing timer' in low
     assert 'action "dismiss" with no label or id' in low
-    assert "if dismissing by label finds nothing, call timer_status and dismiss what is ringing" in low
+    assert "if dismissing by label or id finds nothing or is refused as a mismatch, call timer_status and dismiss what is ringing" in low
