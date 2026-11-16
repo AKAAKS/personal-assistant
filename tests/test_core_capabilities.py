@@ -195,3 +195,12 @@ def test_an_assistant_with_timer_stores_registers_and_advertises_the_tools():
     assert TIMER_TOOLS | {"stopwatch_control"} <= set(ai._handlers)
     text = prompt_text(ai).lower()
     assert "snooze" in text and "stopwatch_control" in text
+
+
+def test_the_prompt_forces_a_timer_control_call_for_stop_requests():
+    from jarvisd.core import render_system_prompt
+    low = render_system_prompt(TIMER_TOOLS).lower()
+    assert "never report a timer stopped, paused, snoozed or cancelled without calling timer_control" in low
+    assert 'unqualified "stop the timer", "stop the alerts" or "turn it off" means dismiss the ringing timer' in low
+    assert 'action "dismiss" with no label or id' in low
+    assert "if dismissing by label finds nothing, call timer_status and dismiss what is ringing" in low

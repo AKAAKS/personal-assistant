@@ -199,6 +199,12 @@ class TimerStore:
             "UPDATE timers SET status = 'cancelled' WHERE id = ? AND status IN (?, ?, ?)",
             (timer_id, *_LIVE))
 
+    def rename(self, timer_id: int, label: str) -> bool:
+        """Set the label of a live (running, paused or ringing) timer."""
+        return self._update(
+            "UPDATE timers SET label = ? WHERE id = ? AND status IN (?, ?, ?)",
+            (label, timer_id, *_LIVE))
+
     def mark_ringing(self, timer_id: int, now: datetime) -> None:
         """running -> ringing. Resets ring_count: it counts rings in the current
         ring cycle, so a snoozed alarm gets a fresh budget when it rings again."""

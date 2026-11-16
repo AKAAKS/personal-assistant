@@ -42,10 +42,171 @@ def test_label_matching_is_case_insensitive(h, store):
     assert store.list_live(NOW)[0]["status"] == "paused"
 
 
-def test_control_by_timer_id_beats_a_label_that_matches_nothing(h, store):
+def test_a_label_that_contradicts_the_timer_id_is_an_error_and_changes_nothing(h, store):
+    # Replaces a test that pinned the opposite (timer_id silently beat a wrong
+    # label): that silence is what let a false "it's now called trash" live on.
     tid = store.add(600, "tea", now=NOW)
-    h["timer_control"]({"action": "pause", "timer_id": tid, "label": "ghost"})
+    out = h["timer_control"]({"action": "pause", "timer_id": tid, "label": "ghost"})
+    assert out.startswith("Error")
+    assert "ghost" in out and "tea" in out and f"#{tid}" in out
+    assert store.get(tid)["status"] == "running"
+
+
+def test_a_matching_label_alongside_timer_id_is_accepted_case_insensitively(h, store):
+    tid = store.add(600, "Tea", now=NOW)
+    out = h["timer_control"]({"action": "pause", "timer_id": tid, "label": " tEA "})
+    assert out == f"Paused Tea (#{tid})."
     assert store.get(tid)["status"] == "paused"
+
+
+def test_a_label_on_an_unlabelled_timer_addressed_by_id_is_an_error(h, store):
+    # The row's '' must not "match" a non-empty label.
+    tid = store.add(600, "", now=NOW)
+    before = store.get(tid)["due_ts"]
+    out = h["timer_control"]({"action": "extend", "timer_id": tid, "minutes": 1, "label": "trash"})
+    assert out.startswith("Error") and "trash" in out and "unnamed" in out
+    assert store.get(tid)["due_ts"] == before
+
+
+def test_a_non_string_label_is_an_error_not_silently_ignored(h, store):
+    store.add(600, "tea", now=NOW)
+    out = h["timer_control"]({"action": "pause", "label": 7})
+    assert out.startswith("Error") and "label" in out
+    assert store.list_live(NOW)[0]["status"] == "running"
+
+
+def test_new_label_is_an_error_on_any_action_but_rename(h, store):
+    tid = store.add(600, "tea", now=NOW)
+    out = h["timer_control"]({"action": "pause", "timer_id": tid, "new_label": "x"})
+    assert out.startswith("Error") and "rename" in out
+    assert store.get(tid)["status"] == "running"
+
+
+# -- rename -------------------------------------------------------------------
+
+
+def test_rename_with_timer_id_and_label_treats_label_as_the_new_name(h, store):
+    # Exactly the call shape the model emitted in the live test.
+    tid = store.add(600, "", now=NOW)
+    out = h["timer_control"]({"action": "rename", "timer_id": tid, "label": "trash"})
+    assert out == f"Renamed unnamed timer (#{tid}) to 'trash'."
+    assert store.get(tid)["label"] == "trash"
+    assert [r["id"] for r in store.find_by_label("trash")] == [tid]
+
+
+def test_rename_with_new_label_selects_by_timer_id(h, store):
+    tid = store.add(600, "tea", now=NOW)
+    store.add(300, "pasta", now=NOW)
+    out = h["timer_control"]({"action": "rename", "timer_id": tid, "new_label": "green tea"})
+    assert out == f"Renamed tea (#{tid}) to 'green tea'."
+    assert store.get(tid)["label"] == "green tea"
+
+
+def test_rename_selects_by_label_when_new_label_is_given(h, store):
+    tid = store.add(600, "tea", now=NOW)
+    other = store.add(300, "pasta", now=NOW)
+    h["timer_control"]({"action": "rename", "label": "TEA", "new_label": "chai"})
+    assert store.get(tid)["label"] == "chai"
+    assert store.get(other)["label"] == "pasta"
+
+
+def test_rename_with_only_label_is_ambiguous_and_asks_for_new_label(h, store):
+    tid = store.add(600, "", now=NOW)
+    out = h["timer_control"]({"action": "rename", "label": "trash"})
+    assert out.startswith("Error") and "new_label" in out
+    assert store.get(tid)["label"] == ""
+
+
+def test_rename_with_no_name_at_all_is_an_error(h, store):
+    tid = store.add(600, "tea", now=NOW)
+    out = h["timer_control"]({"action": "rename", "timer_id": tid})
+    assert out.startswith("Error") and "new_label" in out
+    assert store.get(tid)["label"] == "tea"
+
+
+@pytest.mark.parametrize("bad", ["", "   ", 5])
+def test_rename_to_a_blank_or_non_string_name_is_an_error(h, store, bad):
+    tid = store.add(600, "tea", now=NOW)
+    out = h["timer_control"]({"action": "rename", "timer_id": tid, "new_label": bad})
+    assert out.startswith("Error") and "new_label" in out
+    assert store.get(tid)["label"] == "tea"
+
+
+def test_rename_strips_whitespace_from_the_new_name(h, store):
+    tid = store.add(600, "", now=NOW)
+    h["timer_control"]({"action": "rename", "timer_id": tid, "new_label": "  trash  "})
+    assert store.get(tid)["label"] == "trash"
+
+
+def test_rename_with_a_single_live_timer_needs_no_selector(h, store):
+    tid = store.add(600, "", now=NOW)
+    out = h["timer_control"]({"action": "rename", "new_label": "trash"})
+    assert out == f"Renamed unnamed timer (#{tid}) to 'trash'."
+
+
+def test_rename_with_several_live_timers_and_no_selector_lists_them(h, store):
+    a = store.add(600, "tea", now=NOW)
+    store.add(300, "pasta", now=NOW)
+    out = h["timer_control"]({"action": "rename", "new_label": "x"})
+    assert out.startswith("Which timer?")
+    assert store.get(a)["label"] == "tea"
+
+
+def test_rename_with_a_selector_label_that_contradicts_timer_id_is_an_error(h, store):
+    # new_label is the name, so label is a selector and must agree with timer_id.
+    tid = store.add(600, "tea", now=NOW)
+    out = h["timer_control"]({"action": "rename", "timer_id": tid, "label": "ghost", "new_label": "x"})
+    assert out.startswith("Error") and "ghost" in out
+    assert store.get(tid)["label"] == "tea"
+
+
+def test_rename_works_on_a_ringing_timer(h, store):
+    tid = store.add(60, "", now=NOW)
+    store.mark_ringing(tid, NOW)
+    h["timer_control"]({"action": "rename", "timer_id": tid, "new_label": "trash"})
+    assert store.get(tid)["label"] == "trash"
+    assert store.get(tid)["status"] == "ringing"
+
+
+@pytest.mark.parametrize("finish", ["dismiss", "cancel"])
+def test_rename_refuses_a_finished_timer(h, store, finish):
+    # Policy: only live (running/paused/ringing) timers can be renamed, the same
+    # set every other action can address. A finished timer's label is history.
+    tid = store.add(600, "tea", now=NOW)
+    getattr(store, finish)(tid)
+    out = h["timer_control"]({"action": "rename", "timer_id": tid, "new_label": "x"})
+    assert out == f"No live timer #{tid}."
+    assert store.get(tid)["label"] == "tea"
+
+
+# -- the live-test cascade ----------------------------------------------------
+
+
+def test_cascade_extend_with_stray_label_then_dismiss_by_that_label(h, store):
+    """Live test: extend {timer_id, label:'trash'} used to drop the label and say
+    nothing, then dismiss {label:'trash'} found no timer while the alarm rang."""
+    tid = store.add(600, "", now=NOW)
+    due_before = store.get(tid)["due_ts"]
+    extend = h["timer_control"]({"action": "extend", "timer_id": tid, "minutes": 1, "label": "trash"})
+    # The user is not silently misled: the call is refused and says why ...
+    assert extend.startswith("Error")
+    assert "trash" in extend and "unnamed" in extend
+    # ... and nothing changed (no extension applied under a false belief).
+    assert store.get(tid)["due_ts"] == due_before
+    assert store.get(tid)["label"] == ""
+    # The model's recovery: rename, which now exists, then extend.
+    renamed = h["timer_control"]({"action": "rename", "timer_id": tid, "label": "trash"})
+    assert renamed == f"Renamed unnamed timer (#{tid}) to 'trash'."
+    h["timer_control"]({"action": "extend", "timer_id": tid, "minutes": 1})
+    # It rings; "stop the trash timer" now finds it and the alarm stops.
+    store.mark_ringing(tid, NOW)
+    out = h["timer_control"]({"action": "dismiss", "label": "trash"})
+    assert out == f"Dismissed trash (#{tid})."
+    assert store.get(tid)["status"] == "done"
+    # A bare dismiss also works when exactly one timer is live.
+    t2 = store.add(60, "", now=NOW)
+    store.mark_ringing(t2, NOW)
+    assert h["timer_control"]({"action": "dismiss"}) == f"Dismissed unnamed timer (#{t2})."
 
 
 def test_extend_adds_minutes_and_says_the_new_time(h, store):
@@ -225,3 +386,21 @@ def test_extending_a_paused_timer_by_an_absurd_duration_is_a_clean_error(h, stor
     h["timer_control"]({"action": "pause", "label": "tea"})
     result = h["timer_control"]({"action": "extend", "label": "tea", "minutes": 1e30})
     assert result.startswith("Error:") and "minutes" in result
+
+
+# -- the schema must not lie to the model ------------------------------------
+
+
+def _tool():
+    from jarvisd.tools.reminders import TOOLS
+    return next(t for t in TOOLS if t["name"] == "timer_control")
+
+
+def test_schema_offers_rename_and_new_label_and_says_label_is_a_selector():
+    tool = _tool()
+    props = tool["input_schema"]["properties"]
+    assert "rename" in props["action"]["enum"]
+    assert "new_label" in props
+    assert "rename" in tool["description"].lower()
+    assert "new_label" in props["label"]["description"]
+    assert "never renames" in props["label"]["description"].lower()

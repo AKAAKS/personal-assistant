@@ -2,7 +2,7 @@
 
 Reminders: set, list and cancel (ReminderStore). Timers: set_timer starts a countdown in
 TimerStore, timer_status reports live and recently fired timers, and timer_control
-pauses, resumes, extends, cancels, dismisses or snoozes one.
+pauses, resumes, extends, cancels, dismisses, snoozes or renames one.
 """
 
 import math
@@ -12,7 +12,7 @@ from jarvisd.reminder_store import BAD_DUE_TS, normalize_due_ts, parse_recurrenc
 from jarvisd.text_format import speak_due, speak_duration, speak_recurrence
 from jarvisd.timer_store import parse_ts, remaining_for, to_naive
 
-_ACTIONS = ("pause", "resume", "extend", "cancel", "dismiss", "snooze")
+_ACTIONS = ("pause", "resume", "extend", "cancel", "dismiss", "snooze", "rename")
 _DEFAULT_SNOOZE_MIN = 5
 
 # The timer tools in TOOLS below. build_registry gates these on the timer store and
@@ -61,11 +61,14 @@ TOOLS = [
     {
         "name": "timer_control",
         "description": (
-            "Pause, resume, extend, cancel, dismiss or snooze a timer. Name the timer by its "
+            "Pause, resume, extend, cancel, dismiss, snooze or rename a timer. Name the timer by its "
             "label ('pause the pasta timer') or its timer_id; if neither is given and only one "
             "timer is live, that one is used. 'dismiss' stops a ringing timer (and also ends a running or paused one); "
             "'snooze' makes a ringing timer ring again after 'minutes' (default 5); 'extend' adds 'minutes' "
-            "to a timer. If several timers match, it lists them -- ask the user which."
+            "to a timer; 'rename' gives a live timer the name in 'new_label'. "
+            "'label' only ever SELECTS a timer, so to name or rename one use action 'rename' with 'new_label' "
+            "-- no other action changes a label, and a 'label' that does not match the timer is an error. "
+            "If several timers match, it lists them -- ask the user which."
         ),
         "input_schema": {
             "type": "object",
@@ -81,7 +84,14 @@ TOOLS = [
                 },
                 "label": {
                     "type": "string",
-                    "description": "The timer's label, e.g. 'pasta'. Alternative to timer_id.",
+                    "description": (
+                        "The label of the timer to act on, e.g. 'pasta'. Alternative to timer_id. "
+                        "It never renames a timer: to name one, use action 'rename' with new_label."
+                    ),
+                },
+                "new_label": {
+                    "type": "string",
+                    "description": "rename only: the timer's new name, e.g. 'trash'.",
                 },
                 "minutes": {
                     "type": "number",
@@ -237,21 +247,27 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
             return "No timers are running and none went off recently."
         return "\n".join(lines)
 
-    def _resolve(ti, action, now):
-        """Return (row, None) for the target timer, or (None, message)."""
-        timer_id = ti.get("timer_id")
+    def _resolve(timer_id, label, action, now):
+        """Return (row, None) for the target timer, or (None, message).
+
+        label is a selector here, already stripped ('' when absent). Given with a
+        timer_id it must agree with that timer: a label that plays no part in the
+        outcome is reported, never silently dropped.
+        """
         if timer_id is not None:
             if not isinstance(timer_id, int) or isinstance(timer_id, bool):
                 return None, "Error: timer_id must be an integer."
             row = timer_store.get(timer_id)
             if row is None or row["status"] not in ("running", "paused", "ringing"):
                 return None, f"No live timer #{timer_id}."
+            if label and row["label"].casefold() != label.casefold():
+                return None, (f"Error: timer #{timer_id} is {_name(row)}, not {label!r}. "
+                              "Nothing was changed. To rename a timer use action 'rename' with new_label.")
             return row, None
-        label = ti.get("label")
-        if isinstance(label, str) and label.strip():
-            matches = timer_store.find_by_label(label.strip())
+        if label:
+            matches = timer_store.find_by_label(label)
             if not matches:
-                return None, f"No live timer is labelled {label.strip()!r}."
+                return None, f"No live timer is labelled {label!r}."
         else:
             matches = timer_store.list_live(now)
             if not matches:
@@ -277,12 +293,31 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
         return f"Error: minutes is too large to {action} by."
 
     def timer_control(ti):
-        """Pause, resume, extend, cancel, dismiss or snooze a timer."""
+        """Pause, resume, extend, cancel, dismiss, snooze or rename a timer."""
         if timer_store is None:
             return "Error: timers are not available right now."
         action = ti.get("action")
         if action not in _ACTIONS:
             return f"Error: action must be one of {', '.join(_ACTIONS)}."
+        timer_id = ti.get("timer_id")
+        label = ti.get("label")
+        if label is not None and not isinstance(label, str):
+            return "Error: label must be a string."
+        label = label.strip() if label else ""
+        new_label = ti.get("new_label")
+        if action == "rename":
+            if new_label is None and timer_id is not None and label:
+                # What the model emits for "name it X": timer_id has already
+                # selected the timer, so the label can only be the new name.
+                new_label, label = label, ""
+            elif new_label is None and label:
+                return ("Error: rename needs new_label. A bare label only selects a timer, "
+                        "so say which name to give it with new_label.")
+            if not isinstance(new_label, str) or not new_label.strip():
+                return "Error: rename needs new_label, the timer's new name (a non-blank string)."
+            new_label = new_label.strip()
+        elif new_label is not None:
+            return f"Error: new_label only applies to action 'rename', not {action!r}."
         minutes = ti.get("minutes")
         # minutes matters only to extend (required) and snooze (optional);
         # a stray value alongside any other action is ignored.
@@ -291,7 +326,7 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
                     or not math.isfinite(minutes) or minutes <= 0):
                 return f"Error: {action} needs minutes, a positive number."
         now = clock()
-        row, problem = _resolve(ti, action, now)
+        row, problem = _resolve(timer_id, label, action, now)
         if row is None:
             return problem
         tid, name = row["id"], _name(row)
@@ -312,6 +347,10 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
             if not extended:
                 return f"Couldn't extend {name} (#{tid}); it isn't running or paused."
             return f"Added {speak_duration(extra)} to {name} (#{tid}). {_describe(timer_store.get(tid), now)}"
+        if action == "rename":
+            if timer_store.rename(tid, new_label):
+                return f"Renamed {name} (#{tid}) to {new_label!r}."
+            return f"Couldn't rename {name} (#{tid}); it is already finished."
         if action == "cancel":
             if timer_store.cancel(tid):
                 return f"Cancelled {name} (#{tid})."

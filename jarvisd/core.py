@@ -84,7 +84,7 @@ CAPABILITIES = [
      ("list_proposals", "accept_proposal", "dismiss_proposal")),
     ("- Reminders: set, list and cancel reminders for a specific time.",
      ("set_reminder", "list_reminders", "cancel_reminder")),
-    ('- Timers: set countdown timers (set_timer — e.g. "a 10-minute timer", optionally with a label like "tea"). A timer rings on every device until the user dismisses it. timer_control pauses, resumes, extends, snoozes, dismisses or cancels a timer, by label or id. ALWAYS call timer_status to answer "is my timer done?" or "how long is left?" — never answer from memory, and never from the conversation.',
+    ('- Timers: set countdown timers (set_timer — e.g. "a 10-minute timer", optionally with a label like "tea"). A timer rings on every device until the user dismisses it. timer_control pauses, resumes, extends, snoozes, dismisses, cancels or renames a timer, by label or id (label only selects; to name a timer use rename with new_label). ALWAYS call timer_status to answer "is my timer done?" or "how long is left?" — never answer from memory, and never from the conversation. Never report a timer stopped, paused, snoozed or cancelled without calling timer_control. An unqualified "stop the timer", "stop the alerts" or "turn it off" means dismiss the ringing timer: call timer_control action "dismiss" with no label or id (a lone ringing timer is picked). If dismissing by label finds nothing, call timer_status and dismiss what is ringing — never conclude there is nothing to stop.',
      ("set_timer", "timer_status", "timer_control")),
     ('- Stopwatch: stopwatch_control starts, pauses, resumes, stops or checks a stopwatch that counts UP (e.g. "start a stopwatch"). For a countdown use set_timer instead.',
      ("stopwatch_control",)),
