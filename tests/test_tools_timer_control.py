@@ -404,3 +404,74 @@ def test_schema_offers_rename_and_new_label_and_says_label_is_a_selector():
     assert "rename" in tool["description"].lower()
     assert "new_label" in props["label"]["description"]
     assert "never renames" in props["label"]["description"].lower()
+
+
+# -- a miss must say what is ringing -------------------------------------------
+
+
+def test_unknown_label_with_a_ringing_timer_says_which_timer_is_ringing(h, store):
+    tid = store.add(60, "", now=NOW)
+    store.mark_ringing(tid, NOW)
+    out = h["timer_control"]({"action": "dismiss", "label": "trash"})
+    assert out == f"No live timer is labelled 'trash'. unnamed timer (#{tid}) is ringing now."
+    assert store.get(tid)["status"] == "ringing"  # evidence only: nothing was dismissed
+
+
+def test_unknown_timer_id_with_a_ringing_timer_says_which_timer_is_ringing(h, store):
+    tid = store.add(60, "tea", now=NOW)
+    store.mark_ringing(tid, NOW)
+    out = h["timer_control"]({"action": "dismiss", "timer_id": tid + 50})
+    assert out == f"No live timer #{tid + 50}. tea (#{tid}) is ringing now."
+
+
+def test_several_ringing_timers_are_all_listed_on_a_miss(h, store):
+    a = store.add(60, "tea", now=NOW)
+    b = store.add(60, "pasta", now=NOW)
+    for t in (a, b):
+        store.mark_ringing(t, NOW)
+    out = h["timer_control"]({"action": "dismiss", "label": "ghost"})
+    assert f"tea (#{a}) is ringing now." in out
+    assert f"pasta (#{b}) is ringing now." in out
+
+
+def test_only_ringing_timers_are_named_on_a_miss(h, store):
+    ringing = store.add(60, "tea", now=NOW)
+    store.mark_ringing(ringing, NOW)
+    store.add(600, "pasta", now=NOW)  # running, not ringing
+    out = h["timer_control"]({"action": "dismiss", "label": "ghost"})
+    assert f"tea (#{ringing})" in out
+    assert "pasta" not in out
+
+
+def test_a_miss_with_nothing_ringing_is_unchanged(h, store):
+    store.add(600, "pasta", now=NOW)
+    assert h["timer_control"]({"action": "dismiss", "label": "ghost"}) == "No live timer is labelled 'ghost'."
+    assert h["timer_control"]({"action": "dismiss", "timer_id": 99}) == "No live timer #99."
+
+
+# -- rename must not create a duplicate live label ------------------------------
+
+
+def test_rename_onto_another_live_timers_name_is_refused_case_insensitively(h, store):
+    a = store.add(600, "tea", now=NOW)
+    b = store.add(300, "pasta", now=NOW)
+    out = h["timer_control"]({"action": "rename", "timer_id": b, "new_label": "TEA"})
+    assert out.startswith("Error") and "tea" in out and f"#{a}" in out
+    assert store.get(b)["label"] == "pasta"
+
+
+def test_rename_to_its_own_name_is_not_a_conflict(h, store):
+    a = store.add(600, "tea", now=NOW)
+    out = h["timer_control"]({"action": "rename", "timer_id": a, "new_label": "Tea"})
+    assert out == f"Renamed tea (#{a}) to 'Tea'."
+    assert store.get(a)["label"] == "Tea"
+
+
+@pytest.mark.parametrize("finish", ["dismiss", "cancel"])
+def test_rename_onto_a_finished_timers_name_is_allowed(h, store, finish):
+    old = store.add(600, "trash", now=NOW)
+    getattr(store, finish)(old)
+    b = store.add(300, "", now=NOW)
+    out = h["timer_control"]({"action": "rename", "timer_id": b, "new_label": "trash"})
+    assert out == f"Renamed unnamed timer (#{b}) to 'trash'."
+    assert store.get(b)["label"] == "trash"

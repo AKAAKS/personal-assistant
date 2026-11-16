@@ -65,7 +65,7 @@ TOOLS = [
             "label ('pause the pasta timer') or its timer_id; if neither is given and only one "
             "timer is live, that one is used. 'dismiss' stops a ringing timer (and also ends a running or paused one); "
             "'snooze' makes a ringing timer ring again after 'minutes' (default 5); 'extend' adds 'minutes' "
-            "to a timer; 'rename' gives a live timer the name in 'new_label'. "
+            "to a timer; 'rename' gives a live timer the name in 'new_label' (not one another live timer already has). "
             "'label' only ever SELECTS a timer, so to name or rename one use action 'rename' with 'new_label' "
             "-- no other action changes a label, and a 'label' that does not match the timer is an error. "
             "If several timers match, it lists them -- ask the user which."
@@ -247,6 +247,12 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
             return "No timers are running and none went off recently."
         return "\n".join(lines)
 
+    def _miss(message, now):
+        """A selector matched nothing. If a timer is ringing, say so: a failed
+        "stop it" must never leave the model believing there is nothing to stop."""
+        ringing = [r for r in timer_store.list_live(now) if r["status"] == "ringing"]
+        return " ".join([message] + [_describe(r, now) for r in ringing])
+
     def _resolve(timer_id, label, action, now):
         """Return (row, None) for the target timer, or (None, message).
 
@@ -259,7 +265,7 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
                 return None, "Error: timer_id must be an integer."
             row = timer_store.get(timer_id)
             if row is None or row["status"] not in ("running", "paused", "ringing"):
-                return None, f"No live timer #{timer_id}."
+                return None, _miss(f"No live timer #{timer_id}.", now)
             if label and row["label"].casefold() != label.casefold():
                 return None, (f"Error: timer #{timer_id} is {_name(row)}, not {label!r}. "
                               "Nothing was changed. To rename a timer use action 'rename' with new_label.")
@@ -267,7 +273,7 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
         if label:
             matches = timer_store.find_by_label(label)
             if not matches:
-                return None, f"No live timer is labelled {label!r}."
+                return None, _miss(f"No live timer is labelled {label!r}.", now)
         else:
             matches = timer_store.list_live(now)
             if not matches:
@@ -348,6 +354,12 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
                 return f"Couldn't extend {name} (#{tid}); it isn't running or paused."
             return f"Added {speak_duration(extra)} to {name} (#{tid}). {_describe(timer_store.get(tid), now)}"
         if action == "rename":
+            # One live timer per label, as for stopwatches: a duplicate would make
+            # every later label selection ambiguous. Finished timers don't count.
+            for other in timer_store.find_by_label(new_label):
+                if other["id"] != tid:
+                    return (f"Error: {_name(other)} (#{other['id']}) already has that name. "
+                            "Pick a different name.")
             if timer_store.rename(tid, new_label):
                 return f"Renamed {name} (#{tid}) to {new_label!r}."
             return f"Couldn't rename {name} (#{tid}); it is already finished."
