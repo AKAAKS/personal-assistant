@@ -638,3 +638,162 @@ def test_the_description_says_a_mismatching_label_is_an_error_only_when_it_is_a_
     assert "when label is used as a selector" in desc
     # The one shape where label next to timer_id is legitimate must not be called an error.
     assert "rename" in desc and "timer_id" in desc
+
+
+# -- round 5: a named timer that is not the one ringing -------------------------
+
+
+@pytest.fixture
+def trash_running_other_ringing(store):
+    """#1 'trash' is running; a different, unnamed timer #2 is ringing."""
+    trash = store.add(600, "trash", now=NOW)
+    ringing = store.add(60, "", now=NOW)
+    store.mark_ringing(ringing, NOW)
+    return trash, ringing
+
+
+@pytest.mark.parametrize("args", [
+    {"action": "dismiss", "label": "trash"},
+    {"action": "dismiss", "timer_id": 1},
+    {"action": "snooze", "label": "trash"},
+])
+def test_stopping_a_non_ringing_timer_while_another_rings_changes_nothing_and_names_the_ringer(
+        h, store, trash_running_other_ringing, args):
+    trash, ringing = trash_running_other_ringing
+    out = h["timer_control"](args)
+    assert out.startswith(f"trash (#{trash}) has ")  # states the named timer's own state
+    assert "Nothing was changed" in out
+    assert f"unnamed timer (#{ringing}) is ringing now." in out
+    assert "cancel" in out  # how to end the named timer anyway
+    assert store.get(trash)["status"] == "running"      # not destroyed
+    assert store.get(ringing)["status"] == "ringing"    # the alarm is still going
+
+
+def test_a_paused_timer_is_protected_the_same_way(h, store, trash_running_other_ringing):
+    trash, ringing = trash_running_other_ringing
+    store.pause(trash, NOW)
+    out = h["timer_control"]({"action": "dismiss", "label": "trash"})
+    assert "Nothing was changed" in out and f"(#{ringing}) is ringing now." in out
+    assert store.get(trash)["status"] == "paused"
+
+
+def test_the_model_can_then_dismiss_the_ringing_timer_by_id(h, store, trash_running_other_ringing):
+    trash, ringing = trash_running_other_ringing
+    h["timer_control"]({"action": "dismiss", "label": "trash"})
+    assert h["timer_control"]({"action": "dismiss", "timer_id": ringing}).startswith("Dismissed")
+    assert store.get(ringing)["status"] == "done"
+    assert store.get(trash)["status"] == "running"
+
+
+def test_cancel_acts_as_asked_and_says_what_is_ringing(h, store, trash_running_other_ringing):
+    trash, ringing = trash_running_other_ringing
+    out = h["timer_control"]({"action": "cancel", "label": "trash"})
+    assert out == f"Cancelled trash (#{trash}). unnamed timer (#{ringing}) is ringing now."
+    assert store.get(trash)["status"] == "cancelled"
+    assert store.get(ringing)["status"] == "ringing"
+
+
+def test_a_successful_pause_of_a_quiet_timer_still_says_what_is_ringing(h, store, trash_running_other_ringing):
+    trash, ringing = trash_running_other_ringing
+    out = h["timer_control"]({"action": "pause", "label": "trash"})
+    assert out == f"Paused trash (#{trash}). unnamed timer (#{ringing}) is ringing now."
+
+
+def test_dismissing_a_non_ringing_timer_still_works_when_nothing_rings(h, store):
+    tid = store.add(600, "trash", now=NOW)
+    assert h["timer_control"]({"action": "dismiss", "label": "trash"}) == f"Dismissed trash (#{tid})."
+    assert store.get(tid)["status"] == "done"
+
+
+def test_dismissing_one_of_two_ringing_timers_says_the_other_still_rings(h, store):
+    a = store.add(60, "tea", now=NOW)
+    b = store.add(60, "pasta", now=NOW)
+    store.mark_ringing(a, NOW)
+    store.mark_ringing(b, NOW)
+    out = h["timer_control"]({"action": "dismiss", "timer_id": a})
+    assert out == f"Dismissed tea (#{a}). pasta (#{b}) is ringing now."
+
+
+# -- every refusal and failure names what is ringing -----------------------------
+
+
+@pytest.fixture
+def ringing_one(store):
+    tid = store.add(60, "bell", now=NOW)
+    store.mark_ringing(tid, NOW)
+    return tid
+
+
+@pytest.mark.parametrize("args", [
+    {"action": "frobnicate"},
+    {"action": "snooze", "minutes": -1},
+    {"action": "extend", "minutes": "x", "label": "nothing"},
+    {"action": "pause", "label": 7},
+    {"action": "rename", "timer_id": 1},
+    {"action": "dismiss", "label": "ghost"},
+    {"action": "dismiss", "timer_id": 99},
+])
+def test_refusals_say_what_is_ringing(h, ringing_one, args):
+    out = h["timer_control"](args)
+    assert f"bell (#{ringing_one}) is ringing now." in out
+
+
+def test_junk_args_on_a_quiet_timer_while_another_rings_still_name_the_ringer(h, store, ringing_one):
+    quiet = store.add(600, "pasta", now=NOW)
+    out = h["timer_control"]({"action": "pause", "timer_id": quiet, "new_label": "x"})
+    assert out.startswith("Error") and f"bell (#{ringing_one}) is ringing now." in out
+
+
+def test_a_mis_cased_action_is_accepted(h, store, ringing_one):
+    assert h["timer_control"]({"action": " Dismiss "}) == f"Dismissed bell (#{ringing_one})."
+    assert store.get(ringing_one)["status"] == "done"
+
+
+def test_a_failed_snooze_still_says_the_timer_is_ringing(h, store, ringing_one, monkeypatch):
+    monkeypatch.setattr(store, "snooze", lambda *a, **k: False)
+    out = h["timer_control"]({"action": "snooze", "timer_id": ringing_one})
+    assert out.startswith("Couldn't snooze") and f"bell (#{ringing_one}) is ringing now." in out
+
+
+# -- the check and the write must not disagree -----------------------------------
+
+
+def test_a_wrong_label_cannot_dismiss_a_timer_that_stopped_ringing_after_it_was_resolved(
+        h, store, ringing_one, monkeypatch):
+    real = store.dismiss_ringing
+
+    def snoozed_first(tid):
+        store.snooze(tid, 300, NOW)  # the tick loop got there between resolve and apply
+        return real(tid)
+
+    monkeypatch.setattr(store, "dismiss_ringing", snoozed_first)
+    out = h["timer_control"]({"action": "dismiss", "timer_id": ringing_one, "label": "wrong"})
+    assert out.startswith("Couldn't dismiss")
+    assert store.get(ringing_one)["status"] == "running"
+
+
+# -- the description corrections are pinned by their substance -------------------
+
+
+def test_description_pins_the_rename_shorthand_and_the_ringing_exception():
+    desc = _tool()["description"]
+    assert ("rename with a timer_id and only 'label' also works: the label is then the new name") in desc
+    assert ("when label is used as a selector next to a timer_id that it does not match, that is an error, "
+            "except that dismiss or snooze of a RINGING timer still stops it and says the label did not match") in desc
+
+
+def test_label_property_says_it_names_a_timer_only_through_rename():
+    prop = _tool()["input_schema"]["properties"]["label"]["description"]
+    assert "Except for rename it never renames a timer: to name one, use action 'rename' with new_label." in prop
+
+
+def test_junk_args_on_a_quiet_timer_for_a_stopper_while_another_rings_name_the_ringer(h, store, ringing_one):
+    quiet = store.add(600, "pasta", now=NOW)
+    out = h["timer_control"]({"action": "dismiss", "timer_id": quiet, "new_label": "x"})
+    assert out.startswith("Error") and f"bell (#{ringing_one}) is ringing now." in out
+    assert store.get(quiet)["status"] == "running"
+
+
+def test_description_says_dismiss_of_a_quiet_timer_changes_nothing_while_another_rings():
+    assert ("unless a different timer is ringing: then nothing changes and the ringing one is named; "
+            "use 'cancel' to end the quiet one anyway") in _tool()["description"]

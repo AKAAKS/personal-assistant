@@ -63,7 +63,9 @@ TOOLS = [
         "description": (
             "Pause, resume, extend, cancel, dismiss, snooze or rename a timer. Name the timer by its "
             "label ('pause the pasta timer') or its timer_id; if neither is given and only one "
-            "timer is live, that one is used. 'dismiss' stops a ringing timer (and also ends a running or paused one); "
+            "timer is live, that one is used. 'dismiss' stops a ringing timer (and also ends a running or paused one, "
+            "unless a different timer is ringing: then nothing changes and the ringing one is named; use 'cancel' to end "
+            "the quiet one anyway); "
             "'snooze' makes a ringing timer ring again after 'minutes' (default 5); 'extend' adds 'minutes' "
             "to a timer; 'rename' gives a live timer the name in 'new_label' (not one another live timer already has). "
             "To name or rename a timer use action 'rename' with 'new_label' (rename with a timer_id and only 'label' "
@@ -249,14 +251,21 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
             return "No timers are running and none went off recently."
         return "\n".join(lines)
 
-    def _miss(message, now):
-        """A selector matched nothing. If a timer is ringing, say so: a failed
-        "stop it" must never leave the model believing there is nothing to stop."""
-        ringing = [r for r in timer_store.list_live(now) if r["status"] == "ringing"]
-        return " ".join([message] + [_describe(r, now) for r in ringing])
+    def _ringing_now(now):
+        """The ringing timers, spoken. Reads through list_live, which as a side
+        effect retires rows whose stored time is unreadable."""
+        return [_describe(r, now) for r in timer_store.list_live(now) if r["status"] == "ringing"]
 
-    # dismiss and snooze are how the user stops an alarm. They never refuse a
-    # RINGING timer over a selector mistake; they act and say what was off.
+    def _miss(message, now):
+        """message, followed by every timer that is ringing right now. Every outcome
+        that does not stop the alarm carries this, so a failed "stop it" can never
+        leave the model believing there is nothing to stop."""
+        return " ".join([message] + _ringing_now(now))
+
+    # dismiss and snooze are how the user stops an alarm. Given a RINGING timer they
+    # tolerate a wrong or junk label, timer_id or new_label (act, then say what was
+    # off); an unusable snooze `minutes` still refuses. Given a timer that is not the
+    # one ringing, while another is, they act on nothing (see timer_control).
     _STOPPERS = ("dismiss", "snooze")
 
     def _resolve(timer_id, label, action, now):
@@ -312,9 +321,12 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
         """Pause, resume, extend, cancel, dismiss, snooze or rename a timer."""
         if timer_store is None:
             return "Error: timers are not available right now."
+        now = clock()
         action = ti.get("action")
+        if isinstance(action, str):
+            action = action.strip().lower()
         if action not in _ACTIONS:
-            return f"Error: action must be one of {', '.join(_ACTIONS)}."
+            return _miss(f"Error: action must be one of {', '.join(_ACTIONS)}.", now)
         stopper = action in _STOPPERS
         # Argument problems. Before resolving they would refuse outright; for a
         # stopper they are set aside (the bad argument is dropped) and only count
@@ -338,10 +350,10 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
                 # selected the timer, so the label can only be the new name.
                 new_label, label = label, ""
             elif new_label is None and label:
-                return ("Error: rename needs new_label. A bare label only selects a timer, "
-                        "so say which name to give it with new_label.")
+                return _miss("Error: rename needs new_label. A bare label only selects a timer, "
+                             "so say which name to give it with new_label.", now)
             if not isinstance(new_label, str) or not new_label.strip():
-                return "Error: rename needs new_label, the timer's new name (a non-blank string)."
+                return _miss("Error: rename needs new_label, the timer's new name (a non-blank string).", now)
             new_label = new_label.strip()
         elif new_label is not None:
             faults.append((f"Error: new_label only applies to action 'rename', not {action!r}.",
@@ -352,22 +364,30 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
         if action == "extend" or (action == "snooze" and minutes is not None):
             if (not isinstance(minutes, (int, float)) or isinstance(minutes, bool)
                     or not math.isfinite(minutes) or minutes <= 0):
-                return f"Error: {action} needs minutes, a positive number."
-        now = clock()
+                return _miss(f"Error: {action} needs minutes, a positive number.", now)
         if faults and not stopper:
-            return faults[0][0]
+            return _miss(faults[0][0], now)
         row, problem, note = _resolve(timer_id, label, action, now)
         if row is None:
             return problem
         notes = [note] if note else []
         if faults:
             if row["status"] != "ringing":
-                return faults[0][0]
+                return _miss(faults[0][0], now)
             notes += [n for _, n in faults]
+        if stopper and row["status"] != "ringing":
+            ringing = _ringing_now(now)
+            if ringing:
+                # The user is hearing an alarm, and this is not it. Dismissing the
+                # named timer would destroy it irreversibly and leave the alarm
+                # going, while reporting success. Act on nothing; say what is what.
+                return (f"{_describe(row, now)} Nothing was changed, because it is not the one ringing. "
+                        f"{' '.join(ringing)} Dismiss that one to stop the alarm, "
+                        f"or cancel {_name(row)} (#{row['id']}) to end it anyway.")
         out = _apply(action, row, minutes, new_label, now)
         if notes:
             out = out.rstrip(".") + "; " + "; ".join(notes) + "."
-        return out
+        return " ".join([out] + _ringing_now(now))
 
     def _apply(action, row, minutes, new_label, now):
         """Carry out action on the resolved timer row; returns the spoken result."""
@@ -405,6 +425,12 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
                 return f"Cancelled {name} (#{tid})."
             return f"Couldn't cancel {name} (#{tid}); it is already finished."
         if action == "dismiss":
+            if row["status"] == "ringing":
+                # Status-guarded write: the row was ringing when resolved, so a
+                # label that did not match is tolerated only while it still is.
+                if timer_store.dismiss_ringing(tid):
+                    return f"Dismissed {name} (#{tid})."
+                return f"Couldn't dismiss {name} (#{tid}); it stopped ringing first."
             if timer_store.dismiss(tid):
                 return f"Dismissed {name} (#{tid})."
             return f"Couldn't dismiss {name} (#{tid}); it is already finished."
