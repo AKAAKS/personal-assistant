@@ -127,7 +127,7 @@ class TimerStore:
         rows = self._conn.execute(
             "SELECT * FROM timers WHERE status IN (?, ?, ?) ORDER BY id", _LIVE
         ).fetchall()
-        return [r for r in rows if r["label"].casefold() == wanted]
+        return [r for r in rows if r["label"].strip().casefold() == wanted]
 
     def due(self, now: datetime) -> list[sqlite3.Row]:
         rows = self._conn.execute(

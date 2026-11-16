@@ -414,7 +414,7 @@ def test_unknown_label_with_a_ringing_timer_says_which_timer_is_ringing(h, store
     store.mark_ringing(tid, NOW)
     out = h["timer_control"]({"action": "dismiss", "label": "trash"})
     assert out == f"No live timer is labelled 'trash'. unnamed timer (#{tid}) is ringing now."
-    assert store.get(tid)["status"] == "ringing"  # evidence only: nothing was dismissed
+    assert store.get(tid)["status"] == "ringing"  # a miss reports; it never dismisses anything
 
 
 def test_unknown_timer_id_with_a_ringing_timer_says_which_timer_is_ringing(h, store):
@@ -601,3 +601,40 @@ def test_two_ringing_timers_stay_ambiguous_and_the_listing_includes_every_live_m
     assert out.startswith("Which timer?")
     assert f"pasta (#{quiet})" in out
     assert store.get(a)["status"] == "ringing" and store.get(b)["status"] == "ringing"
+
+
+# -- round 4 ---------------------------------------------------------------------
+
+
+def test_a_blank_new_label_is_treated_as_absent_so_label_is_the_new_name(h, store):
+    tid = store.add(600, "", now=NOW)
+    out = h["timer_control"]({"action": "rename", "timer_id": tid, "label": "trash", "new_label": ""})
+    assert out == f"Renamed unnamed timer (#{tid}) to 'trash'."
+    assert store.get(tid)["label"] == "trash"
+
+
+def test_rename_onto_a_paused_timers_name_is_refused(h, store):
+    paused = store.add(600, "tea", now=NOW)
+    store.pause(paused, NOW)
+    other = store.add(300, "pasta", now=NOW)
+    out = h["timer_control"]({"action": "rename", "timer_id": other, "new_label": "tea"})
+    assert out.startswith("Error") and f"#{paused}" in out
+    assert store.get(other)["label"] == "pasta"
+
+
+def test_a_stored_label_with_stray_whitespace_is_still_found_and_still_collides(h, store, conn):
+    tid = store.add(600, "tea", now=NOW)
+    conn.execute("UPDATE timers SET label = ? WHERE id = ?", ("  Tea ", tid))
+    conn.commit()
+    other = store.add(300, "pasta", now=NOW)
+    assert [r["id"] for r in store.find_by_label("tea")] == [tid]
+    out = h["timer_control"]({"action": "rename", "timer_id": other, "new_label": "tea"})
+    assert out.startswith("Error") and f"#{tid}" in out
+    assert h["timer_control"]({"action": "pause", "timer_id": tid, "label": "tea"}).startswith("Paused")
+
+
+def test_the_description_says_a_mismatching_label_is_an_error_only_when_it_is_a_selector():
+    desc = _tool()["description"]
+    assert "when label is used as a selector" in desc
+    # The one shape where label next to timer_id is legitimate must not be called an error.
+    assert "rename" in desc and "timer_id" in desc

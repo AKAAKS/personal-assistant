@@ -66,9 +66,10 @@ TOOLS = [
             "timer is live, that one is used. 'dismiss' stops a ringing timer (and also ends a running or paused one); "
             "'snooze' makes a ringing timer ring again after 'minutes' (default 5); 'extend' adds 'minutes' "
             "to a timer; 'rename' gives a live timer the name in 'new_label' (not one another live timer already has). "
-            "'label' only ever SELECTS a timer, so to name or rename one use action 'rename' with 'new_label' "
-            "-- no other action changes a label, and a 'label' that does not match the timer_id's timer is an "
-            "error, except that dismiss or snooze of a RINGING timer still stops it and says the label did not match. "
+            "To name or rename a timer use action 'rename' with 'new_label' (rename with a timer_id and only 'label' "
+            "also works: the label is then the new name). For every other action 'label' only selects, and when label "
+            "is used as a selector next to a timer_id that it does not match, that is an error, except that dismiss or "
+            "snooze of a RINGING timer still stops it and says the label did not match. "
             "If several timers match, it lists them -- ask the user which."
         ),
         "input_schema": {
@@ -87,7 +88,7 @@ TOOLS = [
                     "type": "string",
                     "description": (
                         "The label of the timer to act on, e.g. 'pasta'. Alternative to timer_id. "
-                        "It never renames a timer: to name one, use action 'rename' with new_label."
+                        "Except for rename it never renames a timer: to name one, use action 'rename' with new_label."
                     ),
                 },
                 "new_label": {
@@ -272,7 +273,7 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
             row = timer_store.get(timer_id)
             if row is None or row["status"] not in ("running", "paused", "ringing"):
                 return None, _miss(f"No live timer #{timer_id}.", now), None
-            if label and row["label"].casefold() != label.casefold():
+            if label and row["label"].strip().casefold() != label.casefold():
                 if action in _STOPPERS and row["status"] == "ringing":
                     return row, None, f"it isn't labelled {label!r}"
                 return None, _miss(
@@ -330,6 +331,8 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
         label = label.strip() if label else ""
         new_label = ti.get("new_label")
         if action == "rename":
+            if isinstance(new_label, str) and not new_label.strip():
+                new_label = None  # models send "" for an absent optional field, as they send null
             if new_label is None and timer_id is not None and label:
                 # What the model emits for "name it X": timer_id has already
                 # selected the timer, so the label can only be the new name.
@@ -387,8 +390,9 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
                 return f"Couldn't extend {name} (#{tid}); it isn't running or paused."
             return f"Added {speak_duration(extra)} to {name} (#{tid}). {_describe(timer_store.get(tid), now)}"
         if action == "rename":
-            # One live timer per label, as for stopwatches: a duplicate would make
-            # every later label selection ambiguous. Finished timers don't count.
+            # Rename never adds a duplicate live label, which would make later label
+            # selection ambiguous. (set_timer may still create two with one label.)
+            # Finished timers don't count: they are not addressable.
             for other in timer_store.find_by_label(new_label):
                 if other["id"] != tid:
                     return (f"Error: {_name(other)} (#{other['id']}) already has that name. "
