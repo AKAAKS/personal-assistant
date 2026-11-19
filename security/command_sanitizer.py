@@ -28,6 +28,47 @@ _KILLS_SHELL = (
     "kills a Windows shell/system process — it would blank the desktop and "
     "taskbar; close the app by name instead"
 )
+_WILDCARD_KILL = (
+    "kills processes by a wildcard image name, which can match a Windows shell "
+    "process and blank the desktop; name the exact process instead"
+)
+
+# A construct that actually terminates a process. `\bkill\b` does not match
+# inside "taskkill", nor does it match "killing" in a commit message.
+_KILL_VERB_RE = re.compile(
+    r"\b(taskkill|stop-process|spps)\b|\bkill\b|\bwmic\b[^|&;]*\bdelete\b", re.I
+)
+
+# A protected name in a TARGET position. Matching the name anywhere would flag
+# `taskkill /IM chrome.exe /FI "WINDOWTITLE ne explorer"`, which kills Chrome.
+_KILL_TARGET_RES = [
+    re.compile(rf"/im\s+[\"\']?{_SHELL_PROCS}", re.I),
+    re.compile(rf"-name\s+[\"\']?{_SHELL_PROCS}", re.I),
+    re.compile(rf"\b(?:get-process|gps|ps)\s+(?:-name\s+)?[\"\']?{_SHELL_PROCS}", re.I),
+    re.compile(rf"\bname\s*=\s*[\"\']?{_SHELL_PROCS}", re.I),
+]
+
+# A wildcard image name: unknowable blast radius (`taskkill /IM *.exe /F`), and
+# how `taskkill /IM expl*.exe /F` reached explorer.exe past an exact-name list.
+_WILDCARD_IMAGE_RE = re.compile(r"/im\s+[\"\']?[^\s\"\']*[*?]", re.I)
+
+
+def _kills_shell_process(command: str) -> "str | None":
+    """Reason this command terminates a shell/system process, else None.
+
+    Verb AND target, not one regex over the whole string: the kill verb and its
+    target are routinely in different pipeline segments
+    (`Get-Process explorer | Stop-Process -Force`), while a protected name can
+    appear in a filter that targets something else entirely.
+    """
+    if not _KILL_VERB_RE.search(command):
+        return None
+    if _WILDCARD_IMAGE_RE.search(command):
+        return _WILDCARD_KILL
+    if any(r.search(command) for r in _KILL_TARGET_RES):
+        return _KILLS_SHELL
+    return None
+
 
 # (compiled pattern, human-readable reason). Case-insensitive.
 _BLOCKLIST: list[tuple[re.Pattern, str]] = [
@@ -43,9 +84,6 @@ _BLOCKLIST: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bshutdown\b", re.I), "shuts down/restarts the PC — use the power control tool instead"),
     (re.compile(r"\b(restart|stop)-computer\b", re.I), "shuts down/restarts the PC — use the power control tool instead"),
     (re.compile(r"\blogoff\b", re.I), "logs the user off"),
-    # Killing the shell. Ordinary app kills stay allowed — only these names.
-    (re.compile(rf"\btaskkill\b[^|&;]*\b{_SHELL_PROCS}(?:\.exe)?\b", re.I), _KILLS_SHELL),
-    (re.compile(rf"\bstop-process\b[^|&;]*\b{_SHELL_PROCS}(?:\.exe)?\b", re.I), _KILLS_SHELL),
     # Download-and-execute cradles.
     (re.compile(r"invoke-expression", re.I), "executes a downloaded/dynamic string (Invoke-Expression)"),
     (re.compile(r"\biex\b", re.I), "executes a downloaded/dynamic string (IEX)"),
@@ -64,6 +102,9 @@ def sanitize_command(command: str) -> tuple[bool, str]:
     if not command or not command.strip():
         return False, "empty command"
     stripped = command.strip()
+    shell_kill = _kills_shell_process(stripped)
+    if shell_kill:
+        return False, f"blocked: this command {shell_kill}"
     for pattern, reason in _BLOCKLIST:
         if pattern.search(stripped):
             return False, f"blocked: this command {reason}"

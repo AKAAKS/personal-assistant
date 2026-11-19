@@ -277,3 +277,96 @@ def test_process_family_stops_at_a_different_image_name():
 
     assert shell.pid not in family, "walked up into the shell"
     assert 99 not in family, "an unrelated app was treated as JARVIS"
+
+
+# --- 1c. a process JARVIS spawned FOR the user is not part of JARVIS -------
+# open_terminal does Popen(["cmd", "/k", cmd], CREATE_NEW_CONSOLE), so a
+# terminal JARVIS opened is its child. Taking every recursive descendant made
+# that console "JARVIS", so "force close the terminal" on a hung Claude Code
+# session answered "that's me, quit from the tray" and never killed it.
+# Found in review of PR #9.
+
+def test_process_family_excludes_a_terminal_jarvis_opened_for_the_user():
+    from system_client import _process_family
+    shell = FakeProc(1, "explorer.exe")
+    tray = FakeProc(10, "pythonw.exe", shell)
+    daemon = FakeProc(11, "pythonw.exe", tray)
+    voice = FakeProc(12, "pythonw.exe", tray)
+    user_term = FakeProc(50, "cmd.exe", daemon)      # open_terminal's child
+    claude = FakeProc(51, "node.exe", user_term)     # running inside it
+
+    family = _process_family(daemon)
+
+    assert user_term.pid not in family, "a terminal opened for the user is not JARVIS"
+    assert claude.pid not in family, "nor is what runs inside it"
+    # the assistant's own processes are still protected
+    assert {daemon.pid, tray.pid, voice.pid} <= family
+
+
+# --- 4b. the entity guard must handle HA's other target shapes ------------
+# _reject_entity did (entity_id or "").strip(), so HA's native list shape
+# raised AttributeError -> "Error executing control_light" for a call that
+# used to work; and a comma list passed on the first element's domain alone,
+# which is not the "single entity in this domain" it promises. Found in
+# review of PR #9.
+
+def test_control_light_accepts_home_assistants_list_shape():
+    ha = FakeHA()
+    out = _ha_handlers(ha)["control_light"](
+        {"entity_id": ["light.bedroom", "light.desk"], "action": "turn_off"}
+    )
+    assert ha.calls, f"a list of lights should work, got {out!r}"
+    domain, service, eid, _ = ha.calls[0]
+    assert (domain, service) == ("light", "turn_off")
+    assert eid in (["light.bedroom", "light.desk"], "light.bedroom,light.desk")
+
+
+@pytest.mark.parametrize("entity_id", [
+    "light.a,switch.water_heater",
+    ["light.a", "switch.water_heater"],
+    ["light.a", "all"],
+])
+def test_control_light_rejects_a_group_containing_a_non_light(entity_id):
+    ha = FakeHA()
+    out = _ha_handlers(ha)["control_light"]({"entity_id": entity_id, "action": "turn_off"})
+    assert ha.calls == [], f"a mixed/wildcard group reached HA: {ha.calls!r}"
+    assert "light" in out.lower(), out
+
+
+def test_control_light_rejects_an_empty_list():
+    ha = FakeHA()
+    out = _ha_handlers(ha)["control_light"]({"entity_id": [], "action": "turn_off"})
+    assert ha.calls == []
+    assert "entity" in out.lower(), out
+
+
+# --- 2b. the shell-kill patterns must cover the idiomatic forms ------------
+# The first patterns required the process name to follow the verb in the same
+# segment, so every piped PowerShell form sailed through, as did a taskkill
+# wildcard. Verified allowed before the fix. Found in review of PR #9.
+# run_command still requires confirmation, so this is the backstop, not the
+# only gate.
+
+@pytest.mark.parametrize("cmd", [
+    "Get-Process explorer | Stop-Process -Force",
+    "gps explorer | kill",
+    "Get-Process -Name dwm | Stop-Process",
+    "wmic process where name='explorer.exe' delete",
+    "taskkill /IM expl*.exe /F",
+])
+def test_sanitizer_blocks_the_piped_and_wildcard_shell_kills(cmd):
+    allowed, reason = sanitize_command(cmd)
+    assert not allowed, f"shell-killer still allowed: {cmd}"
+    assert "shell" in reason.lower() or "desktop" in reason.lower(), reason
+
+
+@pytest.mark.parametrize("cmd", [
+    # A protected name inside an unrelated filter/string is not a kill of it.
+    'taskkill /IM chrome.exe /F /FI "WINDOWTITLE ne explorer"',
+    "Get-Process notepad | Stop-Process -Force",
+    "echo explorer.exe >> notes.txt",
+    "git commit -m 'stop killing explorer'",
+])
+def test_sanitizer_does_not_misfire_on_benign_mentions(cmd):
+    allowed, reason = sanitize_command(cmd)
+    assert allowed, f"false positive on a benign command: {cmd} -> {reason}"

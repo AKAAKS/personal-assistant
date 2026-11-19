@@ -134,33 +134,60 @@ TOOLS = [
 ]
 
 
-def _reject_entity(entity_id, domain: str) -> "str | None":
-    """Error message if entity_id is not a single entity in `domain`, else None.
+def _entity_targets(entity_id) -> "list[str]":
+    """Normalise HA's accepted target shapes into a list of entity IDs.
 
-    Home Assistant treats `entity_id: "all"` as EVERY entity in the domain, and
-    entity_id arrives here as a free-form string straight from the model. So
-    "turn off the lights" could mean every light in the house, and the handler
+    entity_id arrives straight from the model, and HA itself accepts a single
+    string, a comma-separated string and a JSON list. Treating it as a string
+    only meant a list raised AttributeError (reported to the user as "Error
+    executing control_light") and a comma list was validated on its first
+    element alone.
+    """
+    if isinstance(entity_id, (list, tuple)):
+        raw = list(entity_id)
+    elif entity_id is None:
+        raw = []
+    else:
+        raw = str(entity_id).split(",")
+    return [str(e).strip() for e in raw if str(e).strip()]
+
+
+def _reject_entity(entity_id, domain: str) -> "str | None":
+    """Error message unless every target is an entity in `domain`, else None.
+
+    Home Assistant treats `entity_id: "all"` as EVERY entity in the domain, so
+    "turn off the lights" could mean every light in the house and the handler
     would report success either way. Same shape as the File Explorer bug: one
     loosely-resolved identifier, a far bigger blast radius than the request.
+    EVERY target is checked, so one bad element in a group rejects the call
+    rather than riding along with the good ones.
     """
-    eid = (entity_id or "").strip()
-    if "." not in eid:
+    targets = _entity_targets(entity_id)
+    if not targets:
         return (
-            f"'{eid}' is not an entity ID, so I did nothing — targeting 'all' "
-            f"or a bare domain would affect every {domain} in the house. Name "
-            f"one entity like '{domain}.bedroom'; list_devices shows them."
+            f"I was given no entity to act on, so I did nothing. Name one "
+            f"entity like '{domain}.bedroom'; list_devices shows them."
         )
-    got, _, obj = eid.partition(".")
-    if not obj.strip():
-        return (
-            f"'{eid}' is an incomplete entity ID. Name one entity like "
-            f"'{domain}.bedroom'; list_devices shows them."
-        )
-    if got.strip().lower() != domain:
-        return (
-            f"'{eid}' is a {got.strip().lower()} entity, not a {domain}. Use the "
-            f"tool for {got.strip().lower()} entities, or name a {domain}.* entity."
-        )
+    for eid in targets:
+        if "." not in eid:
+            return (
+                f"'{eid}' is not an entity ID, so I did nothing — targeting "
+                f"'all' or a bare domain would affect every {domain} in the "
+                f"house. Name the {domain} entities explicitly, like "
+                f"'{domain}.bedroom'; list_devices shows them."
+            )
+        got, _, obj = eid.partition(".")
+        if not obj.strip():
+            return (
+                f"'{eid}' is an incomplete entity ID. Name one entity like "
+                f"'{domain}.bedroom'; list_devices shows them."
+            )
+        if got.strip().lower() != domain:
+            return (
+                f"'{eid}' is a {got.strip().lower()} entity, not a {domain}. "
+                f"Use the tool for {got.strip().lower()} entities, or name "
+                f"{domain}.* entities only."
+            )
     return None
 
 

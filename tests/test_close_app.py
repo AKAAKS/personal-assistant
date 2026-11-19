@@ -6,6 +6,7 @@ force-kill took the desktop, taskbar, Start menu and tray with them —
 a black screen with only Alt-Tab to navigate by.
 """
 
+import os
 import subprocess
 import types
 
@@ -140,3 +141,83 @@ def test_shell_windows_are_not_closable(cls):
 @pytest.mark.parametrize("cls", ["CabinetWClass", "ExploreWClass", "Chrome_WidgetWin_1", "Notepad"])
 def test_ordinary_windows_are_closable(cls):
     assert system_client._is_shell_window(cls) is False
+
+
+# --- the escalation close_app advertises must actually be reachable ---------
+# PostMessage(WM_CLOSE) is asynchronous and succeeds against a FROZEN window,
+# so counting posted messages proved nothing. close_app claimed "Closed
+# spotify." for a hung app, and the model -- told to use force_close_app only
+# after close_app fails -- never escalated. Found in review of PR #9; the
+# original failure-branch test stubbed the return code, so it never ran the
+# real path.
+
+def _no_terminate(monkeypatch):
+    """close_app must decide from the windows, never fall through to a kill."""
+    monkeypatch.setattr(SystemClient, "_terminate",
+                        lambda self, p, l, force: pytest.fail("fell through to _terminate"))
+
+
+def test_close_app_confirms_success_only_once_the_windows_are_gone(monkeypatch):
+    monkeypatch.setattr(system_client, "_CLOSE_GRACE_SEC", 1.0)
+    monkeypatch.setattr(system_client, "_CLOSE_POLL_SEC", 0.01)
+    monkeypatch.setattr(SystemClient, "_close_windows", lambda self, proc: 1)
+    seen = iter([[5150], []])  # still there, then gone
+    monkeypatch.setattr(SystemClient, "_app_windows", lambda self, proc: next(seen, []))
+    _no_terminate(monkeypatch)
+
+    out = SystemClient().close_app("spotify")
+
+    assert out == "Closed spotify.", out
+
+
+def test_close_app_does_not_claim_success_for_a_hung_window(monkeypatch):
+    monkeypatch.setattr(system_client, "_CLOSE_GRACE_SEC", 0.05)
+    monkeypatch.setattr(system_client, "_CLOSE_POLL_SEC", 0.01)
+    monkeypatch.setattr(SystemClient, "_close_windows", lambda self, proc: 1)
+    monkeypatch.setattr(SystemClient, "_app_windows", lambda self, proc: [5150])
+    monkeypatch.setattr(SystemClient, "_window_responds", lambda self, hwnd: False)
+    _no_terminate(monkeypatch)
+
+    out = SystemClient().close_app("spotify")
+
+    assert "closed spotify." not in out.lower(), f"claimed success on a hung app: {out}"
+    assert "force close" in out.lower(), out
+
+
+def test_close_app_reports_a_save_prompt_instead_of_suggesting_force(monkeypatch):
+    # A window that stays open but ANSWERS is showing "save your changes?".
+    # Suggesting a force-kill here would destroy the work the dialog is
+    # protecting, so this case must read differently from a hang.
+    monkeypatch.setattr(system_client, "_CLOSE_GRACE_SEC", 0.05)
+    monkeypatch.setattr(system_client, "_CLOSE_POLL_SEC", 0.01)
+    monkeypatch.setattr(SystemClient, "_close_windows", lambda self, proc: 1)
+    monkeypatch.setattr(SystemClient, "_app_windows", lambda self, proc: [5150])
+    monkeypatch.setattr(SystemClient, "_window_responds", lambda self, hwnd: True)
+    _no_terminate(monkeypatch)
+
+    out = SystemClient().close_app("word")
+
+    assert "unsaved" in out.lower(), out
+    assert "force close" not in out.lower(), f"invited a force-kill over a save dialog: {out}"
+
+
+# --- the self-guard must cover the WINDOW path too, not just _terminate -----
+# _close_windows enumerated every window of the image and never subtracted
+# _own_pids(), so close_app("pythonw") would WM_CLOSE JARVIS's own windows.
+# Invisible to the suite because the self-protection test stubbed
+# _close_windows to 0.
+
+def test_app_windows_never_includes_jarvis_own_windows(monkeypatch):
+    monkeypatch.setattr(SystemClient, "_pids_for_image", lambda self, proc: {os.getpid()})
+
+    assert SystemClient()._app_windows("pythonw.exe") == []
+
+
+def test_close_app_does_not_wm_close_jarvis_own_windows(monkeypatch):
+    monkeypatch.setattr(SystemClient, "_pids_for_image", lambda self, proc: {os.getpid()})
+    calls = _record_run(monkeypatch)
+
+    out = SystemClient().close_app("pythonw")
+
+    assert _taskkills(calls) == []
+    assert "myself" in out.lower() or "jarvis" in out.lower(), out

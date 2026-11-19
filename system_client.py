@@ -3,6 +3,7 @@
 import os
 import shlex
 import subprocess
+import time
 
 # How long a headless run_command may run before it is killed.
 COMMAND_TIMEOUT_SEC = 60
@@ -36,6 +37,14 @@ _SHELL_WINDOW_CLASSES = frozenset({
 })
 
 
+# How long close_app waits for an app to actually go away after WM_CLOSE, and
+# how often it re-checks. PostMessage is asynchronous and succeeds against a
+# frozen window, so the posted count proves nothing on its own: without this
+# wait close_app reported "Closed X." for a hung app and the model never
+# escalated to force_close_app, which is the only reason that tool exists.
+_CLOSE_GRACE_SEC = float(os.getenv("CLOSE_GRACE_SEC", "4.0"))
+_CLOSE_POLL_SEC = 0.2
+
 # Schemes open_url may hand to ShellExecute. Everything else (a path, a
 # file:// URL, a bare .bat) would be EXECUTED, not browsed.
 _WEB_URL_SCHEMES = ("http://", "https://", "mailto:")
@@ -61,7 +70,15 @@ def _process_family(proc) -> "set[int]":
             break
         root = ancestor
     pids = {proc.pid, root.pid}
-    pids.update(c.pid for c in root.children(recursive=True))
+    # Same-image descendants ONLY. JARVIS's components all run under one image
+    # (pythonw.exe), but it also spawns processes FOR the user -- open_terminal
+    # gives the Claude Code console a cmd.exe child. Claiming every descendant
+    # made those "JARVIS", so a request to force-close a hung terminal was
+    # answered "that's me, quit from the tray" and the child survived.
+    pids.update(
+        c.pid for c in root.children(recursive=True)
+        if (c.name() or "").lower() == own_name
+    )
     return pids
 
 
@@ -220,23 +237,24 @@ class SystemClient:
             "to kill it outright, which loses anything unsaved."
         )
 
-    def _close_windows(self, proc_name: str) -> int:
-        """Post WM_CLOSE to this process's ordinary windows; return how many.
+    def _app_windows(self, proc_name: str) -> "list[int]":
+        """Visible, titled, non-shell window handles belonging to proc_name.
 
-        WM_CLOSE is what clicking the X does: the app gets to prompt about
-        unsaved work and decide for itself. Shell windows (desktop, taskbar)
-        are skipped, so closing a folder window never disturbs the shell.
-        Best-effort - returns 0 if pywin32 is unavailable.
+        Excludes JARVIS's own PIDs. The guard belongs HERE and not only in
+        _terminate: without it `close_app("pythonw")` posted WM_CLOSE to the
+        assistant's own windows and then reported success. Shell windows
+        (desktop, taskbar) are filtered by class, so closing an Explorer
+        folder window never disturbs the shell. Returns [] when pywin32 is
+        unavailable.
         """
-        pids = self._pids_for_image(proc_name)
+        pids = self._pids_for_image(proc_name) - self._own_pids()
         if not pids:
-            return 0
+            return []
         try:
-            import win32con
             import win32gui
             import win32process
         except ImportError:
-            return 0
+            return []
 
         targets: "list[int]" = []
 
@@ -257,6 +275,48 @@ class SystemClient:
         try:
             win32gui.EnumWindows(_cb, None)
         except Exception:
+            return []
+        return targets
+
+    def _window_responds(self, hwnd: int) -> bool:
+        """True if the window answers a no-op message, i.e. it is not hung.
+
+        A window that stays open AND answers is doing something deliberate --
+        almost always showing "save your changes?". A window that stays open
+        and does NOT answer is frozen. Those two need opposite advice, so
+        close_app must tell them apart rather than calling both a failure and
+        inviting a force-kill that would discard the very work the dialog is
+        protecting. Assumes responsive if pywin32 is unavailable: the safe
+        default is the one that does NOT suggest destroying data.
+        """
+        try:
+            import win32con
+            import win32gui
+        except ImportError:
+            return True
+        try:
+            win32gui.SendMessageTimeout(
+                hwnd, win32con.WM_NULL, 0, 0, win32con.SMTO_ABORTIFHUNG, 300
+            )
+            return True
+        except Exception:
+            return False
+
+    def _close_windows(self, proc_name: str) -> int:
+        """Post WM_CLOSE to this process's ordinary windows; return how many.
+
+        WM_CLOSE is what clicking the X does: the app gets to prompt about
+        unsaved work and decide for itself. The return value is how many
+        messages were POSTED, which is not evidence anything closed -- see
+        _settle_after_close.
+        """
+        targets = self._app_windows(proc_name)
+        if not targets:
+            return 0
+        try:
+            import win32con
+            import win32gui
+        except ImportError:
             return 0
         for hwnd in targets:
             try:
@@ -264,6 +324,17 @@ class SystemClient:
             except Exception:
                 continue
         return len(targets)
+
+    def _settle_after_close(self, proc_name: str) -> str:
+        """Wait out the grace period. Returns "closed", "prompting" or "hung"."""
+        deadline = time.monotonic() + _CLOSE_GRACE_SEC
+        remaining = self._app_windows(proc_name)
+        while remaining and time.monotonic() < deadline:
+            time.sleep(_CLOSE_POLL_SEC)
+            remaining = self._app_windows(proc_name)
+        if not remaining:
+            return "closed"
+        return "prompting" if any(self._window_responds(h) for h in remaining) else "hung"
 
     def close_app(self, name: str) -> str:
         """Close an app the way clicking its X does - never a force-kill.
@@ -276,10 +347,21 @@ class SystemClient:
         label = (name or "").strip() or proc_name
 
         closed = self._close_windows(proc_name)
-        if closed == 1:
-            return f"Closed {label}."
-        if closed > 1:
-            return f"Closed {closed} {label} windows."
+        if closed:
+            outcome = self._settle_after_close(proc_name)
+            if outcome == "closed":
+                if closed == 1:
+                    return f"Closed {label}."
+                return f"Closed {closed} {label} windows."
+            if outcome == "prompting":
+                return (
+                    f"{label} is still open - it is asking what to do about "
+                    "unsaved work. Answer that prompt and it will close."
+                )
+            return (
+                f'{label} is not responding - say "force close {label}" to kill '
+                "it outright, which loses anything unsaved."
+            )
 
         if proc_name in _PROTECTED_PROCESSES:
             return (
