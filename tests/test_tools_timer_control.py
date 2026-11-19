@@ -797,3 +797,107 @@ def test_junk_args_on_a_quiet_timer_for_a_stopper_while_another_rings_name_the_r
 def test_description_says_dismiss_of_a_quiet_timer_changes_nothing_while_another_rings():
     assert ("unless a different timer is ringing: then nothing changes and the ringing one is named; "
             "use 'cancel' to end the quiet one anyway") in _tool()["description"]
+
+
+# --- gap 1: set_timer could create two live timers with one label ----------
+# rename refuses a duplicate live label so that later label selection stays
+# unambiguous, but set_timer did not, so the ambiguity arrived through the
+# other door: "set a pasta timer" twice, and every later "pause the pasta
+# timer" answered "Which timer?". A timer the user asked for is never refused
+# (losing it is worse than a clumsy name), so the second one is given a
+# distinct label instead.
+
+def test_a_second_timer_with_a_taken_label_is_still_created(h, store):
+    h["set_timer"]({"minutes": 10, "label": "pasta"})
+    out = h["set_timer"]({"minutes": 5, "label": "pasta"})
+
+    assert not out.startswith("Error"), out
+    assert len(store.list_live(NOW)) == 2, "the second timer must still exist"
+
+
+def test_a_second_timer_with_a_taken_label_gets_a_distinct_name(h, store):
+    h["set_timer"]({"minutes": 10, "label": "pasta"})
+    h["set_timer"]({"minutes": 5, "label": "pasta"})
+
+    labels = sorted(r["label"] for r in store.list_live(NOW))
+    assert len(set(labels)) == 2, f"two live timers still share a label: {labels}"
+    assert labels[0] == "pasta"
+
+
+def test_the_renamed_second_timer_is_selectable_on_its_own(h, store):
+    h["set_timer"]({"minutes": 10, "label": "pasta"})
+    second = h["set_timer"]({"minutes": 5, "label": "pasta"})
+    # The reply must name the label it actually used, or the user cannot say it.
+    new_label = [r["label"] for r in store.list_live(NOW) if r["label"] != "pasta"][0]
+    assert new_label in second, f"reply never told the user the name: {second}"
+
+    out = h["timer_control"]({"action": "pause", "label": new_label})
+    assert "paused" in out.lower(), out
+    assert "which timer" not in out.lower()
+
+
+def test_the_original_label_still_selects_exactly_one_timer(h, store):
+    h["set_timer"]({"minutes": 10, "label": "pasta"})
+    h["set_timer"]({"minutes": 5, "label": "pasta"})
+
+    out = h["timer_control"]({"action": "pause", "label": "pasta"})
+    assert "which timer" not in out.lower(), f"still ambiguous: {out}"
+    assert "paused" in out.lower(), out
+
+
+def test_a_label_freed_by_cancelling_can_be_reused_as_is(h, store):
+    # Finished timers are not addressable, so they must not consume a name.
+    tid = store.add(600, "pasta", now=NOW)
+    store.cancel(tid)
+    h["set_timer"]({"minutes": 5, "label": "pasta"})
+
+    assert [r["label"] for r in store.list_live(NOW)] == ["pasta"]
+
+
+# --- gap 2: extend did nothing for a ringing timer -------------------------
+# "give me five more minutes" while an alarm is going off is the natural
+# phrasing, and it maps to extend -- which refused with "it isn't running or
+# paused", even though snooze does exactly that. (rename already worked on a
+# ringing timer: _LIVE includes 'ringing'.)
+
+def _ring(store, tid):
+    store.mark_ringing(tid, NOW)
+
+
+def test_extending_a_ringing_timer_rearms_it_instead_of_failing(h, store):
+    tid = store.add(60, "eggs", now=NOW)
+    _ring(store, tid)
+
+    out = h["timer_control"]({"action": "extend", "timer_id": tid, "minutes": 5})
+
+    assert not out.startswith("Error"), out
+    assert "isn't running or paused" not in out, out
+    assert store.get(tid)["status"] == "running", "the alarm should have stopped"
+
+
+def test_extending_a_ringing_timer_says_the_alarm_was_stopped(h, store):
+    tid = store.add(60, "eggs", now=NOW)
+    _ring(store, tid)
+
+    out = h["timer_control"]({"action": "extend", "timer_id": tid, "minutes": 5})
+
+    assert "5 minutes" in out or "five minutes" in out.lower(), out
+    assert "stop" in out.lower(), f"must say the alarm stopped, not just extended: {out}"
+
+
+def test_extending_a_running_timer_is_unchanged(h, store):
+    tid = store.add(600, "tea", now=NOW)
+    out = h["timer_control"]({"action": "extend", "timer_id": tid, "minutes": 5})
+    assert "added" in out.lower(), out
+    assert store.get(tid)["status"] == "running"
+
+
+def test_renaming_a_ringing_timer_works(h, store):
+    # Pins the half I previously got wrong, so it cannot regress.
+    tid = store.add(60, "oven", now=NOW)
+    _ring(store, tid)
+
+    out = h["timer_control"]({"action": "rename", "timer_id": tid, "new_label": "pasta"})
+
+    assert "renamed" in out.lower(), out
+    assert store.get(tid)["label"] == "pasta"

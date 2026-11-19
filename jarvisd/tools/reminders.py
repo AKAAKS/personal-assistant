@@ -27,7 +27,9 @@ TOOLS = [
         "description": (
             "Start a countdown timer (e.g. 'set a 10-minute timer', 'a 90 second timer for the eggs'). "
             "It rings on every device until the user dismisses it. Returns the timer's id; "
-            "give it a label when the user names it ('pasta') so it can be referred to later."
+            "give it a label when the user names it ('pasta') so it can be referred to later. "
+            "If a live timer already has that label the new timer is still created, under a free name "
+            "like 'pasta 2'; the reply says which name it got, so use that one afterwards."
         ),
         "input_schema": {
             "type": "object",
@@ -67,7 +69,9 @@ TOOLS = [
             "unless a different timer is ringing: then nothing changes and the ringing one is named; use 'cancel' to end "
             "the quiet one anyway); "
             "'snooze' makes a ringing timer ring again after 'minutes' (default 5); 'extend' adds 'minutes' "
-            "to a timer; 'rename' gives a live timer the name in 'new_label' (not one another live timer already has). "
+            "to a timer, and on a RINGING timer 'extend' stops the alarm and re-arms it for that long, so "
+            "\"give me five more minutes\" works while it is going off; "
+            "'rename' gives a live timer the name in 'new_label' (not one another live timer already has). "
             "To name or rename a timer use action 'rename' with 'new_label' (rename with a timer_id and only 'label' "
             "also works: the label is then the new name). For every other action 'label' only selects, and when label "
             "is used as a selector next to a timer_id that it does not match, that is an error, except that dismiss or "
@@ -231,12 +235,30 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
             return "Error: the timer must be longer than zero."
         label = ti.get("label")
         label = label.strip() if isinstance(label, str) and label.strip() else ""
+        # rename refuses a duplicate live label so that selecting by label stays
+        # unambiguous; set_timer did not, so the ambiguity arrived through the
+        # other door -- "set a pasta timer" twice, and every later "pause the
+        # pasta timer" answered "Which timer?". A timer the user asked for is
+        # never refused (losing it is worse than a clumsy name), so the second
+        # one gets a free name, and the reply says which: the user can only refer
+        # to a name they have been told. Finished timers are not addressable, so
+        # they never reserve a name.
+        original = label if label and timer_store.find_by_label(label) else ""
+        if original:
+            for n in range(2, 1000):
+                candidate = f"{original} {n}"
+                if not timer_store.find_by_label(candidate):
+                    label = candidate
+                    break
         try:
             timer_id = timer_store.add(total, label, now=clock())
         except (ValueError, OSError, OverflowError) as exc:
             return f"Error: {exc}"
-        return (f"Timer #{timer_id} set for {speak_duration(total)}"
-                + (f" - {label}." if label else "."))
+        out = (f"Timer #{timer_id} set for {speak_duration(total)}"
+               + (f" - {label}." if label else "."))
+        if original:
+            out += f" You already had a {original!r} timer, so I named this one {label!r}."
+        return out
 
     def timer_status(ti):
         """Report live timers and ones that recently went off."""
@@ -403,6 +425,17 @@ def handlers(reminder_store, timer_store=None, clock=datetime.now):
         if action == "extend":
             try:
                 extra = round(float(minutes) * 60)
+                if row["status"] == "ringing":
+                    # "give me five more minutes" while the alarm is going off.
+                    # extend has nothing to add to on a ringing timer -- its time
+                    # is already spent -- and snooze is precisely this action, so
+                    # do what was asked instead of refusing on a technicality.
+                    # Say the alarm stopped: that is the part the user can hear.
+                    if timer_store.snooze(tid, extra, now):
+                        return (f"Stopped the alarm and gave {name} (#{tid}) "
+                                f"{speak_duration(extra)} more. "
+                                f"{_describe(timer_store.get(tid), now)}")
+                    return f"Couldn't extend {name} (#{tid}); it stopped ringing first."
                 extended = timer_store.extend(tid, extra, now)
             except _TOO_LARGE:
                 return _too_large(action)
