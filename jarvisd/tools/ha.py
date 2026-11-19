@@ -134,6 +134,63 @@ TOOLS = [
 ]
 
 
+def _entity_targets(entity_id) -> "list[str]":
+    """Normalise HA's accepted target shapes into a list of entity IDs.
+
+    entity_id arrives straight from the model, and HA itself accepts a single
+    string, a comma-separated string and a JSON list. Treating it as a string
+    only meant a list raised AttributeError (reported to the user as "Error
+    executing control_light") and a comma list was validated on its first
+    element alone.
+    """
+    if isinstance(entity_id, (list, tuple)):
+        raw = list(entity_id)
+    elif entity_id is None:
+        raw = []
+    else:
+        raw = str(entity_id).split(",")
+    return [str(e).strip() for e in raw if str(e).strip()]
+
+
+def _reject_entity(entity_id, domain: str) -> "str | None":
+    """Error message unless every target is an entity in `domain`, else None.
+
+    Home Assistant treats `entity_id: "all"` as EVERY entity in the domain, so
+    "turn off the lights" could mean every light in the house and the handler
+    would report success either way. Same shape as the File Explorer bug: one
+    loosely-resolved identifier, a far bigger blast radius than the request.
+    EVERY target is checked, so one bad element in a group rejects the call
+    rather than riding along with the good ones.
+    """
+    targets = _entity_targets(entity_id)
+    if not targets:
+        return (
+            f"I was given no entity to act on, so I did nothing. Name one "
+            f"entity like '{domain}.bedroom'; list_devices shows them."
+        )
+    for eid in targets:
+        if "." not in eid:
+            return (
+                f"'{eid}' is not an entity ID, so I did nothing — targeting "
+                f"'all' or a bare domain would affect every {domain} in the "
+                f"house. Name the {domain} entities explicitly, like "
+                f"'{domain}.bedroom'; list_devices shows them."
+            )
+        got, _, obj = eid.partition(".")
+        if not obj.strip():
+            return (
+                f"'{eid}' is an incomplete entity ID. Name one entity like "
+                f"'{domain}.bedroom'; list_devices shows them."
+            )
+        if got.strip().lower() != domain:
+            return (
+                f"'{eid}' is a {got.strip().lower()} entity, not a {domain}. "
+                f"Use the tool for {got.strip().lower()} entities, or name "
+                f"{domain}.* entities only."
+            )
+    return None
+
+
 def handlers(ha):
     """Home Assistant tool handlers closing over an HomeAssistantClient."""
 
@@ -154,6 +211,9 @@ def handlers(ha):
         return json.dumps({"name": name, "state": state["state"], "attributes": attrs}, indent=2)
 
     def control_light(tool_input):
+        bad = _reject_entity(tool_input.get("entity_id"), "light")
+        if bad:
+            return bad
         data = {}
         if "brightness" in tool_input:
             data["brightness"] = tool_input["brightness"]
@@ -163,10 +223,16 @@ def handlers(ha):
         return f"Successfully called {tool_input['action']} on {tool_input['entity_id']}."
 
     def control_switch(tool_input):
+        bad = _reject_entity(tool_input.get("entity_id"), "switch")
+        if bad:
+            return bad
         ha.call_service("switch", tool_input["action"], tool_input["entity_id"])
         return f"Successfully called {tool_input['action']} on {tool_input['entity_id']}."
 
     def control_media(tool_input):
+        bad = _reject_entity(tool_input.get("entity_id"), "media_player")
+        if bad:
+            return bad
         data = {}
         if "volume_level" in tool_input:
             data["volume_level"] = tool_input["volume_level"]
@@ -174,6 +240,9 @@ def handlers(ha):
         return f"Successfully called {tool_input['action']} on {tool_input['entity_id']}."
 
     def set_thermostat(tool_input):
+        bad = _reject_entity(tool_input.get("entity_id"), "climate")
+        if bad:
+            return bad
         entity_id = tool_input["entity_id"]
         if "hvac_mode" in tool_input:
             ha.call_service("climate", "set_hvac_mode", entity_id, {"hvac_mode": tool_input["hvac_mode"]})

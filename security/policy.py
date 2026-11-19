@@ -31,7 +31,11 @@ TOOL_PERMISSIONS = {
     "tv_status": "read_only",
     "tv_power": "write",
     # PC / System
+    # close_app sends WM_CLOSE (the app prompts to save) and refuses the shell,
+    # so it is safe enough to run unprompted. Force-killing is a separate tool
+    # at the destructive tier — the only tier that asks for confirmation.
     "close_app": "write",
+    "force_close_app": "destructive",
     "launch_app": "write",
     "list_processes": "read_only",
     "open_url_browser": "write",
