@@ -21,7 +21,7 @@ FRAME_SIZE = int(SAMPLE_RATE * FRAME_DURATION_MS / 1000)
 # The buffer lives inside one record_until_silence() call, so it can only ever
 # hold audio from after the caller's mic.clear() -- it cannot resurrect the wake
 # phrase or the tail of JARVIS's own reply.
-PRE_ROLL_MS = 300
+PRE_ROLL_MS = int(os.getenv("PRE_ROLL_MS", "300"))
 
 # A capture must hold at least this much VAD-positive audio to count as an
 # utterance. Total length cannot tell a real command from a noise blip: with

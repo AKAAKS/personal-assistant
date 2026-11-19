@@ -420,3 +420,41 @@ def test_an_accepted_utterance_is_transcribed_as_normal():
     reply = json.loads(ws.sent[0])
     assert reply["heard"] == "lights on"
     assert reply.get("reason") is None
+
+
+# --- the server and core must agree on "the last assistant turn" ------------
+#
+# core._find_last_assistant_turn's docstring claimed it was "Shared by
+# Assistant.note_interruption()'s no-arg walk and by JarvisServer's barge-in
+# capture-at-receipt logic ... so 'what counts as the current last assistant
+# turn' is defined in exactly one place." It was not: the server walked the
+# conversation itself and the two had already drifted apart on how a turn with
+# no "role" key is handled. A reader trusting that docstring would change one
+# and leave barge-in marking the wrong reply.
+
+
+def test_server_and_core_agree_on_the_last_assistant_turn():
+    from jarvisd.core import find_last_assistant_turn
+
+    target = {"role": "assistant", "content": "the reply being interrupted"}
+    conversation = [
+        {"role": "user", "content": "question"},
+        target,
+        {"content": "a turn with no role key at all"},
+    ]
+    server = JarvisServer(FakeAssistant())
+    server.assistant.conversation = conversation
+
+    assert server._capture_interrupt_target() is target
+    assert find_last_assistant_turn(conversation) is target
+
+
+def test_both_return_none_when_no_assistant_turn_exists():
+    from jarvisd.core import find_last_assistant_turn
+
+    conversation = [{"role": "user", "content": "only me"}]
+    server = JarvisServer(FakeAssistant())
+    server.assistant.conversation = conversation
+
+    assert server._capture_interrupt_target() is None
+    assert find_last_assistant_turn(conversation) is None
