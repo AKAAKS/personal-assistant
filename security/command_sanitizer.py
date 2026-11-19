@@ -16,6 +16,19 @@ confirms); only piping a download straight into a shell/interpreter is blocked.
 
 import re
 
+# Shell and core system processes. Killing any of these blanks the desktop and
+# taskbar (explorer.exe) or destabilises the OS. system_client refuses them in
+# close_app/force_close_app; this blocks the same action arriving as a raw
+# shell command, which is the door the tool guard does not cover.
+_SHELL_PROCS = (
+    r"(?:explorer|winlogon|csrss|wininit|smss|services|lsass|dwm|svchost"
+    r"|sihost|ctfmon|taskhostw|fontdrvhost)"
+)
+_KILLS_SHELL = (
+    "kills a Windows shell/system process — it would blank the desktop and "
+    "taskbar; close the app by name instead"
+)
+
 # (compiled pattern, human-readable reason). Case-insensitive.
 _BLOCKLIST: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bformat\s+[a-z]:", re.I), "formats a disk"),
@@ -30,6 +43,9 @@ _BLOCKLIST: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bshutdown\b", re.I), "shuts down/restarts the PC — use the power control tool instead"),
     (re.compile(r"\b(restart|stop)-computer\b", re.I), "shuts down/restarts the PC — use the power control tool instead"),
     (re.compile(r"\blogoff\b", re.I), "logs the user off"),
+    # Killing the shell. Ordinary app kills stay allowed — only these names.
+    (re.compile(rf"\btaskkill\b[^|&;]*\b{_SHELL_PROCS}(?:\.exe)?\b", re.I), _KILLS_SHELL),
+    (re.compile(rf"\bstop-process\b[^|&;]*\b{_SHELL_PROCS}(?:\.exe)?\b", re.I), _KILLS_SHELL),
     # Download-and-execute cradles.
     (re.compile(r"invoke-expression", re.I), "executes a downloaded/dynamic string (Invoke-Expression)"),
     (re.compile(r"\biex\b", re.I), "executes a downloaded/dynamic string (IEX)"),

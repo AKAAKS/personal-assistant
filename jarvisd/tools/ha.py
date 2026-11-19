@@ -134,6 +134,36 @@ TOOLS = [
 ]
 
 
+def _reject_entity(entity_id, domain: str) -> "str | None":
+    """Error message if entity_id is not a single entity in `domain`, else None.
+
+    Home Assistant treats `entity_id: "all"` as EVERY entity in the domain, and
+    entity_id arrives here as a free-form string straight from the model. So
+    "turn off the lights" could mean every light in the house, and the handler
+    would report success either way. Same shape as the File Explorer bug: one
+    loosely-resolved identifier, a far bigger blast radius than the request.
+    """
+    eid = (entity_id or "").strip()
+    if "." not in eid:
+        return (
+            f"'{eid}' is not an entity ID, so I did nothing — targeting 'all' "
+            f"or a bare domain would affect every {domain} in the house. Name "
+            f"one entity like '{domain}.bedroom'; list_devices shows them."
+        )
+    got, _, obj = eid.partition(".")
+    if not obj.strip():
+        return (
+            f"'{eid}' is an incomplete entity ID. Name one entity like "
+            f"'{domain}.bedroom'; list_devices shows them."
+        )
+    if got.strip().lower() != domain:
+        return (
+            f"'{eid}' is a {got.strip().lower()} entity, not a {domain}. Use the "
+            f"tool for {got.strip().lower()} entities, or name a {domain}.* entity."
+        )
+    return None
+
+
 def handlers(ha):
     """Home Assistant tool handlers closing over an HomeAssistantClient."""
 
@@ -154,6 +184,9 @@ def handlers(ha):
         return json.dumps({"name": name, "state": state["state"], "attributes": attrs}, indent=2)
 
     def control_light(tool_input):
+        bad = _reject_entity(tool_input.get("entity_id"), "light")
+        if bad:
+            return bad
         data = {}
         if "brightness" in tool_input:
             data["brightness"] = tool_input["brightness"]
@@ -163,10 +196,16 @@ def handlers(ha):
         return f"Successfully called {tool_input['action']} on {tool_input['entity_id']}."
 
     def control_switch(tool_input):
+        bad = _reject_entity(tool_input.get("entity_id"), "switch")
+        if bad:
+            return bad
         ha.call_service("switch", tool_input["action"], tool_input["entity_id"])
         return f"Successfully called {tool_input['action']} on {tool_input['entity_id']}."
 
     def control_media(tool_input):
+        bad = _reject_entity(tool_input.get("entity_id"), "media_player")
+        if bad:
+            return bad
         data = {}
         if "volume_level" in tool_input:
             data["volume_level"] = tool_input["volume_level"]
@@ -174,6 +213,9 @@ def handlers(ha):
         return f"Successfully called {tool_input['action']} on {tool_input['entity_id']}."
 
     def set_thermostat(tool_input):
+        bad = _reject_entity(tool_input.get("entity_id"), "climate")
+        if bad:
+            return bad
         entity_id = tool_input["entity_id"]
         if "hvac_mode" in tool_input:
             ha.call_service("climate", "set_hvac_mode", entity_id, {"hvac_mode": tool_input["hvac_mode"]})

@@ -13,6 +13,62 @@ COMMAND_TIMEOUT_SEC = 60
 # spawned child), so scrubbing a child's env never affects the assistant itself.
 _ANTHROPIC_CRED_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 
+# Windows shell and core system processes. Killing any of these by image name
+# takes down the desktop, taskbar and Start menu (explorer.exe) or the OS
+# itself. Both close paths refuse them.
+#
+# This list exists because close_app("explorer") once ran
+# `taskkill /IM explorer.exe /F`. By default Windows does NOT give File
+# Explorer folder windows their own process, so "close File Explorer" killed
+# the shell: black desktop, no taskbar, Alt-Tab the only way to navigate.
+_PROTECTED_PROCESSES = frozenset({
+    "explorer.exe", "winlogon.exe", "csrss.exe", "wininit.exe", "smss.exe",
+    "services.exe", "lsass.exe", "dwm.exe", "svchost.exe", "sihost.exe",
+    "ctfmon.exe", "taskhostw.exe", "fontdrvhost.exe", "runtimebroker.exe",
+    "shellexperiencehost.exe", "startmenuexperiencehost.exe", "searchhost.exe",
+})
+
+# Window classes that ARE the shell rather than an app window. explorer.exe
+# owns both these and ordinary folder windows (CabinetWClass / ExploreWClass);
+# only the latter may be sent WM_CLOSE.
+_SHELL_WINDOW_CLASSES = frozenset({
+    "progman", "shell_traywnd", "shell_secondarytraywnd", "workerw", "button",
+})
+
+
+# Schemes open_url may hand to ShellExecute. Everything else (a path, a
+# file:// URL, a bare .bat) would be EXECUTED, not browsed.
+_WEB_URL_SCHEMES = ("http://", "https://", "mailto:")
+
+
+def _process_family(proc) -> "set[int]":
+    """PIDs of the JARVIS process family around `proc`.
+
+    Climbs to the topmost ancestor still running under the same image name,
+    then takes that ancestor and every descendant. tray_app spawns the daemon
+    and the voice client as separate children, so from the daemon the voice
+    client is a SIBLING - neither an ancestor nor a child. Walking the family
+    from the shared root catches it, while the same-image stop keeps us from
+    climbing into explorer.exe and adopting every unrelated app.
+
+    `proc` is a psutil.Process (or anything with the same .pid/.name()/
+    .parents()/.children() shape).
+    """
+    own_name = (proc.name() or "").lower()
+    root = proc
+    for ancestor in proc.parents():          # nearest first
+        if (ancestor.name() or "").lower() != own_name:
+            break
+        root = ancestor
+    pids = {proc.pid, root.pid}
+    pids.update(c.pid for c in root.children(recursive=True))
+    return pids
+
+
+def _is_shell_window(class_name: str) -> bool:
+    """True when this window class is part of the shell (desktop/taskbar)."""
+    return (class_name or "").strip().lower() in _SHELL_WINDOW_CLASSES
+
 
 def _scrubbed_env() -> dict:
     """A copy of the current environment with JARVIS's Anthropic creds removed."""
@@ -44,40 +100,213 @@ def _launches_claude(command: "str | None") -> bool:
 
 class SystemClient:
 
-    def close_app(self, name: str) -> str:
-        name_lower = name.lower().strip()
-        process_map = {
-            "firefox": "firefox.exe",
-            "chrome": "chrome.exe",
-            "edge": "msedge.exe",
-            "notepad": "notepad.exe",
-            "explorer": "explorer.exe",
-            "spotify": "Spotify.exe",
-            "discord": "Discord.exe",
-            "steam": "steam.exe",
-            "vscode": "Code.exe",
-            "vs code": "Code.exe",
-            "word": "WINWORD.EXE",
-            "excel": "EXCEL.EXE",
-            "powerpoint": "POWERPNT.EXE",
-            "teams": "ms-teams.exe",
-            "slack": "slack.exe",
-            "obs": "obs64.exe",
-            "vlc": "vlc.exe",
-            "terminal": "WindowsTerminal.exe",
-            "cmd": "cmd.exe",
-            "powershell": "powershell.exe",
-        }
-        proc_name = process_map.get(name_lower, f"{name_lower}.exe")
-        result = subprocess.run(
-            ["taskkill", "/IM", proc_name, "/F"],
-            capture_output=True, text=True, timeout=10,
+    # Spoken app name -> process image name. Aliases matter: the model says
+    # whatever the user said, and "file explorer" must resolve the same way
+    # "explorer" does so the shell guard below sees it.
+    _PROCESS_MAP = {
+        "firefox": "firefox.exe",
+        "chrome": "chrome.exe",
+        "edge": "msedge.exe",
+        "notepad": "notepad.exe",
+        "explorer": "explorer.exe",
+        "file explorer": "explorer.exe",
+        "windows explorer": "explorer.exe",
+        "file manager": "explorer.exe",
+        "files": "explorer.exe",
+        "spotify": "Spotify.exe",
+        "discord": "Discord.exe",
+        "steam": "steam.exe",
+        "vscode": "Code.exe",
+        "vs code": "Code.exe",
+        "word": "WINWORD.EXE",
+        "excel": "EXCEL.EXE",
+        "powerpoint": "POWERPNT.EXE",
+        "teams": "ms-teams.exe",
+        "slack": "slack.exe",
+        "obs": "obs64.exe",
+        "vlc": "vlc.exe",
+        "terminal": "WindowsTerminal.exe",
+        "cmd": "cmd.exe",
+        "powershell": "powershell.exe",
+    }
+
+    def _resolve_process(self, name: str) -> str:
+        """Spoken name -> process image name ("file explorer" -> explorer.exe)."""
+        key = (name or "").lower().strip()
+        mapped = self._PROCESS_MAP.get(key)
+        if mapped:
+            return mapped
+        return key if key.endswith(".exe") else f"{key}.exe"
+
+    def _pids_for_image(self, proc_name: str) -> "set[int]":
+        """PIDs currently running under this image name. Empty on any failure."""
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"IMAGENAME eq {proc_name}", "/NH", "/FO", "CSV"],
+                capture_output=True, text=True, timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return set()
+        pids = set()
+        for line in (result.stdout or "").splitlines():
+            parts = [p.strip('"') for p in line.strip().split('","')]
+            if len(parts) >= 2 and parts[0].strip('"').lower() == proc_name.lower():
+                try:
+                    pids.add(int(parts[1]))
+                except ValueError:
+                    continue
+        return pids
+
+    def _own_pids(self) -> "set[int]":
+        """PIDs that ARE JARVIS: this process and the rest of its family.
+
+        The daemon, the voice client and the tray all run as pythonw.exe
+        (clients/tray_app.py), so a kill aimed at the image name "python"
+        would take the assistant down mid-sentence - the File Explorer bug
+        pointed at ourselves. Identity is by PID, never by name: sys.executable
+        is unreliable here (a Windows Store python.exe is an alias stub whose
+        real image name is python3.11.exe). Best-effort: psutil is optional.
+        """
+        pids = {os.getpid()}
+        try:
+            import psutil
+        except ImportError:
+            return pids
+        try:
+            pids |= _process_family(psutil.Process(os.getpid()))
+        except Exception:
+            pass
+        return pids
+
+    def _terminate(self, proc_name: str, label: str, force: bool) -> str:
+        """Terminate a process BY PID, never by image name.
+
+        `taskkill /IM` hits every process sharing the name - that is what
+        killed the whole shell for one folder window, and what would kill the
+        daemon, the voice client and the tray together. Resolving to PIDs
+        first keeps the blast radius to what was actually asked for, and lets
+        us drop our own PIDs from the list.
+        """
+        pids = self._pids_for_image(proc_name)
+        if not pids:
+            return f"{label} is not running."
+        targets = sorted(pids - self._own_pids())
+        if not targets:
+            return (
+                f"{label} is JARVIS's own process ({proc_name}) - closing it "
+                "would shut myself down mid-sentence. Quit me from the tray "
+                "icon instead."
+            )
+
+        failures = []
+        for pid in targets:
+            cmd = ["taskkill", "/PID", str(pid)] + (["/F"] if force else [])
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            except (OSError, subprocess.SubprocessError) as exc:
+                failures.append(str(exc))
+                continue
+            if result.returncode != 0:
+                failures.append((result.stderr or "").strip())
+        if not failures:
+            return f"Closed {label}." if not force else f"Force-closed {label}."
+        if all("not found" in f.lower() for f in failures):
+            return f"{label} is not running."
+        detail = failures[0]
+        if force:
+            return f"Could not force-close {label}: {detail}"
+        return (
+            f'Could not close {label}: {detail} - say "force close {label}" '
+            "to kill it outright, which loses anything unsaved."
         )
-        if result.returncode == 0:
-            return f"Closed {name}."
-        if "not found" in result.stderr.lower():
-            return f"{name} is not running."
-        return f"Could not close {name}: {result.stderr.strip()}"
+
+    def _close_windows(self, proc_name: str) -> int:
+        """Post WM_CLOSE to this process's ordinary windows; return how many.
+
+        WM_CLOSE is what clicking the X does: the app gets to prompt about
+        unsaved work and decide for itself. Shell windows (desktop, taskbar)
+        are skipped, so closing a folder window never disturbs the shell.
+        Best-effort - returns 0 if pywin32 is unavailable.
+        """
+        pids = self._pids_for_image(proc_name)
+        if not pids:
+            return 0
+        try:
+            import win32con
+            import win32gui
+            import win32process
+        except ImportError:
+            return 0
+
+        targets: "list[int]" = []
+
+        def _cb(hwnd, _):
+            if not win32gui.IsWindowVisible(hwnd):
+                return
+            try:
+                if _is_shell_window(win32gui.GetClassName(hwnd)):
+                    return
+                if not win32gui.GetWindowText(hwnd).strip():
+                    return
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            except Exception:
+                return
+            if pid in pids:
+                targets.append(hwnd)
+
+        try:
+            win32gui.EnumWindows(_cb, None)
+        except Exception:
+            return 0
+        for hwnd in targets:
+            try:
+                win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+            except Exception:
+                continue
+        return len(targets)
+
+    def close_app(self, name: str) -> str:
+        """Close an app the way clicking its X does - never a force-kill.
+
+        Order: close its windows (app may prompt to save) -> graceful taskkill
+        for windowless/tray apps -> tell the user force_close_app exists. The
+        shell is never terminated by image name at all.
+        """
+        proc_name = self._resolve_process(name)
+        label = (name or "").strip() or proc_name
+
+        closed = self._close_windows(proc_name)
+        if closed == 1:
+            return f"Closed {label}."
+        if closed > 1:
+            return f"Closed {closed} {label} windows."
+
+        if proc_name in _PROTECTED_PROCESSES:
+            return (
+                f"{label} has no open windows to close. I won't terminate "
+                f"{proc_name} - it is the Windows shell, and killing it blanks "
+                "the desktop, taskbar and Start menu."
+            )
+
+        # No window to close: a tray/background app. Terminate by PID, and
+        # without /F, so the process still gets to exit cleanly.
+        return self._terminate(proc_name, label, force=False)
+
+    def force_close_app(self, name: str) -> str:
+        """Force-kill an app (taskkill /F). Destructive: unsaved work is lost.
+
+        Refuses shell and core system processes no matter how it is asked.
+        """
+        proc_name = self._resolve_process(name)
+        label = (name or "").strip() or proc_name
+        if proc_name in _PROTECTED_PROCESSES:
+            return (
+                f"Refusing to force-kill {proc_name} - it is a Windows shell or "
+                "core system process. Killing it blanks the desktop, taskbar and "
+                "Start menu, leaving only Alt-Tab to switch windows. To close a "
+                f"File Explorer window instead, ask me to close {label} normally."
+            )
+        return self._terminate(proc_name, label, force=True)
 
     # Process image names for apps we can detect as already-running.
     _RUNNING_NAMES = {
@@ -168,8 +397,24 @@ class SystemClient:
         return "\n".join(f"- {name} ({mem})" for name, mem in top)
 
     def open_url(self, url: str) -> str:
-        os.startfile(url)
-        return f"Opened {url} in default browser."
+        """Open an http(s) or mailto URL in the default browser.
+
+        os.startfile is ShellExecute: handed a path it RUNS the file. This tool
+        sits at the `write` tier (no confirmation), so without a scheme check
+        it is arbitrary execution that walks around run_command's destructive
+        tier and its sanitizer. Anything that is not a web URL is refused.
+        """
+        target = (url or "").strip()
+        if not target.lower().startswith(_WEB_URL_SCHEMES):
+            return (
+                f"'{target}' is not a web URL. This tool opens http(s) and "
+                "mailto links only - use launch_app to start a program."
+            )
+        try:
+            os.startfile(target)
+        except OSError as exc:
+            return f"Could not open {target}: {exc}"
+        return f"Opened {target} in default browser."
 
     def run_command(self, command: str) -> tuple[int, str, str]:
         """Run a shell command headlessly and return (exit_code, stdout, stderr).
