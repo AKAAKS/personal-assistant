@@ -90,14 +90,6 @@ def _g(x: float) -> str:
     return f"{x:g}"
 
 
-def _key(r):
-    if r.pantry_id is not None:
-        return ("pid", r.pantry_id)
-    if r.external_id:
-        return ("food", r.source, r.external_id)
-    return ("name", r.meal_ingredient.name.strip().lower())
-
-
 def _shopping_delta(resolved_dishes, pantry_store) -> list[dict]:
     """Aggregate grams needed per food across all dishes minus pantry stock.
 
