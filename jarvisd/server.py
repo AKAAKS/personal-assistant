@@ -38,6 +38,7 @@ from datetime import datetime, timedelta
 import websockets
 
 from jarvisd import claude_sessions
+from jarvisd.core import find_last_assistant_turn
 from jarvisd.reminder_store import BAD_DUE_TS
 from jarvisd.text_format import strip_markdown
 # Parsing and naive-ising are reused from the store, not re-implemented: its
@@ -86,7 +87,6 @@ class JarvisServer:
         notifier=None,
         reminder_store=None,
         timer_store=None,
-        assistant_lock_holder=None,
         ha_listener=None,
         meal_store=None,
         habit_scan=None,
@@ -132,11 +132,6 @@ class JarvisServer:
         # one timer RING_INTERVAL_SEC apart. After a restart it is empty, so the
         # first tick rings once straight away and everything after is paced.
         self._last_ring: dict[int, datetime] = {}
-        # Reserved hook for a future multi-server topology that would share one
-        # assistant/lock. Currently unused by the wiring: __main__'s HA-rule
-        # callables serialize on `server._lock` directly to match _process (see
-        # __main__.py). Defaults to this server; kept for API stability.
-        self.assistant_lock_holder = assistant_lock_holder if assistant_lock_holder is not None else self
         # ws -> asyncio.Lock serializing writes to that connection: a JSON+WAV frame
         # pair must never be split by a concurrent proactive push (or vice versa).
         self._clients: dict = {}
@@ -262,10 +257,7 @@ class JarvisServer:
         later) is what keeps that window from mattering.
         """
         conversation = getattr(self.assistant, "conversation", None) or []
-        for turn in reversed(conversation):
-            if turn.get("role") == "assistant":
-                return turn
-        return None
+        return find_last_assistant_turn(conversation)
 
     async def _append_drained_notices(self, reply: str) -> str:
         """Append any queued proactive notices to a reply.
@@ -458,7 +450,9 @@ class JarvisServer:
         -- it fires (with a warning logged) rather than silently going dark, since a
         typo in a condition string must never permanently suppress a reminder.
         """
-        due = self.reminder_store.due(datetime.now())
+        # to_thread like the three calls below: due() is sqlite, and
+        # _retire_invalid can issue an UPDATE + commit from here.
+        due = await asyncio.to_thread(self.reminder_store.due, datetime.now())
         for r in due:
             if await self._should_skip_notify(r):
                 log.info("Reminder #%s condition satisfied; skipping notify", r["id"])

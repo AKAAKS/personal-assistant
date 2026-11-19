@@ -78,14 +78,15 @@ class HAEventListener:
         # out of _process_event would drop the HA socket in run() and starve
         # every rule of events over a transient sqlite failure.
         try:
-            matched = self.rules_store.matches(reduced)
+            matched = await asyncio.to_thread(self.rules_store.matches, reduced)
         except Exception:
             log.exception("Rule matching failed for event %r; skipping event", event_type)
             return
 
         for rule in matched:
             try:
-                allowed = self.rules_store.check_and_stamp_cooldown(rule["id"], self.now())
+                allowed = await asyncio.to_thread(
+                    self.rules_store.check_and_stamp_cooldown, rule["id"], self.now())
             except Exception:
                 log.exception("Cooldown check failed for rule '%s'; skipping", rule["name"])
                 continue

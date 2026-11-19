@@ -20,9 +20,12 @@ def test_execute_tool_dispatch():
 
 
 def test_execute_tool_wraps_exceptions():
+    # get_device_status still raises KeyError on a missing entity_id. (The
+    # control tools no longer do: they validate entity_id up front, because an
+    # unvalidated one could mean "all" -- every light in the house.)
     ai = make_assistant()
-    out = ai._execute_tool("control_light", {})  # missing required keys -> KeyError inside
-    assert out.startswith("Error executing control_light")
+    out = ai._execute_tool("get_device_status", {})
+    assert out.startswith("Error executing get_device_status")
 
 
 def test_models_are_current():

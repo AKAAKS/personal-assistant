@@ -69,9 +69,9 @@ CAPABILITIES = [
      ("spotify_search", "spotify_play", "spotify_playback_control")),
     ("- Android TV: launch/navigate apps, type in search fields, remote control",
      ("tv_launch_app", "tv_remote", "tv_type_text")),
-    ('- PC control: launch/close apps, list processes, open URLs, system info. Open a terminal the user drives (open_terminal — e.g. "run Claude in a terminal"), or run a one-off command and read back its output (run_command, needs confirmation). Restart/shut down the PC (system_power) — but FIRST call scan_unsaved_work and warn the user about any open apps that may have unsaved work, then confirm before doing it. "cancel the shutdown" uses system_power with action cancel.',
-     ("launch_app", "close_app", "open_url_browser", "open_terminal", "run_command",
-      "scan_unsaved_work", "system_power")),
+    ('- PC control: launch/close apps, list processes, open URLs, system info. close_app closes an app gracefully (it may prompt to save) and is what "close X" always means, File Explorer included — it closes the folder window and leaves the Windows shell running, so just call it. force_close_app is ONLY for an app that is already hung and refused close_app; it destroys unsaved work, asks for confirmation, and refuses Windows shell processes outright. Open a terminal the user drives (open_terminal — e.g. "run Claude in a terminal"), or run a one-off command and read back its output (run_command, needs confirmation). Restart/shut down the PC (system_power) — but FIRST call scan_unsaved_work and warn the user about any open apps that may have unsaved work, then confirm before doing it. "cancel the shutdown" uses system_power with action cancel.',
+     ("launch_app", "close_app", "force_close_app", "open_url_browser", "open_terminal",
+      "run_command", "scan_unsaved_work", "system_power")),
     ('- Gmail: search and read mail, and compose drafts. You CANNOT send — you only create drafts the user sends themselves, so say so ("I\'ve drafted it; send it when you\'re ready").',
      ("gmail_search", "gmail_read", "gmail_draft")),
     ("- Google Calendar: list upcoming events, check a specific day, create events, delete events (deleting asks for confirmation).",
@@ -142,16 +142,22 @@ def render_system_prompt(available: set) -> str:
 INTERRUPTION_NOTE = "(The user interrupted and cut off this reply before I finished.)"
 
 
-def _find_last_assistant_turn(conversation: list[dict]) -> dict | None:
+def find_last_assistant_turn(conversation: list[dict]) -> dict | None:
     """Return the most recent assistant-role turn in `conversation`, or None.
 
     Shared by Assistant.note_interruption()'s no-arg walk and by
     JarvisServer's barge-in capture-at-receipt logic (see
     JarvisServer._capture_interrupt_target), so "what counts as the current
     last assistant turn" is defined in exactly one place.
+
+    That claim used to be false -- the server walked the conversation itself
+    and the two had drifted on roleless turns (this used turn["role"] and
+    raised; the server used .get and skipped). Unified on .get: a turn without
+    a role is not an assistant turn, and a malformed history must not take down
+    barge-in marking.
     """
     for turn in reversed(conversation):
-        if turn["role"] == "assistant":
+        if turn.get("role") == "assistant":
             return turn
     return None
 
@@ -627,7 +633,7 @@ class Assistant:
         after the first call.
         """
         if turn is None:
-            turn = _find_last_assistant_turn(self.conversation)
+            turn = find_last_assistant_turn(self.conversation)
         if turn is None:
             return
         _mark_turn_interrupted(turn)

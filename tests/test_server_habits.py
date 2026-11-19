@@ -132,6 +132,9 @@ def test_seconds_until_next_scan_tolerates_malformed_hour_env(monkeypatch):
 
 
 def test_serve_forever_starts_habit_task_only_when_habit_scan_set():
+    # port=0: let the OS pick a free port. These tests call serve_forever,
+    # so with the constructor default (8765) they fail whenever the real
+    # daemon is running on this machine.
     server = JarvisServer(FakeAssistant(), habit_scan=lambda: 0, port=0)
 
     async def _run():
