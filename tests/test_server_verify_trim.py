@@ -24,6 +24,11 @@ class RecordingSTT:
     def __init__(self, seen):
         self.seen = seen
 
+    def transcribe_classified(self, audio):
+        from voice.stt import classify_text
+        text = self.transcribe(audio)
+        return text, classify_text(text)
+
     def transcribe(self, audio):
         self.seen["stt_len"] = len(audio)
         return "turn on the light"

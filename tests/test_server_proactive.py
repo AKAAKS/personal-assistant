@@ -289,6 +289,11 @@ def test_text_in_appends_drained_notices_to_reply():
 
 def test_audio_in_appends_drained_notices_to_reply():
     class FakeSTT:
+        def transcribe_classified(self, audio):
+            from voice.stt import classify_text
+            text = self.transcribe(audio)
+            return text, classify_text(text)
+
         def transcribe(self, audio):
             return "turn on the light"
 
@@ -373,7 +378,7 @@ def test_concurrent_reply_and_push_never_split_json_wav_pairs():
         server._clients[ws] = asyncio.Lock()
 
         reply_task = asyncio.create_task(
-            server._send_reply(ws, "the reply", heard=None, speak=True)
+            server._send_reply(ws, "the reply", heard=None, speak=True, turn="closed")
         )
         await asyncio.sleep(0.05)  # _send_reply has sent its JSON, is blocked on the WAV
         push_task = asyncio.create_task(server.push_proactive("surprise"))

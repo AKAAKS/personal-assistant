@@ -41,11 +41,21 @@ from jarvisd import claude_sessions
 from jarvisd.core import find_last_assistant_turn
 from jarvisd.reminder_store import BAD_DUE_TS
 from jarvisd.text_format import strip_markdown
+from voice.stt import INTENT_CONCLUDE, INTENT_NOISE, INTENT_VOID_CLOSE, INTENT_VOID_CONTINUE
 # Parsing and naive-ising are reused from the store, not re-implemented: its
 # parse_ts guards NULL (raising ValueError) and to_naive guards tz-aware values.
 from jarvisd.timer_store import parse_ts, to_naive
 
 log = logging.getLogger(__name__)
+
+# Utterance intents that end the turn without an agent call, and the "turn"
+# value each ships. "voided_*" means the utterance is discarded; the suffix says
+# whether the mic stays open for the user to rephrase.
+_EXIT_TURNS = {
+    INTENT_CONCLUDE: "closed",
+    INTENT_VOID_CONTINUE: "voided_open",
+    INTENT_VOID_CLOSE: "voided_closed",
+}
 
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024  # 15s of 16kHz int16 is ~0.5MB; generous cap
 REMINDER_TICK_SEC = 15
@@ -145,6 +155,10 @@ class JarvisServer:
         # interrupted instead of whatever assistant.conversation's newest
         # turn happens to be by then.
         self._pending_interrupt: dict = {}
+        # Per-connection "turn" value of the last reply sent on that connection
+        # (see _turn_for). Only consulted to ask "was the last reply 'open'?",
+        # which suppresses concluder matching for the next utterance.
+        self._last_turn: dict = {}
         self._loop = None  # captured in serve_forever(); lets worker threads push safely
         self._reminder_task = None
         # Its own task, like the Claude watcher: a reminder-tick failure must
@@ -230,6 +244,26 @@ class JarvisServer:
         finally:
             self._clients.pop(ws, None)
             self._pending_interrupt.pop(ws, None)
+            self._last_turn.pop(ws, None)
+
+    def _turn_for(self, raw_reply: str) -> str:
+        """Decide the turn outcome, "open" or "closed", for an agent reply.
+
+        "open" when JARVIS asked something the user must answer: a pending
+        confirmation (Assistant.awaiting_confirmation) or a reply ending in "?".
+
+        Must be given the string _process returned, BEFORE
+        _append_drained_notices / _append_habit_trailer / strip_markdown touch
+        it. The appenders tack on sentences ending in a period, so a reply that
+        genuinely ended in "?" would otherwise read as "closed" whenever a
+        notice happened to be pending, and the mic would shut on a real
+        question.
+        """
+        asked = (raw_reply or "").strip().endswith("?")
+        # getattr: lightweight assistants (tests, stubs) may not track it.
+        if getattr(self.assistant, "awaiting_confirmation", False) or asked:
+            return "open"
+        return "closed"
 
     async def _process(self, text: str, interrupted_turn=None) -> str:
         async with self._lock:
@@ -282,9 +316,11 @@ class JarvisServer:
         mtype = msg.get("type")
         if mtype == "text_in":
             reply = await self._process(msg.get("text", ""))
+            turn = self._turn_for(reply)  # before the appenders; see _turn_for
             reply = await self._append_drained_notices(reply)
             reply = await self._append_habit_trailer(reply)
-            await self._send_reply(ws, reply, heard=None, speak=bool(msg.get("speak")))
+            await self._send_reply(ws, reply, heard=None, speak=bool(msg.get("speak")),
+                                   turn=turn)
         elif mtype == "reset":
             self.assistant.reset_conversation()
             await self._safe_send(ws, json.dumps(
@@ -350,20 +386,43 @@ class JarvisServer:
                                     "audio_follows": False, "reason": "unverified"})
                 )
                 return
-        heard = await asyncio.to_thread(self.stt.transcribe, audio)
-        if not heard.strip():
+        heard, intent = await asyncio.to_thread(self.stt.transcribe_classified, audio)
+        # Noise (e.g. a Whisper hallucination on silence) is a misfire exactly
+        # like an empty transcript: same frame, no "turn" key.
+        if not heard.strip() or intent == INTENT_NOISE:
             log.info("Transcription empty — no reply generated")
             await self._safe_send(
                 ws, json.dumps({"type": "reply", "text": "", "heard": "", "audio_follows": False})
             )
             return
         log.info("Heard: %s", heard)
+        # A concluder is only honoured when the previous reply left the turn
+        # closed. After an "open" reply (a question or a confirmation prompt),
+        # "that's it" / "we're done" are plausible spoken ANSWERS -- e.g. to a
+        # destructive-action confirmation -- and swallowing one would shut the
+        # mic instead of letting the user answer. So for that one utterance we
+        # skip the exit and treat it as a normal command. Only the previous
+        # reply matters, so the exemption lasts exactly one turn.
+        previous_turn = self._last_turn.get(ws)
+        if intent in _EXIT_TURNS and previous_turn != "open":
+            # Answered here, upstream of _process: no round trip or token spend,
+            # and it never reaches Assistant._handle_local, which would answer a
+            # concluder with canned politeness and hold the window open. The
+            # frame is a plain reply with empty text and no audio.
+            turn = _EXIT_TURNS[intent]
+            self._last_turn[ws] = turn
+            await self._safe_send(
+                ws, json.dumps({"type": "reply", "text": "", "heard": heard,
+                                "audio_follows": False, "turn": turn})
+            )
+            return
         reply = await self._process(heard, interrupted_turn=interrupted_turn)
+        turn = self._turn_for(reply)  # before the appenders; see _turn_for
         reply = await self._append_drained_notices(reply)
         reply = await self._append_habit_trailer(reply)
-        await self._send_reply(ws, reply, heard=heard, speak=True)
+        await self._send_reply(ws, reply, heard=heard, speak=True, turn=turn)
 
-    async def _send_reply(self, ws, reply: str, heard, speak: bool):
+    async def _send_reply(self, ws, reply: str, heard, speak: bool, turn: str):
         reply = strip_markdown(reply)  # clean prose for both display and TTS
         wav = None
         if speak and self.tts is not None and reply:
@@ -373,8 +432,10 @@ class JarvisServer:
         # push_proactive() to the same socket must not interleave its frames here
         # (the client would attribute the wrong WAV to audio_follows).
         frame = json.dumps(
-            {"type": "reply", "text": reply, "heard": heard, "audio_follows": wav is not None}
+            {"type": "reply", "text": reply, "heard": heard,
+             "audio_follows": wav is not None, "turn": turn}
         )
+        self._last_turn[ws] = turn
         if wav is not None:
             await self._safe_send(ws, frame, wav)
         else:
