@@ -328,8 +328,17 @@ class JarvisServer:
         # Reject anyone but the enrolled speaker before spending STT on it. This
         # also drops JARVIS's own TTS echoing back through a room speaker, which
         # is what otherwise drives a hands-free feedback loop.
+        #
+        # The verifier sees the clip with its trailing silence trimmed: padding
+        # dilutes the embedding and inflates the length its duration rule keys
+        # on. Whisper below still gets the full `audio`.
         if self.speaker_verifier is not None:
-            if not await asyncio.to_thread(self.speaker_verifier.accepts, audio):
+            # Lazy: voice.audio_io pulls in sounddevice/webrtcvad, which a
+            # server running without speech must not need (see __main__).
+            from voice.audio_io import trim_trailing_silence
+            if not await asyncio.to_thread(
+                self.speaker_verifier.accepts, trim_trailing_silence(audio)
+            ):
                 log.info("Utterance rejected — not the enrolled speaker")
                 # `reason` distinguishes this from "we heard you but Whisper got
                 # nothing". The client must not treat it as a misfire: a

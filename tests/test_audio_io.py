@@ -11,7 +11,12 @@ Frames are faked end to end: no microphone, no webrtcvad.
 
 import numpy as np
 
-from voice.audio_io import FRAME_SIZE, PRE_ROLL_MS, VoiceActivityDetector
+from voice.audio_io import (
+    FRAME_SIZE,
+    PRE_ROLL_MS,
+    VoiceActivityDetector,
+    trim_trailing_silence,
+)
 
 
 class ScriptedMic:
@@ -293,3 +298,37 @@ def test_a_pre_buffer_capture_that_does_get_speech_still_works():
     mic = CountingMic(_speech(10) + _silence(30))
     audio = vad.record_until_silence(mic, pre_buffer=_speech(4))
     assert audio is not None, "a real utterance after a pre_buffer was lost"
+
+
+# --- trim_trailing_silence: what the speaker verifier is shown ---------------
+
+def test_trims_trailing_silence_but_keeps_a_margin():
+    speech = np.ones(16000, dtype=np.int16) * 1000       # 1.0s loud
+    silence = np.zeros(16000, dtype=np.int16)            # 1.0s silent
+    out = trim_trailing_silence(np.concatenate([speech, silence]))
+    assert 16000 + 2000 <= len(out) <= 16000 + 2800      # ~150ms kept (+/- a frame)
+
+
+def test_keeps_a_short_yes_intact():
+    """A briskly spoken 'Yes.' is ~200-300ms; the trim must not eat it."""
+    yes = np.ones(4000, dtype=np.int16) * 1000           # 250ms
+    out = trim_trailing_silence(np.concatenate([yes, np.zeros(16000, dtype=np.int16)]))
+    assert len(out) >= 4000
+
+
+def test_leading_silence_is_untouched():
+    audio = np.concatenate([np.zeros(8000, dtype=np.int16),
+                            np.ones(8000, dtype=np.int16) * 1000])
+    assert len(trim_trailing_silence(audio)) == len(audio)
+
+
+def test_all_silence_returns_the_clip_unchanged():
+    """No speech to anchor on: return the input rather than an empty array,
+    so the verifier still sees a clip and rejects it on its own terms."""
+    audio = np.zeros(16000, dtype=np.int16)
+    assert len(trim_trailing_silence(audio)) == len(audio)
+
+
+def test_a_clip_shorter_than_the_margin_is_returned_whole():
+    audio = np.ones(500, dtype=np.int16) * 1000
+    assert len(trim_trailing_silence(audio)) == 500

@@ -62,8 +62,10 @@ DEFAULT_MIN_DURATION_SEC = 2.0
 # opened a real hole: another person, or the TV, is a human voice and therefore
 # far from JARVIS's TTS print, so sim_user ~0.10 against sim_imp ~-0.20 clears a
 # 0.24 margin and was accepted as the enrolled speaker while scoring far below
-# the threshold. Since captures close after 800ms of trailing silence, nearly
-# every real command is 1.0-1.8s, so that was the common path, not an edge case.
+# the threshold. The server trims trailing silence off the clip before it gets
+# here (voice.audio_io.trim_trailing_silence), so the length judged is the length
+# of the speech itself: nearly every real command is well under min_duration_sec,
+# and short clips remain the common path, not an edge case.
 #
 # 0.6 sits between the weakest genuine short clips measured (0.290 at 1.6s,
 # 0.350 at 1.2s -> floor 0.15) and a non-enrolled human voice (~0.05-0.10). The
