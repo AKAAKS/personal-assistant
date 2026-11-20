@@ -58,11 +58,26 @@ class Port:
         return self.open
 
 
-def _make(port, daemon=None, client=None, **kw):
+class Stopper:
+    """Fake for the stop_daemon collaborator: records calls, optionally runs a hook
+    (e.g. to flip the fake port closed, as a real kill would)."""
+
+    def __init__(self, on_stop=None):
+        self.calls = 0
+        self.on_stop = on_stop
+
+    def __call__(self):
+        self.calls += 1
+        if self.on_stop:
+            self.on_stop()
+
+
+def _make(port, daemon=None, client=None, stop=None, **kw):
     return JarvisSupervisor(
         is_port_open=port,
         spawn_daemon=daemon or Spawner(),
         spawn_client=client or Spawner(),
+        stop_daemon=stop or Stopper(),
         sleep=lambda _s: None,
         **kw,
     )
@@ -147,9 +162,11 @@ def test_tick_relaunches_client_after_unexpected_exit():
     assert sup.state == "listening"
 
 
-def test_tick_reports_brain_down_when_port_closed():
+def test_tick_reports_brain_down_when_daemon_cannot_be_revived():
     client = Spawner()
-    sup = _make(Port(open_=False), client=client)
+    ticks = iter(range(0, 10_000, 10))
+    sup = _make(Port(open_=False), client=client, daemon_timeout=5.0,
+                clock=lambda: next(ticks))
     sup.tick()
     assert sup.state == "brain_down"
     assert client.calls == 0
@@ -188,3 +205,152 @@ def test_quit_leaves_externally_started_daemon_running():
     sup.quit()
     assert client.last.terminated is True
     assert daemon.calls == 0       # never spawned, nothing to terminate
+
+
+# --- restart() stays client-only (regression pin) ---
+
+def test_restart_restarts_only_the_client():
+    daemon, client, stop = Spawner(), Spawner(), Stopper()
+    sup = _make(Port(open_=True), daemon=daemon, client=client, stop=stop)
+    sup.start_listening()
+    sup.restart()
+    assert client.calls == 2
+    assert client.procs[0].terminated is True
+    assert daemon.calls == 0
+    assert stop.calls == 0
+    assert sup.state == "listening"
+
+
+# --- restart_daemon ---
+
+def test_restart_daemon_stops_a_daemon_it_did_not_start():
+    daemon, client, stop = Spawner(), Spawner(), Stopper()
+    # closed after the kill, then the fresh daemon's port comes up
+    sup = _make(Port(seq=[False, True]), daemon=daemon, client=client, stop=stop)
+    assert sup.started_daemon is False
+    assert sup.restart_daemon() is True
+    assert stop.calls == 1
+    assert daemon.calls == 1
+
+
+def test_restart_daemon_waits_for_port_to_close_before_respawning():
+    events = []
+    port = Port(seq=[True, True, False, True])  # still open twice, then closed, then back
+    real = port.__call__
+    daemon = Spawner()
+
+    def spawn():
+        events.append("spawn")
+        return daemon()
+
+    sup = JarvisSupervisor(
+        is_port_open=lambda: (events.append("probe"), real())[1],
+        spawn_daemon=spawn, spawn_client=Spawner(),
+        stop_daemon=lambda: events.append("stop"), sleep=lambda _s: None,
+    )
+    assert sup.restart_daemon() is True
+    assert events.index("spawn") > events.index("stop")
+    # the two "still open" probes happened before the spawn
+    assert events[:events.index("spawn")].count("probe") == 3
+
+
+def test_restart_daemon_restarts_client_and_owns_daemon():
+    daemon, client = Spawner(), Spawner()
+    sup = _make(Port(seq=[False, True]), daemon=daemon, client=client)
+    sup.start_listening()
+    old_client = client.last
+    assert sup.restart_daemon() is True
+    assert old_client.terminated is True
+    assert client.calls == 2
+    assert sup.started_daemon is True
+    assert sup.state == "listening"
+    sup.quit()
+    assert daemon.last.terminated is True  # quit now stops the daemon we spawned
+
+
+def test_restart_daemon_failing_to_come_back_is_not_listening():
+    ticks = iter(range(0, 10_000, 10))
+    client = Spawner()
+    # closes after the kill, then never reopens
+    sup = _make(Port(seq=[False], open_=False), client=client, daemon_timeout=5.0,
+                clock=lambda: next(ticks))
+    sup.start_listening()
+    assert sup.restart_daemon() is False
+    assert sup.state == "brain_down"
+    assert client.calls == 1  # no new client against a dead brain
+
+
+def test_restart_daemon_when_port_never_closes_does_not_respawn():
+    ticks = iter(range(0, 10_000, 10))
+    daemon = Spawner()
+    sup = _make(Port(open_=True), daemon=daemon, daemon_timeout=5.0,
+                clock=lambda: next(ticks))
+    assert sup.restart_daemon() is False
+    assert daemon.calls == 0
+    assert sup.state == "brain_down"
+
+
+def test_restart_daemon_keeps_a_deliberate_pause():
+    client = Spawner()
+    sup = _make(Port(seq=[False, True]), client=client)
+    sup.start_listening()
+    sup.stop_listening()
+    assert sup.restart_daemon() is True
+    assert client.calls == 1  # mic stays off
+    assert sup.state == "paused"
+
+
+# --- tick() self-heals a dead daemon ---
+
+def test_tick_respawns_a_dead_daemon():
+    daemon, client = Spawner(), Spawner()
+    sup = _make(Port(seq=[False, True]), daemon=daemon, client=client)
+    sup.tick()
+    assert daemon.calls == 1
+    assert sup.started_daemon is True
+    assert sup.state == "listening"
+
+
+def test_tick_does_not_respawn_daemon_while_paused():
+    daemon = Spawner()
+    sup = _make(Port(open_=False), daemon=daemon)
+    sup.paused = True
+    sup.tick()
+    assert daemon.calls == 0
+
+
+def test_daemon_cap_trips_to_error_and_stops_spawning():
+    daemon = Spawner()
+    ticks = iter(range(0, 100_000, 10))
+    sup = _make(Port(open_=False), daemon=daemon, daemon_timeout=5.0,
+                max_daemon_relaunch=2, clock=lambda: next(ticks))
+    for _ in range(6):
+        sup.tick()
+    assert daemon.calls == 2
+    assert sup.state == "error"
+
+
+def test_daemon_cap_resets_after_recovery():
+    port = Port(open_=False)
+    daemon = Spawner()
+    ticks = iter(range(0, 100_000, 10))
+    healthy_on_spawn = {"on": False}
+
+    def spawn():
+        if healthy_on_spawn["on"]:
+            port.open = True
+        return daemon()
+
+    sup = _make(port, daemon=spawn, client=Spawner(), daemon_timeout=5.0,
+                max_daemon_relaunch=2, clock=lambda: next(ticks))
+    sup.tick()                          # respawn #1 fails (port stays closed)
+    assert sup._daemon_relaunch_count == 1
+    healthy_on_spawn["on"] = True
+    sup.tick()                          # respawn #2 succeeds
+    assert sup._daemon_relaunch_count == 2
+    sup.tick()                          # port open at start of tick: confirmed healthy
+    assert sup._daemon_relaunch_count == 0
+    port.open = False                   # dies again: allowed to respawn, not capped
+    sup.tick()
+    assert daemon.calls == 3
+    assert sup.state != "error"

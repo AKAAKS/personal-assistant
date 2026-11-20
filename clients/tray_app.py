@@ -41,17 +41,25 @@ class JarvisSupervisor:
         spawn_client: callable() -> process handle for the voice client.
         daemon_timeout: seconds to wait for the daemon port after spawning it.
         max_relaunch: consecutive client relaunches before giving up (-> ERROR).
+        stop_daemon: callable() -> None that stops whatever owns the daemon port,
+            whether or not this tray started it. Defaults to the real
+            port-owner kill (never by image name: tray, client and daemon are
+            all pythonw.exe).
+        max_daemon_relaunch: consecutive watchdog daemon respawns before giving
+            up (-> ERROR). Separate from max_relaunch (the client's cap).
         sleep/clock: injected for deterministic tests.
     """
 
     def __init__(self, *, is_port_open, spawn_daemon, spawn_client,
-                 daemon_timeout=45.0, max_relaunch=3,
-                 sleep=time.sleep, clock=time.monotonic):
+                 daemon_timeout=45.0, max_relaunch=3, stop_daemon=None,
+                 max_daemon_relaunch=3, sleep=time.sleep, clock=time.monotonic):
         self.is_port_open = is_port_open
         self.spawn_daemon = spawn_daemon
         self.spawn_client = spawn_client
         self.daemon_timeout = daemon_timeout
         self.max_relaunch = max_relaunch
+        self.stop_daemon = stop_daemon if stop_daemon is not None else _stop_port_owner
+        self.max_daemon_relaunch = max_daemon_relaunch
         self._sleep = sleep
         self._clock = clock
 
@@ -61,23 +69,63 @@ class JarvisSupervisor:
         self._daemon = None
         self._client = None
         self._relaunch_count = 0
+        self._daemon_relaunch_count = 0
 
     # -- daemon --
+
+    def _wait_for_port(self, want_open: bool) -> bool:
+        """Poll until the port is (not) open, within daemon_timeout."""
+        deadline = self._clock() + self.daemon_timeout
+        while self._clock() < deadline:
+            if self.is_port_open() == want_open:
+                return True
+            self._sleep(1.0)
+        return False
+
+    def _spawn_daemon_and_wait(self) -> bool:
+        self._daemon = self.spawn_daemon()
+        self.started_daemon = True
+        if self._wait_for_port(True):
+            return True
+        self.state = BRAIN_DOWN
+        return False
 
     def ensure_daemon(self) -> bool:
         """Return True once the daemon port is reachable, starting it if needed."""
         if self.is_port_open():
             self.started_daemon = False
             return True
-        self._daemon = self.spawn_daemon()
-        self.started_daemon = True
-        deadline = self._clock() + self.daemon_timeout
-        while self._clock() < deadline:
-            if self.is_port_open():
-                return True
-            self._sleep(1.0)
-        self.state = BRAIN_DOWN
-        return False
+        return self._spawn_daemon_and_wait()
+
+    def restart_daemon(self) -> bool:
+        """Stop the daemon (even one this tray did not start), spawn a fresh
+        one, and bring the voice client back up against it.
+
+        The client's websocket dies with the old daemon and clients/voice_client.py
+        does not reconnect (main() exits on ConnectionClosed), so it is restarted
+        too -- unless the user deliberately paused, in which case the mic stays off.
+        Returns True when the new daemon is reachable; on failure state is
+        BRAIN_DOWN, never LISTENING.
+        """
+        self.state = STARTING
+        if self._client_alive():
+            self._client.terminate()
+        self._client = None
+        # Our own handle first (a no-op if already gone), then whoever owns the port.
+        if self._daemon is not None and self._daemon.poll() is None:
+            self._daemon.terminate()
+        self.stop_daemon()
+        if not self._wait_for_port(False):
+            self.state = BRAIN_DOWN  # never closed: do not race a second daemon in
+            return False
+        if not self._spawn_daemon_and_wait():
+            return False
+        self._daemon_relaunch_count = 0
+        if self.paused:
+            self.state = PAUSED
+        else:
+            self.start_listening()
+        return True
 
     # -- listening (the voice client) --
 
@@ -110,9 +158,15 @@ class JarvisSupervisor:
         """Called on a timer: keep the voice client alive unless paused."""
         if self.paused:
             return
-        if not self.is_port_open():
-            self.state = BRAIN_DOWN
-            return
+        if self.is_port_open():
+            self._daemon_relaunch_count = 0  # confirmed healthy
+        else:
+            if self._daemon_relaunch_count >= self.max_daemon_relaunch:
+                self.state = ERROR
+                return
+            self._daemon_relaunch_count += 1
+            if not self._spawn_daemon_and_wait():
+                return  # BRAIN_DOWN; retried next tick, within the cap
         if self._client_alive():
             self._relaunch_count = 0
             self.state = LISTENING
@@ -298,6 +352,34 @@ def _port_open() -> bool:
         return False
 
 
+def _stop_port_owner() -> None:
+    """Terminate whichever process is LISTENing on the daemon port.
+
+    The tray, voice client and daemon are all pythonw.exe, so this targets the
+    port owner's PID only -- never an image name -- and refuses to touch this
+    process or any of its ancestors (the tray's launcher chain).
+    """
+    import psutil
+
+    _host, port = _daemon_endpoint()
+    me = psutil.Process()
+    protected = {me.pid} | {p.pid for p in me.parents()}
+    pids = set()
+    for c in psutil.net_connections(kind="tcp"):
+        if c.status == psutil.CONN_LISTEN and c.laddr and c.laddr.port == port and c.pid:
+            pids.add(c.pid)
+    for pid in pids - protected:
+        try:
+            proc = psutil.Process(pid)
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except psutil.TimeoutExpired:
+                proc.kill()
+        except psutil.NoSuchProcess:
+            pass
+
+
 def _log_file(name: str):
     os.makedirs(LOG_DIR, exist_ok=True)
     return open(os.path.join(LOG_DIR, name), "a", encoding="utf-8")
@@ -422,6 +504,15 @@ def run():
         sup.restart()
         refresh(icon, force=True)
 
+    def on_restart_brain(icon, _item):
+        # Blocks the menu callback thread for up to ~2x daemon_timeout; the
+        # watchdog loop runs on a different thread (setup), so keep the icon
+        # honest while we work.
+        sup.state = STARTING
+        refresh(icon, force=True)
+        sup.restart_daemon()
+        refresh(icon, force=True)
+
     def on_open_logs(_icon, _item):
         os.makedirs(LOG_DIR, exist_ok=True)
         try:
@@ -448,6 +539,7 @@ def run():
             on_pause_toggle,
         ),
         pystray.MenuItem("Restart", on_restart),
+        pystray.MenuItem("Restart brain", on_restart_brain),
         pystray.MenuItem("Open logs", on_open_logs),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Quit", on_quit),
