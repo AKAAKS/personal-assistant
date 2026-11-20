@@ -8,6 +8,11 @@ from jarvisd.server import JarvisServer
 
 
 class FakeAssistant:
+    # _turn_for reads this with no getattr default (a missing attribute
+    # would silently mean "closed"), so any stub reaching a reply path
+    # must carry it.
+    awaiting_confirmation = False
+
     def process(self, text):
         return f"echo: {text}"
 

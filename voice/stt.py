@@ -39,10 +39,21 @@ _FILLER_UTTERANCES = frozenset({
 })
 
 
+def _normalise(text):
+    """Lowercase, everything but a-z/0-9/space to a space, whitespace collapsed.
+
+    The ONE copy of this expression. Every phrase set in this module is stored
+    pre-normalised against it, so a second hand-maintained copy drifting from
+    this one would turn a phrase list into one that silently never matches --
+    which looks exactly like the old behaviour and so would ship unnoticed.
+    """
+    return " ".join(re.sub(r"[^a-z0-9 ]+", " ", text.lower()).split())
+
+
 def _is_hallucination(text):
     """True when the transcription is a stock Whisper hallucination (noise),
     not something a user would actually say to JARVIS."""
-    norm = " ".join(re.sub(r"[^a-z0-9 ]+", " ", text.lower()).split())
+    norm = _normalise(text)
     if not norm:
         return True
     if any(p in norm for p in _HALLUCINATION_PHRASES):
@@ -64,8 +75,9 @@ INTENT_VOID_CLOSE = "void_close"        # "forget it": discard it, user is done
 INTENT_NOISE = "noise"                  # nothing a user would say to JARVIS
 
 # The phrase sets below are stored PRE-NORMALISED: lowercase, with everything but
-# a-z/0-9/space replaced by a space and whitespace collapsed -- the same
-# normalisation _is_hallucination applies. That turns an apostrophe into a space
+# a-z/0-9/space replaced by a space and whitespace collapsed -- i.e. by
+# _normalise above, which is the only copy of that expression and is what
+# _is_hallucination uses too. That turns an apostrophe into a space
 # ("that's it" -> "that s it"), so a list written as "that's it" would match
 # NOTHING, and a phrase list that never matches looks exactly like the old
 # behaviour, so it would ship unnoticed. "thats it" is listed too because some
@@ -88,10 +100,6 @@ _CONCLUDERS = frozenset({
 # is a real command and must not.
 _VOID_CONTINUE = ("never mind", "scratch that", "disregard that")
 _VOID_CLOSE = ("forget it",)
-
-
-def _normalise(text):
-    return " ".join(re.sub(r"[^a-z0-9 ]+", " ", text.lower()).split())
 
 
 def _ends_with_phrase(norm, phrases):

@@ -11,6 +11,10 @@ previous version only printed a suggestion for you to copy into .env by hand;
 nobody did, so the stale 0.75 default stayed live and rejected 63% of real
 utterances.
 
+Voiceprints built before 2026-11-20 were embedded from untrimmed clips; the
+server now trims trailing silence before verifying, so re-enroll to match how
+it judges a clip (an old print can only dilute a match, never tighten it).
+
 Run once, in a terminal, speaking from where you normally sit, with your usual
 speaker switched on and at your usual volume:
     python -m clients.enroll_voice

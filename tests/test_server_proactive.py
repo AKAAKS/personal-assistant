@@ -14,6 +14,11 @@ from tests.test_server import ClassifyingSTT
 
 
 class FakeAssistant:
+    # _turn_for reads this with no getattr default (a missing attribute
+    # would silently mean "closed"), so any stub reaching a reply path
+    # must carry it.
+    awaiting_confirmation = False
+
     def __init__(self):
         self.was_reset = False
 

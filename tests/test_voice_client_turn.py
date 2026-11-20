@@ -149,10 +149,23 @@ def test_closed_rearms_the_wake_word(exchange):
 
 
 def test_open_keeps_the_follow_up_window(exchange):
+    """An "open" turn gets its OWN, longer window, not the ordinary follow-up
+    one. The only traffic that reaches this capture is a confirmation prompt or
+    a direct question, and a silent timeout there costs the user the whole
+    command (the pending action is dropped and must be re-stated), not just a
+    rephrase -- so it gets the same hesitation budget as the wake-word path.
+    """
     state = exchange({"turn": "open", "heard": "play it", "text": "Which one?"})
     assert state.in_conversation is True
     assert state.rearmed is False
-    assert state.followup_window == vc.FOLLOWUP_WINDOW_SEC
+    assert state.followup_window == vc.CONFIRM_WINDOW_SEC
+
+
+def test_the_confirmation_window_is_one_shot(exchange):
+    """An "open" turn widens only the NEXT follow-up; the one after is normal."""
+    state = exchange({"turn": "open", "heard": "play it", "text": "Which one?"},
+                     then=[{"heard": "the 3pm one", "text": "Done."}])
+    assert state.windows == [vc.CONFIRM_WINDOW_SEC, vc.FOLLOWUP_WINDOW_SEC]
 
 
 def test_a_missing_turn_field_behaves_exactly_as_today(exchange):
@@ -210,7 +223,11 @@ def test_voided_closed_with_no_words_is_not_a_misfire(exchange):
 
 
 def test_the_ten_second_window_is_one_shot(exchange):
-    """voided_open widens only the NEXT follow-up; the one after is normal."""
+    """voided_open widens only the NEXT follow-up; the one after is normal.
+
+    The second exchange is a plain completed one (no "turn"): an "open" reply
+    would set its own one-shot window and so could not show this one resetting.
+    """
     state = exchange({"turn": "voided_open", "heard": "never mind", "text": ""},
-                     then=[{"turn": "open", "heard": "play it", "text": "Which one?"}])
+                     then=[{"heard": "play it", "text": "Done."}])
     assert state.windows == [vc.UTTERANCE_SPEECH_TIMEOUT_SEC, vc.FOLLOWUP_WINDOW_SEC]

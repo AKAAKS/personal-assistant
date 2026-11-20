@@ -64,8 +64,10 @@ DEFAULT_MIN_DURATION_SEC = 2.0
 # 0.24 margin and was accepted as the enrolled speaker while scoring far below
 # the threshold. The server trims trailing silence off the clip before it gets
 # here (voice.audio_io.trim_trailing_silence), so the length judged is the length
-# of the speech itself: nearly every real command is well under min_duration_sec,
-# and short clips remain the common path, not an edge case.
+# of the speech itself: reaching min_duration_sec now takes ~1.85s of
+# CONTINUOUS speech, so short clips are effectively the ONLY path for voice
+# commands and the relaxed floor below is the operative bar for essentially all
+# of them -- the full-threshold branch is close to unreachable.
 #
 # 0.6 sits between the weakest genuine short clips measured (0.290 at 1.6s,
 # 0.350 at 1.2s -> floor 0.15) and a non-enrolled human voice (~0.05-0.10). The

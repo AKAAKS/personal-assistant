@@ -211,3 +211,35 @@ def test_reset_clears_the_open_memory_so_a_concluder_is_honoured():
     reply = json.loads(ws.sent[-1])
     assert reply["turn"] == "closed" and reply["text"] == ""
     assert server.assistant.calls == ["delete the meeting"]
+
+
+def test_never_mind_after_an_open_turn_still_voids():
+    """The one-turn exemption covers CONCLUDERS only. "that's it" is a
+    plausible answer to "delete it permanently?"; "never mind" is the user
+    cancelling -- the exact case the void feature exists for -- so suppressing
+    it would shut the mic on someone about to rephrase."""
+    server = make("Delete it permanently?")
+    ws = FakeWS()
+    server.stt = ScriptedSTT("delete the meeting")
+    asyncio.run(server._handle_audio(ws, PCM))
+    assert json.loads(ws.sent[0])["turn"] == "open"
+
+    server.stt = ScriptedSTT("never mind")
+    asyncio.run(server._handle_audio(ws, PCM))
+    reply = json.loads(ws.sent[1])
+    assert reply["turn"] == "voided_open" and reply["text"] == ""
+    assert server.assistant.calls == ["delete the meeting"]
+
+
+def test_forget_it_after_an_open_turn_still_voids_and_closes():
+    server = make("Delete it permanently?")
+    ws = FakeWS()
+    server.stt = ScriptedSTT("delete the meeting")
+    asyncio.run(server._handle_audio(ws, PCM))
+    assert json.loads(ws.sent[0])["turn"] == "open"
+
+    server.stt = ScriptedSTT("forget it")
+    asyncio.run(server._handle_audio(ws, PCM))
+    reply = json.loads(ws.sent[1])
+    assert reply["turn"] == "voided_closed" and reply["text"] == ""
+    assert server.assistant.calls == ["delete the meeting"]

@@ -17,7 +17,30 @@ Protocol:
                           cut off before the new turn is processed.)
                    binary one utterance of 16 kHz mono int16 PCM
   brain -> client  JSON  {"type": "reply", "text": str, "heard": str|null,
-                          "audio_follows": bool}
+                          "audio_follows": bool, "turn": str?, "reason": str?}
+                          ("turn" is the spoken-turn outcome, and says whether
+                          the client should keep the mic open:
+                            "open"          JARVIS asked something the user
+                                            must answer (a pending
+                                            confirmation, or a reply ending in
+                                            "?") -- keep listening.
+                            "closed"        nothing more is expected -- free
+                                            the mic and re-arm the wake word.
+                            "voided_open"   the utterance was discarded
+                                            unheard ("never mind") and nothing
+                                            ran -- keep listening to be
+                                            rephrased.
+                            "voided_closed" discarded and the user is done
+                                            ("forget it") -- free the mic.
+                          "reason" names a non-answer: "unverified" means the
+                          speaker was not the enrolled user, so nothing was
+                          transcribed or run.
+                          Both keys are ADDITIVE and optional. The "unverified"
+                          frame and the empty-transcription frame deliberately
+                          carry NO "turn" key at all: both are misfires rather
+                          than turns, so a client that ignores the field -- an
+                          older one, or the CLI -- behaves exactly as it did
+                          before either key existed.)
                    JSON  {"type": "error", "error": str}
                    JSON  {"type": "proactive_say", "text": str, "audio_follows": bool}
                           (unsolicited -- can arrive at ANY time, between or during
@@ -260,8 +283,12 @@ class JarvisServer:
         question.
         """
         asked = (raw_reply or "").strip().endswith("?")
-        # getattr: lightweight assistants (tests, stubs) may not track it.
-        if getattr(self.assistant, "awaiting_confirmation", False) or asked:
+        # No getattr default on purpose. A missing (or renamed) attribute would
+        # default to False, i.e. toward "closed" -- shutting the mic on a
+        # confirmation prompt, the one failure the spec names as unsafe. An
+        # AttributeError here is loud and fixable; a silently closed mic on a
+        # "delete it permanently?" is neither. Test stubs carry the attribute.
+        if self.assistant.awaiting_confirmation or asked:
             return "open"
         return "closed"
 
@@ -413,8 +440,16 @@ class JarvisServer:
         # mic instead of letting the user answer. So for that one utterance we
         # skip the exit and treat it as a normal command. Only the previous
         # reply matters, so the exemption lasts exactly one turn.
+        #
+        # CONCLUDERS ONLY. The reasoning above does not transfer to the voids:
+        # "never mind" after "delete it permanently?" is the user CANCELLING,
+        # which is the whole point of the void feature -- exempting it would
+        # send it to the agent and come back "closed", shutting the mic on
+        # someone who said "never mind" precisely because they were about to
+        # rephrase.
         previous_turn = self._last_turn.get(ws)
-        if intent in _EXIT_TURNS and previous_turn != "open":
+        exempt = previous_turn == "open" and intent == INTENT_CONCLUDE
+        if intent in _EXIT_TURNS and not exempt:
             # Answered here, upstream of _process: no round trip or token spend,
             # and it never reaches Assistant._handle_local, which would answer a
             # concluder with canned politeness and hold the window open. The

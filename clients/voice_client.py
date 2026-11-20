@@ -43,6 +43,16 @@ FOLLOWUP_WINDOW_SEC = float(os.getenv("FOLLOWUP_WINDOW_SEC", "6"))
 # while they were still composing the sentence.
 UTTERANCE_SPEECH_TIMEOUT_SEC = float(os.getenv("UTTERANCE_SPEECH_TIMEOUT_SEC", "10.0"))
 
+# How long to wait for the user to START talking after an "open" reply -- a
+# confirmation prompt or a direct question. Longer than FOLLOWUP_WINDOW_SEC on
+# purpose, and NOT the same constant despite sharing its default: the ordinary
+# follow-up window is an "anything else?" courtesy, where a silent timeout costs
+# nothing, whereas timing out on a confirmation drops the pending action and
+# costs the user the whole command. Same reasoning as the wake-word path (users
+# hesitate while phrasing), so same default -- kept separately named so the two
+# stay independently tunable and the intent is visible at the call site.
+CONFIRM_WINDOW_SEC = float(os.getenv("CONFIRM_WINDOW_SEC", "10.0"))
+
 # Trailing silence that ends a wake-word utterance. Raised from 800ms so a
 # mid-sentence pause to rephrase does not cut the user off. Safe for the speaker
 # verifier because the padding is trimmed before verification.
@@ -740,8 +750,20 @@ class VoiceClient:
                             # follow-up: 6s is short for "let me rephrase".
                             in_conversation = True
                             followup_window = UTTERANCE_SPEECH_TIMEOUT_SEC
-                            activity.write(activity.ARMED)
+                            # YOUR_TURN, not ARMED: the mic IS open, and this
+                            # is the one path the feature exists to make
+                            # non-idle. ARMED (copied from the completed-
+                            # exchange path below, where it is right) would
+                            # render the tray idle for the millisecond before
+                            # _capture_followup writes YOUR_TURN itself.
+                            activity.write(activity.YOUR_TURN)
                             continue
+                        if turn == "open":
+                            # JARVIS asked something and the answer is the only
+                            # traffic that reaches the next capture, so widen
+                            # its pre-speech budget -- same one-shot mechanism
+                            # voided_open uses. See CONFIRM_WINDOW_SEC.
+                            followup_window = CONFIRM_WINDOW_SEC
                         # A completed exchange -> keep listening for a follow-up.
                         activity.write(activity.ARMED)
                         advance(productive=True)

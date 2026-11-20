@@ -9,6 +9,11 @@ from jarvisd.server import JarvisServer
 
 
 class FakeAssistant:
+    # JarvisServer._turn_for reads this with no getattr default on purpose: a
+    # missing attribute would quietly mean "closed", i.e. shut the mic on a
+    # confirmation prompt. Stubs that reach a reply path must carry it.
+    awaiting_confirmation = False
+
     def __init__(self):
         self.was_reset = False
         # Barge-in capture (JarvisServer._capture_interrupt_target) reads this
