@@ -751,3 +751,78 @@ def test_error_reason_clears_when_leaving_error():
     assert sup.state == "error" and sup.error_reason == "client"
     sup.start_listening()                       # user recovers it
     assert sup.error_reason is None
+
+
+# --- round 4 ---
+
+def test_pause_during_port_probe_does_not_respawn_client():
+    """Pause lands while tick is inside is_port_open(): no client, state stays paused."""
+    holder = {}
+    client = Spawner()
+
+    def probe():
+        holder["sup"].stop_listening()   # menu thread: pause + terminate + PAUSED
+        return True
+
+    sup = _make(probe, client=client)
+    holder["sup"] = sup
+    sup.tick()
+    assert client.calls == 0
+    assert sup.paused is True and sup.state == "paused"
+
+
+def test_pause_during_client_spawn_terminates_the_new_client():
+    holder = {}
+    client = Spawner()
+
+    def spawn():
+        holder["sup"].stop_listening()   # pause lands inside the Popen window
+        return client()
+
+    sup = _make(Port(open_=True), client=spawn)
+    holder["sup"] = sup
+    sup.tick()
+    assert client.last.terminated is True
+    assert sup._client is None
+    assert sup.state == "paused"
+
+
+def test_start_listening_still_spawns_after_a_pause():
+    client = Spawner()
+    sup = _make(Port(open_=True), client=client)
+    sup.stop_listening()
+    sup.start_listening()                # clears paused, so the guard lets it through
+    assert client.calls == 1 and sup.state == "listening"
+
+
+def test_tick_respawn_terminates_stale_client_and_relaunches():
+    port = Port(open_=True)
+    client, daemon = Spawner(), Spawner()
+
+    def spawn():
+        port.open = True
+        return daemon()
+
+    sup = _make(port, daemon=spawn, client=client)
+    sup.start_listening()
+    stale = client.last
+    port.open = False                    # daemon crashed; the client is "alive" but wired to nothing
+    sup.tick()
+    assert stale.terminated is True
+    assert client.calls == 2             # fresh client against the new daemon
+    assert sup._client is client.last and sup.state == "listening"
+
+
+def test_refresh_key_changes_with_error_reason_and_access_denied():
+    from clients.tray_app import refresh_key
+    base = refresh_key("error", None, 0.0, "client", None)
+    assert refresh_key("error", None, 0.0, "watchdog", None) != base
+    plain = refresh_key("brain_down", None, 0.0, None, "OSError('x')")
+    assert refresh_key("brain_down", None, 0.0, None, "PermissionError('access denied')") != plain
+    assert refresh_key("error", None, 0.0, "client", None) == base
+
+
+def test_bare_psutil_access_denied_repr_triggers_hint():
+    from clients.tray_app import state_label
+    assert "run elevated" in state_label(
+        "brain_down", None, "psutil.AccessDenied(pid=19460)")

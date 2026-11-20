@@ -201,14 +201,20 @@ class JarvisSupervisor:
         self._relaunch_count = 0
         if not self._client_alive():
             self._client = self._spawn_client_guarded()
+            if self._client is None:
+                return  # quit/pause landed during the spawn; state is theirs
         self._set_state(LISTENING)
 
     def _spawn_client_guarded(self):
-        """Spawn the voice client; if quit() landed during the Popen it found
-        nothing to terminate, so kill the new client here rather than leave a
-        live mic after the user quit. Returns the handle, or None."""
+        """Spawn the voice client unless quit or pause is in effect, and kill it
+        if either landed during the Popen (they found nothing to terminate, and
+        a live mic after Quit/Pause is the worst residue). Returns the handle,
+        or None. start_listening clears `paused` before calling, so it is safe
+        to gate on it here."""
+        if self._stopping or self.paused:
+            return None
         client = self.spawn_client()
-        if self._stopping:
+        if self._stopping or self.paused:
             client.terminate()
             return None
         return client
@@ -257,6 +263,14 @@ class JarvisSupervisor:
             # meanwhile. Pause is a deliberate mic release: never re-arm it.
             if self.paused or self._stopping:
                 return
+            # The old client's websocket died with the old daemon and
+            # voice_client.py never reconnects, so a "live" client here is wired
+            # to nothing. Drop it (as restart_daemon does) and relaunch below;
+            # this is not a client fault, so don't charge the relaunch cap.
+            if self._client_alive():
+                self._client.terminate()
+            self._client = None
+            self._relaunch_count = 0
         if self._client_alive():
             self._relaunch_count = 0
             self._set_state(LISTENING)
@@ -266,7 +280,10 @@ class JarvisSupervisor:
             self._set_state(ERROR)
             self.error_reason = "client"
             return
-        self._client = self._spawn_client_guarded()
+        client = self._spawn_client_guarded()
+        if client is None:
+            return  # paused/quit during the spawn: leave their state alone
+        self._client = client
         self._relaunch_count += 1
         self._set_state(LISTENING)
 
@@ -371,12 +388,19 @@ ERROR_LABEL = {
     "watchdog": "JARVIS — supervisor failing (see Open logs)",
 }
 
+def refresh_key(state, reason, phase, error_reason, last_error):
+    """Icon-redraw cache key. error_reason and the access-denied flag feed the
+    tooltip, so they must be in it or a changed reason keeps a stale tooltip."""
+    return (state, reason, phase, error_reason, _is_access_denied(last_error))
+
+
 ELEVATED_HINT = " (access denied: run elevated)"
 
 
 def _is_access_denied(last_error) -> bool:
     low = (last_error or "").lower()
-    return "access denied" in low or "access is denied" in low
+    return ("access denied" in low or "access is denied" in low
+            or "accessdenied" in low)
 
 
 def state_label(state, error_reason=None, last_error=None) -> str:
@@ -644,7 +668,7 @@ def run():
         elapsed = max(0.0, now - began)
         # Quantise the pulse so a steady state is one cache key, not 5 a second.
         phase = round(elapsed, 1) if state in _ANIMATED_STATES else 0.0
-        key = (state, reason, phase)
+        key = refresh_key(state, reason, phase, sup.error_reason, sup.last_error)
         if not force and key == shown["key"]:
             return
         shown["key"] = key
@@ -663,12 +687,20 @@ def run():
         sup.restart()
         refresh(icon, force=True)
 
+    restart_thread = {"t": None}
+
     def on_restart_brain(icon, _item):
-        # Blocks this menu thread for up to ~2x daemon_timeout; restart_daemon
-        # sets STARTING itself and the setup loop keeps redrawing the icon.
-        # tick() skips while it holds the lifecycle lock.
-        sup.restart_daemon()
-        refresh(icon, force=True)
+        # pystray runs menu callbacks inline on the thread pumping Windows
+        # messages, so a restart (up to ~95s) here would freeze the whole tray,
+        # Quit included. Run it on a short-lived thread; the setup loop's
+        # refresh() shows STARTING and then the result. A click while a restart
+        # is still running is ignored rather than queued behind the lifecycle lock.
+        if restart_thread["t"] is not None and restart_thread["t"].is_alive():
+            return
+        t = threading.Thread(target=sup.restart_daemon, name="restart-brain",
+                             daemon=True)
+        restart_thread["t"] = t
+        t.start()
 
     def on_open_logs(_icon, _item):
         os.makedirs(LOG_DIR, exist_ok=True)
