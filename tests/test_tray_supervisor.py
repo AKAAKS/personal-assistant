@@ -291,13 +291,19 @@ def test_restart_daemon_when_port_never_closes_does_not_respawn():
 
 
 def test_restart_daemon_keeps_a_deliberate_pause():
-    client = Spawner()
-    sup = _make(Port(seq=[False, True]), client=client)
+    """Pause is a deliberate mic release: restarting the brain must not re-arm it."""
+    daemon, client, stop = Spawner(), Spawner(), Stopper()
+    sup = _make(Port(seq=[False, True]), daemon=daemon, client=client, stop=stop)
     sup.start_listening()
     sup.stop_listening()
+    assert client.calls == 1
     assert sup.restart_daemon() is True
-    assert client.calls == 1  # mic stays off
+    assert stop.calls == 1 and daemon.calls == 1   # daemon really restarted
+    assert client.calls == 1                       # no voice client spawned
+    assert sup.paused is True
     assert sup.state == "paused"
+    sup.tick()                                     # watchdog must not re-arm it either
+    assert client.calls == 1
 
 
 # --- tick() self-heals a dead daemon ---
@@ -354,3 +360,74 @@ def test_daemon_cap_resets_after_recovery():
     sup.tick()
     assert daemon.calls == 3
     assert sup.state != "error"
+
+
+# --- lifecycle lock ---
+
+def test_tick_skips_entirely_while_lifecycle_lock_held():
+    daemon, client = Spawner(), Spawner()
+    sup = _make(Port(open_=False), daemon=daemon, client=client)
+    sup.state = "starting"
+    sup._lifecycle.acquire()   # as if restart_daemon were mid-flight
+    try:
+        sup.tick()
+    finally:
+        sup._lifecycle.release()
+    assert daemon.calls == 0
+    assert client.calls == 0
+    assert sup.state == "starting"   # untouched
+    assert sup._daemon_relaunch_count == 0
+
+
+def test_tick_releases_the_lock_even_when_it_raises():
+    def boom():
+        raise RuntimeError("probe failed")
+    sup = _make(boom)
+    try:
+        sup.tick()
+    except RuntimeError:
+        pass
+    assert sup._lifecycle.acquire(blocking=False)
+    sup._lifecycle.release()
+
+
+def test_restart_daemon_holds_the_lock_so_tick_cannot_race_it():
+    daemon = Spawner()
+    seen = {}
+    holder = {}
+
+    def stop():
+        # a watchdog tick fires while the old daemon is being killed
+        holder["sup"].tick()
+        seen["daemon_calls_during_restart"] = daemon.calls
+
+    sup = _make(Port(seq=[False, True]), daemon=daemon, stop=stop)
+    holder["sup"] = sup
+    sup.restart_daemon()
+    assert seen["daemon_calls_during_restart"] == 0
+    assert daemon.calls == 1   # exactly one daemon, the restart's own
+
+
+# --- ERROR reason / tooltip ---
+
+def test_daemon_cap_error_reason_and_label():
+    from clients.tray_app import state_label
+    ticks = iter(range(0, 100_000, 10))
+    sup = _make(Port(open_=False), daemon_timeout=5.0, max_daemon_relaunch=1,
+                clock=lambda: next(ticks))
+    sup.tick()
+    sup.tick()
+    assert sup.state == "error" and sup.error_reason == "daemon"
+    assert "brain" in state_label(sup.state, sup.error_reason)
+
+
+def test_client_cap_error_reason_and_label():
+    from clients.tray_app import state_label
+    sup = _make(Port(open_=True), client=Spawner(alive=False), max_relaunch=1)
+    sup.start_listening()
+    for _ in range(4):
+        sup.tick()
+    assert sup.state == "error" and sup.error_reason == "client"
+    assert "voice client" in state_label(sup.state, sup.error_reason)
+    assert state_label(sup.state, sup.error_reason) != state_label(
+        "error", "daemon")

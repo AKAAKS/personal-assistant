@@ -19,6 +19,7 @@ import socket
 import subprocess
 import math
 import sys
+import threading
 import time
 
 from clients import activity
@@ -70,6 +71,13 @@ class JarvisSupervisor:
         self._client = None
         self._relaunch_count = 0
         self._daemon_relaunch_count = 0
+        # Which half exhausted its relaunch cap when state == ERROR: "client" or
+        # "daemon". Read by the tray shell so the tooltip names the right fix.
+        self.error_reason = None
+        # Guards every daemon-lifecycle operation. tick() acquires it
+        # non-blocking and skips if held, so the watchdog can never spawn a
+        # second daemon while ensure_daemon/restart_daemon are mid-flight.
+        self._lifecycle = threading.Lock()
 
     # -- daemon --
 
@@ -92,10 +100,11 @@ class JarvisSupervisor:
 
     def ensure_daemon(self) -> bool:
         """Return True once the daemon port is reachable, starting it if needed."""
-        if self.is_port_open():
-            self.started_daemon = False
-            return True
-        return self._spawn_daemon_and_wait()
+        with self._lifecycle:
+            if self.is_port_open():
+                self.started_daemon = False
+                return True
+            return self._spawn_daemon_and_wait()
 
     def restart_daemon(self) -> bool:
         """Stop the daemon (even one this tray did not start), spawn a fresh
@@ -107,25 +116,26 @@ class JarvisSupervisor:
         Returns True when the new daemon is reachable; on failure state is
         BRAIN_DOWN, never LISTENING.
         """
-        self.state = STARTING
-        if self._client_alive():
-            self._client.terminate()
-        self._client = None
-        # Our own handle first (a no-op if already gone), then whoever owns the port.
-        if self._daemon is not None and self._daemon.poll() is None:
-            self._daemon.terminate()
-        self.stop_daemon()
-        if not self._wait_for_port(False):
-            self.state = BRAIN_DOWN  # never closed: do not race a second daemon in
-            return False
-        if not self._spawn_daemon_and_wait():
-            return False
-        self._daemon_relaunch_count = 0
-        if self.paused:
-            self.state = PAUSED
-        else:
-            self.start_listening()
-        return True
+        with self._lifecycle:
+            self.state = STARTING
+            if self._client_alive():
+                self._client.terminate()
+            self._client = None
+            # Our own handle first (a no-op if already gone), then whoever owns the port.
+            if self._daemon is not None and self._daemon.poll() is None:
+                self._daemon.terminate()
+            self.stop_daemon()
+            if not self._wait_for_port(False):
+                self.state = BRAIN_DOWN  # never closed: do not race a second daemon in
+                return False
+            if not self._spawn_daemon_and_wait():
+                return False
+            self._daemon_relaunch_count = 0
+            if self.paused:
+                self.state = PAUSED
+            else:
+                self.start_listening()
+            return True
 
     # -- listening (the voice client) --
 
@@ -158,11 +168,20 @@ class JarvisSupervisor:
         """Called on a timer: keep the voice client alive unless paused."""
         if self.paused:
             return
+        if not self._lifecycle.acquire(blocking=False):
+            return  # ensure_daemon/restart_daemon is managing things; stay out
+        try:
+            self._tick_locked()
+        finally:
+            self._lifecycle.release()
+
+    def _tick_locked(self) -> None:
         if self.is_port_open():
             self._daemon_relaunch_count = 0  # confirmed healthy
         else:
             if self._daemon_relaunch_count >= self.max_daemon_relaunch:
                 self.state = ERROR
+                self.error_reason = "daemon"
                 return
             self._daemon_relaunch_count += 1
             if not self._spawn_daemon_and_wait():
@@ -174,6 +193,7 @@ class JarvisSupervisor:
         # client is dead and we're not paused -> relaunch, within a cap
         if self._relaunch_count >= self.max_relaunch:
             self.state = ERROR
+            self.error_reason = "client"
             return
         self._client = self.spawn_client()
         self._relaunch_count += 1
@@ -234,7 +254,7 @@ STATE_LABEL = {
     LISTENING: "JARVIS — listening",
     PAUSED: "JARVIS — paused (mic off)",
     BRAIN_DOWN: "JARVIS — brain not reachable",
-    ERROR: "JARVIS — voice client error",
+    ERROR: "JARVIS — error",
     STOPPED: "JARVIS — stopped",
     activity.HEARING: "JARVIS — hearing you…",
     activity.YOUR_TURN: "JARVIS — your turn…",
@@ -242,6 +262,19 @@ STATE_LABEL = {
     activity.SPEAKING: "JARVIS — speaking",
     activity.MISSED: "JARVIS — didn't catch that",
 }
+
+ERROR_LABEL = {
+    "client": "JARVIS — voice client keeps crashing",
+    "daemon": "JARVIS — brain won't start (use Restart brain)",
+}
+
+
+def state_label(state, error_reason=None) -> str:
+    """Tooltip text; ERROR is specific about which half gave up."""
+    if state == ERROR and error_reason in ERROR_LABEL:
+        return ERROR_LABEL[error_reason]
+    return STATE_LABEL.get(state, "JARVIS")
+
 
 # Only HEARING fills the ring; everything else keeps the hollow arc-reactor look.
 _FILLED_STATES = frozenset({activity.HEARING})
@@ -490,7 +523,7 @@ def run():
             return
         shown["key"] = key
         icon.icon = _make_icon_image(state, elapsed=elapsed, reason=reason)
-        icon.title = STATE_LABEL.get(state, "JARVIS")
+        icon.title = state_label(state, sup.error_reason)
         icon.update_menu()
 
     def on_pause_toggle(icon, _item):
@@ -505,11 +538,9 @@ def run():
         refresh(icon, force=True)
 
     def on_restart_brain(icon, _item):
-        # Blocks the menu callback thread for up to ~2x daemon_timeout; the
-        # watchdog loop runs on a different thread (setup), so keep the icon
-        # honest while we work.
-        sup.state = STARTING
-        refresh(icon, force=True)
+        # Blocks this menu thread for up to ~2x daemon_timeout; restart_daemon
+        # sets STARTING itself and the setup loop keeps redrawing the icon.
+        # tick() skips while it holds the lifecycle lock.
         sup.restart_daemon()
         refresh(icon, force=True)
 
@@ -527,8 +558,9 @@ def run():
 
     menu = pystray.Menu(
         pystray.MenuItem(
-            lambda _i: STATE_LABEL.get(
-                effective_state(sup.state, activity.read(), time.time()), "JARVIS"
+            lambda _i: state_label(
+                effective_state(sup.state, activity.read(), time.time()),
+                sup.error_reason,
             ),
             None,
             enabled=False,
