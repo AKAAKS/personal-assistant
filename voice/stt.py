@@ -54,6 +54,7 @@ def _is_hallucination(text):
         return True
     return False
 
+
 # --- Turn intent -----------------------------------------------------------
 # What a transcript MEANS for the turn, beyond what it says.
 INTENT_NORMAL = "normal"
@@ -78,9 +79,8 @@ INTENT_NOISE = "noise"                  # nothing a user would say to JARVIS
 # BEFORE _is_hallucination. Whole-utterance only: "remind me to say thank you"
 # is a command.
 _CONCLUDERS = frozenset({
-    "that s it", "thats it", "that s all", "thats all", "that is all",
-    "that will be all", "we re done", "i m done",
-    "thank you", "thank you very much", "thanks", "thanks a lot",
+    "that s it", "thats it", "that s all", "thats all", "we re done",
+    "thank you", "thanks",
 })
 
 # Void phrases are anchored to the END of the utterance, on a word boundary:
@@ -106,6 +106,10 @@ def classify_text(text: str) -> str:
     a spoken confirmation must survive.
     """
     norm = _normalise(text)
+    # Order matters. Concluders are whole-utterance, so they cannot collide with
+    # an end-anchored void; they go first mainly so "thank you"/"thanks" beat the
+    # noise check below. Void-close precedes void-continue as a tie-break:
+    # "never mind, forget it" ends the turn, because the user said they are done.
     if norm in _CONCLUDERS:
         return INTENT_CONCLUDE
     if _ends_with_phrase(norm, _VOID_CLOSE):

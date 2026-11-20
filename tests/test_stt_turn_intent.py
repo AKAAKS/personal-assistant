@@ -106,3 +106,12 @@ def test_transcribe_still_returns_a_normal_command():
     stt = stub_stt(returns="lights on")
     assert stt.transcribe(AUDIO) == "lights on"
     assert stt.transcribe_classified(AUDIO) == ("lights on", INTENT_NORMAL)
+
+
+def test_void_close_wins_a_tie_with_void_continue():
+    assert classify_text("never mind, forget it") == INTENT_VOID_CLOSE
+
+
+@pytest.mark.parametrize("text", ["thank you very much", "thanks a lot"])
+def test_unapproved_politeness_phrases_stay_noise(text):
+    assert classify_text(text) == INTENT_NOISE
