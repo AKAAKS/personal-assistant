@@ -232,6 +232,10 @@ class Assistant:
         self.conversation: list[dict] = []
         self.guard = SecurityGuard()
         self.audit = AuditLogger()
+        # True when the turn just processed ended on a destructive-action
+        # confirmation prompt, so the server must keep the mic open for the
+        # answer. Per-turn state: reset at the top of process().
+        self.awaiting_confirmation = False
         self.classifier = IntentClassifier()
         self.cost_tracker = CostTracker(monthly_budget=monthly_budget, search_monthly_cap=search_monthly_cap)
         self.enable_web_search = enable_web_search
@@ -421,6 +425,13 @@ class Assistant:
         elif check.verdict == Verdict.CONFIRM_REQUIRED:
             result = f"CONFIRMATION REQUIRED: {check.reason}"
             self.audit.log(tool_name, tool_input, "confirm_required", check.reason)
+            # Only a user-initiated turn can answer a confirmation. The HA
+            # trigger rules call execute_guarded(autonomous=True) without ever
+            # calling process(), so nothing would reset the flag and it would
+            # leak into the next voice reply, keeping the mic open for a
+            # confirmation the user was never asked for.
+            if not autonomous:
+                self.awaiting_confirmation = True
         else:
             result = self._execute_tool(tool_name, tool_input)
             self.audit.log(tool_name, tool_input, "allowed", check.reason, result)
@@ -438,6 +449,7 @@ class Assistant:
         # armed on a previous turn becomes consumable, while the model retrying
         # within THIS turn's agentic loop cannot self-confirm (see guard.check).
         self.guard.begin_turn()
+        self.awaiting_confirmation = False
 
         tier = self.classifier.classify(user_message)
         self._record_turn("user", user_message)
