@@ -23,7 +23,9 @@ class _Stop(Exception):
 class _State:
     def __init__(self):
         self.next_capture = None      # "followup" | "record" | "wake"
-        self.followup_window = None   # window the follow-up capture was given
+        self.followup_window = None   # window of the LAST follow-up capture
+        self.windows = []             # window of every follow-up capture, in order
+        self.misfires_seen = []       # misfires handed to _followup_next, in order
         self.beeps = 0                # the mallet == re-armed to the wake word
         self.interrupts = 0
         self.advances = []            # productive flags passed to _followup_next
@@ -61,12 +63,14 @@ class _FakeWS:
         return False
 
 
-def run_one_exchange(reply, *, interrupted=False, monkeypatch, capsys):
+def run_one_exchange(reply, *, then=(), interrupted=False, monkeypatch, capsys):
     state = _State()
     c = VoiceClient.__new__(VoiceClient)
     c.url = "ws://fake"
     c._audio_lock = asyncio.Lock()
     c.mic = type("M", (), {"start": lambda s: None, "stop": lambda s: None})()
+
+    replies = [reply, *then]
 
     class FakeReceiver:
         def __init__(self, ws, **kw):
@@ -79,7 +83,8 @@ def run_one_exchange(reply, *, interrupted=False, monkeypatch, capsys):
             fut = asyncio.get_running_loop().create_future()
             fut.set_result(b"wav")
             # Only a spoken reply has audio; a voided frame is silent.
-            data = dict(reply, audio_follows=bool(reply.get("text")))
+            r = replies.pop(0)
+            data = dict(r, audio_follows=bool(r.get("text")))
             return {"data": data, "wav_future": fut}
 
     calls = {"n": 0}
@@ -92,8 +97,11 @@ def run_one_exchange(reply, *, interrupted=False, monkeypatch, capsys):
         return b"pcm"
 
     def followup(window=None):
-        state.next_capture = "followup"
+        state.windows.append(window)
         state.followup_window = window
+        if replies:  # another scripted exchange to run
+            return b"pcm"
+        state.next_capture = "followup"
         raise _Stop
 
     def record():
@@ -107,6 +115,7 @@ def run_one_exchange(reply, *, interrupted=False, monkeypatch, capsys):
 
     def spy_next(**kw):
         state.advances.append(kw["productive"])
+        state.misfires_seen.append(kw["misfires"])
         return real_next(**kw)
 
     monkeypatch.setattr(vc.websockets, "connect", lambda *a, **k: _FakeWS(state))
@@ -179,3 +188,29 @@ def test_a_barge_in_over_a_closing_reply_is_not_lost(exchange):
     assert state.pending_barge_in is True
     assert state.rearmed is False
     assert state.interrupts == 1
+
+
+def test_voided_open_with_no_words_burns_no_misfire(exchange):
+    """heard and text both empty is the shape that reaches the empty-heard
+    path. Without the guard it prints "(didn't catch that)" and burns a
+    misfire, which the genuine empty frame after it would then reveal."""
+    state = exchange({"turn": "voided_open", "heard": "", "text": ""},
+                     then=[{"heard": "", "text": ""}])
+    assert state.in_conversation is True
+    assert state.rearmed is False
+    assert state.out.count("didn't catch") == 1, "only the genuine empty frame"
+    assert state.misfires_seen == [0], "the voided frame burned a misfire"
+
+
+def test_voided_closed_with_no_words_is_not_a_misfire(exchange):
+    state = exchange({"turn": "voided_closed", "heard": "", "text": ""})
+    assert state.printed_didnt_catch is False
+    assert state.advances == []
+    assert state.rearmed is True
+
+
+def test_the_ten_second_window_is_one_shot(exchange):
+    """voided_open widens only the NEXT follow-up; the one after is normal."""
+    state = exchange({"turn": "voided_open", "heard": "never mind", "text": ""},
+                     then=[{"turn": "open", "heard": "play it", "text": "Which one?"}])
+    assert state.windows == [vc.UTTERANCE_SPEECH_TIMEOUT_SEC, vc.FOLLOWUP_WINDOW_SEC]

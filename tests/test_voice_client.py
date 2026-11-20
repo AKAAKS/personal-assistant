@@ -813,3 +813,10 @@ def test_capture_utterance_still_blocks_until_the_wake_word(monkeypatch):
     c = _watch_client(FakeWake(fire_on=3))
     monkeypatch.setattr(c, "_record_utterance", lambda: b"pcm")
     assert c._capture_utterance() == b"pcm"
+
+
+def test_followup_capture_forwards_an_explicit_window():
+    """A voided_open widens the window; it must reach the VAD untouched."""
+    c = _client(None)
+    c._capture_followup(window=10.0)
+    assert c.vad.calls[0]["speech_timeout_sec"] == 10.0
