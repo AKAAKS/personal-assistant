@@ -44,7 +44,6 @@ PRE_ROLL_MS = int(os.getenv("PRE_ROLL_MS", "300"))
 MIN_SPEECH_MS = int(os.getenv("MIN_SPEECH_MS", "120"))
 
 
-
 def trim_trailing_silence(
     audio: np.ndarray,
     *,

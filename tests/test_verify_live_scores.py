@@ -11,6 +11,13 @@ Keeping the real numbers here means a future change to the thresholds, the
 constants or the short-clip rule has to stay consistent with what the hardware
 actually produced, instead of with someone's idea of what a cosine should be.
 
+NOTE: every duration and score below was measured on UNTRIMMED clips, i.e. with
+the ~800ms silent tail record_until_silence appends, before
+voice.audio_io.trim_trailing_silence existed. The server now verifies trimmed
+clips, so these are not the shape the system produces today. The numbers stay
+as a regression guard on the pure decision logic only; they are not a
+description of current live clips.
+
 The verifier is driven through a stub embed_fn that replays each row's
 similarities, so no model and no audio are involved.
 """

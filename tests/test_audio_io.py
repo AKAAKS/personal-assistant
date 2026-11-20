@@ -313,7 +313,7 @@ def test_keeps_a_short_yes_intact():
     """A briskly spoken 'Yes.' is ~200-300ms; the trim must not eat it."""
     yes = np.ones(4000, dtype=np.int16) * 1000           # 250ms
     out = trim_trailing_silence(np.concatenate([yes, np.zeros(16000, dtype=np.int16)]))
-    assert len(out) >= 4000
+    assert 4000 + 2000 <= len(out) <= 4000 + 2800        # speech whole, tail trimmed
 
 
 def test_leading_silence_is_untouched():

@@ -44,4 +44,4 @@ def test_verifier_sees_trimmed_audio_and_stt_sees_the_full_clip():
     asyncio.run(server._handle_audio(FakeWS(), pcm))
 
     assert seen["stt_len"] == 32000
-    assert seen["verify_len"] < seen["stt_len"]
+    assert 16000 <= seen["verify_len"] <= 16000 + 2800  # speech whole, tail trimmed
