@@ -62,9 +62,13 @@ class EdgeTTS:
     def synthesize(self, text: str, timeout: float = SYNTH_TIMEOUT_SEC) -> bytes | None:
         """Render text to WAV bytes via edge-tts (MP3) -> miniaudio (PCM) -> wave (RIFF).
 
-        Returns None for empty text, on any failure (network, missing
-        package, decode error), or on timeout of every attempt (EDGE_ATTEMPTS tries, each capped at
-        EDGE_ATTEMPT_TIMEOUT_SEC), so callers can degrade to SAPI / a text-only reply.
+        Returns None for empty text, or when every attempt fails (network,
+        missing package, decode error) or times out, so callers can degrade to
+        SAPI / a text-only reply.
+
+        `timeout` is a PER-ATTEMPT budget, capped at EDGE_ATTEMPT_TIMEOUT_SEC.
+        Up to EDGE_ATTEMPTS attempts are made, so total Edge time can reach
+        EDGE_ATTEMPTS x min(timeout, EDGE_ATTEMPT_TIMEOUT_SEC).
         """
         if not text or not text.strip():
             return None

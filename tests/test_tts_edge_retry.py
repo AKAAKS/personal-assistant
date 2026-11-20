@@ -66,17 +66,25 @@ def test_a_late_write_from_an_abandoned_attempt_does_not_leak(monkeypatch):
     edge = EdgeTTS()
     release = threading.Event()
     n = {"c": 0}
+    stale = {}
 
     def worker(text, result):
         n["c"] += 1
         if n["c"] == 1:
+            stale["thread"] = threading.current_thread()
             release.wait(5)
             result["wav"] = b"STALE"
-        # attempt 2 fails fast without writing
+        else:
+            # Attempt 2 fails without writing. Before it finishes, let the
+            # abandoned attempt-1 worker land its stale write, so the write is
+            # in place before synthesize reads attempt 2's result.
+            release.set()
+            stale["thread"].join(5)
 
     edge._synth_worker = worker
     try:
         assert edge.synthesize("hello") is None
+        assert not stale["thread"].is_alive()
     finally:
         release.set()
 
