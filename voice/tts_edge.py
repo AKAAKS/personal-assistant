@@ -24,11 +24,20 @@ import os
 import threading
 import wave
 
-# Single source of truth for the synthesis timeout (voice.tts has no top-level
-# dependency on this module — make_tts imports EdgeTTS lazily — so this import
-# is cycle-free). Sharing it keeps the daemon-freeze guard from drifting between
-# the two TTS backends.
+# SYNTH_TIMEOUT_SEC is still the overall ceiling a caller may pass in (voice.tts
+# has no top-level dependency on this module — make_tts imports EdgeTTS lazily —
+# so this import is cycle-free). Edge deliberately does NOT spend it on one
+# attempt: a warm synthesis measured 0.28-0.39s, so waiting the full shared
+# budget on a hung attempt was a ~20s stall. Each attempt gets the much shorter
+# EDGE_ATTEMPT_TIMEOUT_SEC instead, and the two budgets are separate things.
+# A timed-out attempt abandons a live daemon thread (it cannot be cancelled), so
+# a doubly-failed reply now leaks two such threads instead of one.
 from voice.tts import SYNTH_TIMEOUT_SEC
+
+EDGE_ATTEMPT_TIMEOUT_SEC = 5.0
+# One retry is cheap insurance against a fast failure (~0.3s on the warm path);
+# it is not known to recover any particular failure.
+EDGE_ATTEMPTS = 2
 
 log = logging.getLogger(__name__)
 
@@ -54,21 +63,33 @@ class EdgeTTS:
         """Render text to WAV bytes via edge-tts (MP3) -> miniaudio (PCM) -> wave (RIFF).
 
         Returns None for empty text, on any failure (network, missing
-        package, decode error), or on timeout, so callers can degrade to a
-        text-only reply.
+        package, decode error), or on timeout of every attempt (EDGE_ATTEMPTS tries, each capped at
+        EDGE_ATTEMPT_TIMEOUT_SEC), so callers can degrade to SAPI / a text-only reply.
         """
         if not text or not text.strip():
             return None
-        result: dict = {}
-        worker = threading.Thread(
-            target=self._synth_worker, args=(text, result), daemon=True, name="edge-tts-synth"
-        )
-        worker.start()
-        worker.join(timeout)
-        if worker.is_alive():
-            log.warning("edge-tts synthesis timed out after %.0fs; replying without audio", timeout)
-            return None
-        return result.get("wav")
+        attempt_timeout = min(timeout, EDGE_ATTEMPT_TIMEOUT_SEC)
+        for attempt in range(1, EDGE_ATTEMPTS + 1):
+            # Fresh dict per attempt: an abandoned (timed-out) worker keeps
+            # running and may write result["wav"] late; it must only ever touch
+            # its own attempt's dict.
+            result: dict = {}
+            worker = threading.Thread(
+                target=self._synth_worker, args=(text, result), daemon=True, name="edge-tts-synth"
+            )
+            worker.start()
+            worker.join(attempt_timeout)
+            if worker.is_alive():
+                log.warning(
+                    "edge-tts synthesis timed out after %.0fs (attempt %d/%d)",
+                    attempt_timeout, attempt, EDGE_ATTEMPTS,
+                )
+                continue
+            wav = result.get("wav")
+            if wav is not None:
+                return wav
+        log.warning("edge-tts failed after %d attempts; replying without audio", EDGE_ATTEMPTS)
+        return None
 
     def _synth_worker(self, text: str, result: dict):
         try:
