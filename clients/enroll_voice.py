@@ -260,6 +260,7 @@ def main():
     if impostor is not None:
         np.save(IMPOSTOR_PATH, impostor)
     config = {
+        "trim_regime": cal["trim_regime"],  # absent => predates trailing-silence trim
         "backend": backend,
         "threshold": cal["threshold"],
         "margin": cal["margin"],

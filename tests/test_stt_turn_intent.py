@@ -49,10 +49,17 @@ def stub_stt(returns):
 # Concluders: the phrase is the WHOLE utterance. Apostrophe forms are the proof
 # that the pre-normalised lists actually match.
 @pytest.mark.parametrize("text", [
-    "That's it.", "that's all", "Thank you.", "thanks", "We're done.", "thats it",
+    "That's it.", "that's all", "We're done.", "thats it",
 ])
 def test_whole_utterance_concluders(text):
     assert classify_text(text) == INTENT_CONCLUDE
+
+
+@pytest.mark.parametrize("text", ["Thank you.", "Thanks.", "thank you", "thanks"])
+def test_thanks_is_noise_not_a_concluder(text):
+    """Whisper invents 'Thank you.' from room noise, so a cough must not be able
+    to close a turn. Burning a misfire is the safe outcome."""
+    assert classify_text(text) == INTENT_NOISE
 
 
 # Void phrases: anchored to the END of the utterance.
@@ -60,7 +67,8 @@ def test_void_continue_at_end_of_a_real_command():
     assert classify_text("remind me at five, never mind") == INTENT_VOID_CONTINUE
 
 
-@pytest.mark.parametrize("text", ["scratch that", "disregard that", "Never mind."])
+@pytest.mark.parametrize("text", ["scratch that", "disregard that", "Never mind.",
+                                  "Nevermind.", "remind me at five, nevermind"])
 def test_void_continue_phrases(text):
     assert classify_text(text) == INTENT_VOID_CONTINUE
 

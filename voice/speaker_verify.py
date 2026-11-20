@@ -129,6 +129,27 @@ MARGIN_MIN = 0.05
 MARGIN_MAX = 0.40
 
 
+# Stamped into verify_config.json by calibrate(). "trimmed" means the voiceprint
+# and the threshold/margin were measured on clips with trailing silence removed,
+# which is how the runtime now verifies. A config without it predates that.
+TRIM_REGIME = "trimmed"
+
+
+def warn_if_stale_regime(cfg: dict) -> None:
+    """Log ONE warning if the calibration predates trailing-silence trimming.
+
+    Called once from from_env at startup -- never per clip. Informational only:
+    a trimmed clip scores equal or better and gets the more lenient short-clip
+    floor, so a stale config cannot newly reject the user; it is just no longer
+    the regime the numbers were tuned under.
+    """
+    if cfg.get("trim_regime") == TRIM_REGIME:
+        return
+    log.warning("Speaker verification: your voiceprint and thresholds predate "
+                "trailing-silence trimming. Re-run `python clients/enroll_voice.py` "
+                "then `python scripts/voice_calibrate.py` to retune them.")
+
+
 def calibrate(*, user_sims, user_gaps, impostor_sims) -> dict:
     """Derive a threshold and margin from measured enrollment scores.
 
@@ -177,6 +198,7 @@ def calibrate(*, user_sims, user_gaps, impostor_sims) -> dict:
     separated = bands_apart and accepts_own_enrollment
 
     return {
+        "trim_regime": TRIM_REGIME,
         "threshold": round(threshold, 3),
         "margin": round(margin, 3),
         "separated": separated,
@@ -417,6 +439,7 @@ def from_env():
     log.info("Speaker verification: %s backend, threshold %.2f, margin %.2f%s",
              backend, threshold, margin,
              "" if impostor is None else ", negative print loaded")
+    warn_if_stale_regime(cfg)
     return SpeakerVerifier(
         embed_fn=lambda a: embed_audio(encoder, a, backend),
         voiceprint=voiceprint,

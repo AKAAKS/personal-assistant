@@ -85,20 +85,24 @@ INTENT_NOISE = "noise"                  # nothing a user would say to JARVIS
 #
 # Kept apart from _FILLER_UTTERANCES on purpose: that set means "noise, no
 # signal"; this one means "a deliberate close". Merging them would re-create the
-# ambiguity this feature exists to remove. "thank you"/"thanks" are in both
-# worlds: Whisper invents "Thank you." from noise, so a cough can now close a
-# turn. That trade is accepted (harmless), and is why the concluder check runs
-# BEFORE _is_hallucination. Whole-utterance only: "remind me to say thank you"
-# is a command.
+# ambiguity this feature exists to remove. "thank you"/"thanks" are
+# deliberately NOT concluders: Whisper invents "Thank you." from room noise, so
+# if they closed the turn a cough could end it. They stay in _FILLER_UTTERANCES,
+# classify as noise and burn a misfire instead. The concluder check still runs
+# BEFORE _is_hallucination so the phrases below are never mistaken for noise.
+# Whole-utterance only: "remind me to say that's it" is a command.
 _CONCLUDERS = frozenset({
     "that s it", "thats it", "that s all", "thats all", "we re done",
-    "thank you", "thanks",
 })
 
 # Void phrases are anchored to the END of the utterance, on a word boundary:
 # "remind me at five, never mind" voids; "never mind that, what's the weather"
 # is a real command and must not.
-_VOID_CONTINUE = ("never mind", "scratch that", "disregard that")
+#
+# "nevermind" is listed separately because _normalise does not join words and
+# Whisper frequently renders the phrase as one word; without it a command the
+# user meant to cancel would be executed.
+_VOID_CONTINUE = ("never mind", "nevermind", "scratch that", "disregard that")
 _VOID_CLOSE = ("forget it",)
 
 
@@ -115,8 +119,7 @@ def classify_text(text: str) -> str:
     """
     norm = _normalise(text)
     # Order matters. Concluders are whole-utterance, so they cannot collide with
-    # an end-anchored void; they go first mainly so "thank you"/"thanks" beat the
-    # noise check below. Void-close precedes void-continue as a tie-break:
+    # an end-anchored void. Void-close precedes void-continue as a tie-break:
     # "never mind, forget it" ends the turn, because the user said they are done.
     if norm in _CONCLUDERS:
         return INTENT_CONCLUDE

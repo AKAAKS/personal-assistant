@@ -276,13 +276,20 @@ class JarvisServer:
         confirmation (Assistant.awaiting_confirmation) or a reply ending in "?".
 
         Must be given the string _process returned, BEFORE
-        _append_drained_notices / _append_habit_trailer / strip_markdown touch
-        it. The appenders tack on sentences ending in a period, so a reply that
+        _append_drained_notices / _append_habit_trailer touch it. The
+        appenders tack on sentences ending in a period, so a reply that
         genuinely ended in "?" would otherwise read as "closed" whenever a
         notice happened to be pending, and the mic would shut on a real
         question.
+
+        The "?" test, however, MUST run on the strip_markdown'd text. That is
+        the opposite rule from the appenders, on purpose: _send_reply strips
+        markdown later, so a question the model emphasised ("**Which timer?**")
+        ends in "*" raw but in "?" on the wire and in the user's ear. Testing
+        the raw string ships it as "closed" and shuts the mic on the user.
+        Do not "restore consistency" by dropping the strip.
         """
-        asked = (raw_reply or "").strip().endswith("?")
+        asked = strip_markdown(raw_reply or "").strip().endswith("?")
         # No getattr default on purpose. A missing (or renamed) attribute would
         # default to False, i.e. toward "closed" -- shutting the mic on a
         # confirmation prompt, the one failure the spec names as unsafe. An
@@ -456,6 +463,14 @@ class JarvisServer:
             # frame is a plain reply with empty text and no audio.
             turn = _EXIT_TURNS[intent]
             self._last_turn[ws] = turn
+            # This branch returns before _process, which is where a barge-in
+            # normally marks the cut-off turn -- and "never mind" over a playing
+            # reply is the most common barge-in there is. Same guard and same
+            # lock as _process: never call with None (no-arg walk-and-mark
+            # fallback). Not marked twice: _process is never reached here.
+            if interrupted_turn is not None:
+                async with self._lock:
+                    self.assistant.note_interruption(interrupted_turn)
             await self._safe_send(
                 ws, json.dumps({"type": "reply", "text": "", "heard": heard,
                                 "audio_follows": False, "turn": turn})

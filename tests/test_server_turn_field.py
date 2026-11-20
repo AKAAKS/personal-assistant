@@ -243,3 +243,46 @@ def test_forget_it_after_an_open_turn_still_voids_and_closes():
     reply = json.loads(ws.sent[1])
     assert reply["turn"] == "voided_closed" and reply["text"] == ""
     assert server.assistant.calls == ["delete the meeting"]
+
+
+def test_a_bolded_question_holds_the_mic_open():
+    """strip_markdown runs later, in _send_reply. The '?' test must see the
+    stripped text or an emphasised question ships as closed."""
+    reply = utter(make("**Which timer, the 10 or the 20 minute one?**"), "cancel the timer")
+    assert reply["turn"] == "open"
+
+
+def test_an_italicised_question_holds_the_mic_open():
+    reply = utter(make("*Delete it permanently?*"), "delete the meeting")
+    assert reply["turn"] == "open"
+
+
+class _NotingAssistant(ScriptedAssistant):
+    def __init__(self):
+        super().__init__()
+        self.noted = []
+
+    def note_interruption(self, turn=None):
+        self.noted.append(turn)
+
+
+def test_a_void_while_a_reply_was_playing_marks_the_interrupted_turn():
+    """Barging in to say 'never mind' is the most natural interrupt; the exit
+    branch returns before _process, so it must mark the cut-off turn itself."""
+    assistant = _NotingAssistant()
+    played = {"role": "assistant", "content": "a long reply that got cut off"}
+    assistant.conversation = [played]
+    server = JarvisServer(assistant, stt=None, tts=None)
+    server.stt = ScriptedSTT("never mind")
+    ws = FakeWS()
+    asyncio.run(server._handle_json(ws, json.dumps({"type": "interrupt"})))
+    asyncio.run(server._handle_audio(ws, PCM))
+    assert json.loads(ws.sent[0])["turn"] == "voided_open"
+    assert assistant.calls == []
+    assert len(assistant.noted) == 1 and assistant.noted[0] is played
+
+
+def test_a_void_with_no_interrupt_marks_nothing():
+    assistant = _NotingAssistant()
+    utter(JarvisServer(assistant, stt=None, tts=None), "never mind")
+    assert assistant.noted == []
