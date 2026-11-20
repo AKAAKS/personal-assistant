@@ -63,12 +63,12 @@ def test_record_utterance_returns_none_on_silence():
 
 # The two "too-short blip" tests that used to live here are gone with
 # MIN_UTTERANCE_SAMPLES. They asserted a client-side length floor that the real
-# VAD makes unreachable: both callers pass silence_ms=800, so a non-None return
-# carries >= 10 speech frames + 26 trailing-silence frames = 17,280 samples,
-# against a floor of 8,000. They only passed because the fake VAD here hands
-# back a raw 100-sample array, which record_until_silence cannot do. "Too short
-# to be a turn" is now decided once, in VAD-positive milliseconds, by the only
-# code that can see which frames were speech -- see
+# VAD makes unreachable: the wake-word capture passes silence_ms=1200, so a
+# non-None return carries >= 10 speech frames + 40 trailing-silence frames =
+# 24,000 samples, against a floor of 8,000. They only passed because the fake
+# VAD here hands back a raw 100-sample array, which record_until_silence cannot
+# do. "Too short to be a turn" is now decided once, in VAD-positive
+# milliseconds, by the only code that can see which frames were speech -- see
 # test_audio_io.test_a_blip_of_noise_with_trailing_silence_is_rejected.
 
 
@@ -79,15 +79,26 @@ def test_record_utterance_resets_wake_buf():
     assert len(c._wake_buf) == 0
 
 
-def test_record_utterance_uses_the_same_vad_params_as_capture_utterance():
+def test_wake_word_capture_is_patient():
     c = _client(np.ones(16000, dtype=np.int16))
     c._wake_buf = np.array([], dtype=np.int16)
     c._record_utterance()
-    assert c.vad.calls[0] == {
-        "max_seconds": 15.0,
-        "silence_ms": 800,
-        "speech_timeout_sec": 5.0,
-    }
+    kwargs = c.vad.calls[0]
+    assert kwargs["speech_timeout_sec"] == 10.0
+    assert kwargs["silence_ms"] == 1200
+
+
+def test_followup_capture_stays_tight():
+    """Once a completed turn closes the mic, the only turns reaching the
+    follow-up capture are confirmations and answers to direct questions,
+    where a tight endpoint is correct."""
+    from clients import voice_client
+
+    c = _client(None)
+    c._capture_followup()
+    kwargs = c.vad.calls[0]
+    assert kwargs["silence_ms"] == 800
+    assert kwargs["speech_timeout_sec"] == voice_client.FOLLOWUP_WINDOW_SEC
 
 
 def test_followup_returns_pcm_bytes_when_speech_captured():

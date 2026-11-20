@@ -37,6 +37,22 @@ WAKE_SCAN_SLICE_SEC = 0.5
 # If no speech starts within the window, we drop back to wake-word gating.
 FOLLOWUP_WINDOW_SEC = float(os.getenv("FOLLOWUP_WINDOW_SEC", "6"))
 
+# The wake word is a deliberate act, and the user then needs time to work out
+# how to phrase the request. This is how long we wait for them to START talking
+# after "hey jarvis" before giving up. 5s was too short: the capture gave up
+# while they were still composing the sentence.
+UTTERANCE_SPEECH_TIMEOUT_SEC = float(os.getenv("UTTERANCE_SPEECH_TIMEOUT_SEC", "10.0"))
+
+# Trailing silence that ends a wake-word utterance. Raised from 800ms so a
+# mid-sentence pause to rephrase does not cut the user off. Safe for the speaker
+# verifier because the padding is trimmed before verification.
+UTTERANCE_SILENCE_MS = int(os.getenv("UTTERANCE_SILENCE_MS", "1200"))
+
+# Trailing silence that ends a follow-up turn. Kept tight on purpose: follow-ups
+# are confirmations and answers to direct questions, where a quick endpoint is
+# correct. Configurable so it can be tuned alongside the other two.
+FOLLOWUP_SILENCE_MS = int(os.getenv("FOLLOWUP_SILENCE_MS", "800"))
+
 # End the hands-free conversation after this many consecutive non-productive
 # follow-ups (a silent window OR audio that transcribed to nothing). Without a
 # cap, a noisy room keeps tripping the VAD -> empty transcription -> retry,
@@ -325,7 +341,8 @@ class VoiceClient:
         activity.write(activity.HEARING)
         print("  Listening...")
         audio = self.vad.record_until_silence(
-            self.mic, max_seconds=15.0, silence_ms=800, speech_timeout_sec=5.0,
+            self.mic, max_seconds=15.0, silence_ms=UTTERANCE_SILENCE_MS,
+            speech_timeout_sec=UTTERANCE_SPEECH_TIMEOUT_SEC,
         )
         if audio is None:
             log.info("No speech captured")
@@ -483,7 +500,7 @@ class VoiceClient:
         """
         self.mic.clear()  # discard whatever was captured while JARVIS was talking
         audio = self.vad.record_until_silence(
-            self.mic, max_seconds=15.0, silence_ms=800,
+            self.mic, max_seconds=15.0, silence_ms=FOLLOWUP_SILENCE_MS,
             speech_timeout_sec=FOLLOWUP_WINDOW_SEC,
         )
         if audio is None:
