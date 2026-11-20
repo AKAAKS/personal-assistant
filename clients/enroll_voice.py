@@ -11,6 +11,10 @@ previous version only printed a suggestion for you to copy into .env by hand;
 nobody did, so the stale 0.75 default stayed live and rejected 63% of real
 utterances.
 
+Voiceprints built before 2026-11-20 were embedded from untrimmed clips; the
+server now trims trailing silence before verifying, so re-enroll to match how
+it judges a clip (an old print can only dilute a match, never tighten it).
+
 Run once, in a terminal, speaking from where you normally sit, with your usual
 speaker switched on and at your usual volume:
     python -m clients.enroll_voice
@@ -24,7 +28,12 @@ import winsound
 
 import numpy as np
 
-from voice.audio_io import SAMPLE_RATE, MicrophoneStream, VoiceActivityDetector
+from voice.audio_io import (
+    SAMPLE_RATE,
+    MicrophoneStream,
+    VoiceActivityDetector,
+    trim_trailing_silence,
+)
 from voice.speaker_verify import (
     CONFIG_PATH,
     DEFAULT_BACKEND,
@@ -169,7 +178,8 @@ def _collect_voice(encoder, backend, mic, vad, embeddings):
         if audio is None or len(audio) < MIN_SAMPLES_LEN:
             print("  (didn't catch that — let's try that one again)\n")
             continue
-        embeddings.append(embed_audio(encoder, audio, backend))
+        # Embed what the server will verify: trailing silence trimmed.
+        embeddings.append(embed_audio(encoder, trim_trailing_silence(audio), backend))
         print(f"  got it ({len(audio) / SAMPLE_RATE:.1f}s)\n")
     return embeddings
 
@@ -185,7 +195,7 @@ def _collect_jarvis(encoder, backend, mic, tts):
             continue
         heard = _speak_and_record(mic, wav)
         if heard is not None and len(heard) >= MIN_SAMPLES_LEN and np.abs(heard).max() > 300:
-            embeddings.append(embed_audio(encoder, heard, backend))
+            embeddings.append(embed_audio(encoder, trim_trailing_silence(heard), backend))
             recorded = True
             print(f"  heard it back ({len(heard) / SAMPLE_RATE:.1f}s, "
                   f"peak {int(np.abs(heard).max())})")
@@ -250,6 +260,7 @@ def main():
     if impostor is not None:
         np.save(IMPOSTOR_PATH, impostor)
     config = {
+        "trim_regime": cal["trim_regime"],  # absent => predates trailing-silence trim
         "backend": backend,
         "threshold": cal["threshold"],
         "margin": cal["margin"],

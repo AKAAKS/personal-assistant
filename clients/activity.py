@@ -37,6 +37,10 @@ log = logging.getLogger(__name__)
 # "I am back to normal" after a turn ends.
 ARMED = "armed"
 HEARING = "hearing"      # wake word fired; recording the user right now
+# YOUR_TURN is the mic held open for a reply with no wake word. Unlike ARMED it
+# must NOT look idle (the mic is live), and unlike HEARING nobody is speaking
+# yet, so it is not a filled ring.
+YOUR_TURN = "your_turn"
 THINKING = "thinking"    # audio sent; waiting for the daemon's reply
 SPEAKING = "speaking"    # playing the reply
 MISSED = "missed"        # the turn produced nothing -- see the reasons below

@@ -9,6 +9,11 @@ from jarvisd.server import JarvisServer
 
 
 class FakeAssistant:
+    # JarvisServer._turn_for reads this with no getattr default on purpose: a
+    # missing attribute would quietly mean "closed", i.e. shut the mic on a
+    # confirmation prompt. Stubs that reach a reply path must carry it.
+    awaiting_confirmation = False
+
     def __init__(self):
         self.was_reset = False
         # Barge-in capture (JarvisServer._capture_interrupt_target) reads this
@@ -52,7 +57,7 @@ def test_text_round_trip():
         return json.loads(await ws.recv())
 
     reply = run_client(JarvisServer(FakeAssistant()), scenario)
-    assert reply == {"type": "reply", "text": "echo: hi", "heard": None, "audio_follows": False}
+    assert reply == {"type": "reply", "text": "echo: hi", "heard": None, "audio_follows": False, "turn": "closed"}
 
 
 def test_reset():
@@ -89,7 +94,17 @@ def test_audio_without_stt_is_an_error():
     assert reply["type"] == "error"
 
 
-class FakeSTT:
+class ClassifyingSTT:
+    """Base for test STT fakes: the server calls transcribe_classified, so a fake
+    only defines transcribe(audio) and inherits the (text, intent) contract."""
+
+    def transcribe_classified(self, audio):
+        from voice.stt import classify_text
+        text = self.transcribe(audio)
+        return text, classify_text(text)
+
+
+class FakeSTT(ClassifyingSTT):
     def transcribe(self, audio):
         assert audio.dtype == np.int16
         return "turn on the light"
@@ -177,7 +192,7 @@ def test_conversation_history_keeps_raw_markdown_untouched():
 
 
 def test_silent_audio_returns_empty_reply():
-    class SilentSTT:
+    class SilentSTT(ClassifyingSTT):
         def transcribe(self, audio):
             return "   "
 
@@ -234,7 +249,7 @@ def test_interrupt_frame_marks_next_transcribed_turn():
 
 
 def test_interrupt_then_silence_marks_nothing():
-    class SilentSTT:
+    class SilentSTT(ClassifyingSTT):
         def transcribe(self, audio):
             return ""
 
@@ -380,7 +395,7 @@ class _AcceptAll:
         return True
 
 
-class _EchoSTT:
+class _EchoSTT(ClassifyingSTT):
     def transcribe(self, audio):
         return "lights on"
 
@@ -399,7 +414,7 @@ def test_unverified_utterance_is_flagged_with_a_reason():
 
 def test_empty_transcription_carries_no_unverified_reason():
     """An accepted-but-empty utterance IS a misfire, so it must not be tagged."""
-    class SilentSTT:
+    class SilentSTT(ClassifyingSTT):
         def transcribe(self, audio):
             return "   "
 

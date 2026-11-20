@@ -10,9 +10,15 @@ from jarvisd import db
 from jarvisd.notifier import Notifier
 from jarvisd.reminder_store import ReminderStore
 from jarvisd.server import JarvisServer
+from tests.test_server import ClassifyingSTT
 
 
 class FakeAssistant:
+    # _turn_for reads this with no getattr default (a missing attribute
+    # would silently mean "closed"), so any stub reaching a reply path
+    # must carry it.
+    awaiting_confirmation = False
+
     def __init__(self):
         self.was_reset = False
 
@@ -288,7 +294,7 @@ def test_text_in_appends_drained_notices_to_reply():
 
 
 def test_audio_in_appends_drained_notices_to_reply():
-    class FakeSTT:
+    class FakeSTT(ClassifyingSTT):
         def transcribe(self, audio):
             return "turn on the light"
 
@@ -373,7 +379,7 @@ def test_concurrent_reply_and_push_never_split_json_wav_pairs():
         server._clients[ws] = asyncio.Lock()
 
         reply_task = asyncio.create_task(
-            server._send_reply(ws, "the reply", heard=None, speak=True)
+            server._send_reply(ws, "the reply", heard=None, speak=True, turn="closed")
         )
         await asyncio.sleep(0.05)  # _send_reply has sent its JSON, is blocked on the WAV
         push_task = asyncio.create_task(server.push_proactive("surprise"))

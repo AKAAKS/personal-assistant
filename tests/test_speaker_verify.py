@@ -220,7 +220,8 @@ def test_setting_ignores_a_non_numeric_env_var(monkeypatch):
 #
 # decide() used to return accept_short_clip for ANY clip under min_duration_sec
 # once the margin rule passed, skipping self.threshold entirely. Since
-# record_until_silence closes a capture after 800ms of trailing silence, almost
+# record_until_silence closes a capture after 800ms of trailing silence (the
+# server now trims it before verifying, which keeps clips short), almost
 # every real command ("lights off", "play music") is 1.0-1.8s -- so the absolute
 # check was bypassed for the COMMON case, not an edge case.
 #

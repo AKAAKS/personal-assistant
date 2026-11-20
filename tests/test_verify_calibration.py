@@ -7,13 +7,18 @@ numbers now come from the measured GAP between the user's voice and JARVIS's,
 and get written to disk.
 """
 
+import logging
+
 import pytest
 
 from voice.speaker_verify import (
     DEFAULT_MARGIN,
     THRESHOLD_MAX,
     THRESHOLD_MIN,
+    TRIM_REGIME,
     calibrate,
+    load_config,
+    warn_if_stale_regime,
 )
 
 
@@ -150,3 +155,34 @@ def test_a_healthy_calibration_is_still_separated():
     )
     assert cfg["separated"]
     assert min([0.55, 0.62, 0.60]) >= cfg["margin"]
+
+
+# --- trim-regime stamp -------------------------------------------------------
+
+def test_calibrate_stamps_the_trim_regime():
+    cfg = calibrate(user_sims=[0.8, 0.85], user_gaps=[0.5, 0.6], impostor_sims=[0.2])
+    assert cfg["trim_regime"] == TRIM_REGIME == "trimmed"
+
+
+def test_a_config_without_the_marker_warns_once(caplog):
+    with caplog.at_level(logging.WARNING, logger="voice.speaker_verify"):
+        warn_if_stale_regime({"threshold": 0.5, "margin": 0.2})
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    msg = warnings[0].getMessage()
+    assert "python clients/enroll_voice.py" in msg
+    assert "python scripts/voice_calibrate.py" in msg
+
+
+def test_a_config_with_the_marker_does_not_warn(caplog):
+    with caplog.at_level(logging.WARNING, logger="voice.speaker_verify"):
+        warn_if_stale_regime({"threshold": 0.5, "trim_regime": TRIM_REGIME})
+    assert not caplog.records
+
+
+def test_a_missing_config_file_does_not_crash(tmp_path, caplog):
+    cfg = load_config(str(tmp_path / "nope.json"))
+    assert cfg == {}
+    with caplog.at_level(logging.WARNING, logger="voice.speaker_verify"):
+        warn_if_stale_regime(cfg)  # the voiceprint is still pre-trim: warn, don't raise
+    assert len(caplog.records) == 1

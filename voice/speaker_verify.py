@@ -62,8 +62,12 @@ DEFAULT_MIN_DURATION_SEC = 2.0
 # opened a real hole: another person, or the TV, is a human voice and therefore
 # far from JARVIS's TTS print, so sim_user ~0.10 against sim_imp ~-0.20 clears a
 # 0.24 margin and was accepted as the enrolled speaker while scoring far below
-# the threshold. Since captures close after 800ms of trailing silence, nearly
-# every real command is 1.0-1.8s, so that was the common path, not an edge case.
+# the threshold. The server trims trailing silence off the clip before it gets
+# here (voice.audio_io.trim_trailing_silence), so the length judged is the length
+# of the speech itself: reaching min_duration_sec now takes ~1.85s of
+# CONTINUOUS speech, so short clips are effectively the ONLY path for voice
+# commands and the relaxed floor below is the operative bar for essentially all
+# of them -- the full-threshold branch is close to unreachable.
 #
 # 0.6 sits between the weakest genuine short clips measured (0.290 at 1.6s,
 # 0.350 at 1.2s -> floor 0.15) and a non-enrolled human voice (~0.05-0.10). The
@@ -125,6 +129,27 @@ MARGIN_MIN = 0.05
 MARGIN_MAX = 0.40
 
 
+# Stamped into verify_config.json by calibrate(). "trimmed" means the voiceprint
+# and the threshold/margin were measured on clips with trailing silence removed,
+# which is how the runtime now verifies. A config without it predates that.
+TRIM_REGIME = "trimmed"
+
+
+def warn_if_stale_regime(cfg: dict) -> None:
+    """Log ONE warning if the calibration predates trailing-silence trimming.
+
+    Called once from from_env at startup -- never per clip. Informational only:
+    a trimmed clip scores equal or better and gets the more lenient short-clip
+    floor, so a stale config cannot newly reject the user; it is just no longer
+    the regime the numbers were tuned under.
+    """
+    if cfg.get("trim_regime") == TRIM_REGIME:
+        return
+    log.warning("Speaker verification: your voiceprint and thresholds predate "
+                "trailing-silence trimming. Re-run `python clients/enroll_voice.py` "
+                "then `python scripts/voice_calibrate.py` to retune them.")
+
+
 def calibrate(*, user_sims, user_gaps, impostor_sims) -> dict:
     """Derive a threshold and margin from measured enrollment scores.
 
@@ -173,6 +198,7 @@ def calibrate(*, user_sims, user_gaps, impostor_sims) -> dict:
     separated = bands_apart and accepts_own_enrollment
 
     return {
+        "trim_regime": TRIM_REGIME,
         "threshold": round(threshold, 3),
         "margin": round(margin, 3),
         "separated": separated,
@@ -413,6 +439,7 @@ def from_env():
     log.info("Speaker verification: %s backend, threshold %.2f, margin %.2f%s",
              backend, threshold, margin,
              "" if impostor is None else ", negative print loaded")
+    warn_if_stale_regime(cfg)
     return SpeakerVerifier(
         embed_fn=lambda a: embed_audio(encoder, a, backend),
         voiceprint=voiceprint,

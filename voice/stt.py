@@ -39,10 +39,21 @@ _FILLER_UTTERANCES = frozenset({
 })
 
 
+def _normalise(text):
+    """Lowercase, everything but a-z/0-9/space to a space, whitespace collapsed.
+
+    The ONE copy of this expression. Every phrase set in this module is stored
+    pre-normalised against it, so a second hand-maintained copy drifting from
+    this one would turn a phrase list into one that silently never matches --
+    which looks exactly like the old behaviour and so would ship unnoticed.
+    """
+    return " ".join(re.sub(r"[^a-z0-9 ]+", " ", text.lower()).split())
+
+
 def _is_hallucination(text):
     """True when the transcription is a stock Whisper hallucination (noise),
     not something a user would actually say to JARVIS."""
-    norm = " ".join(re.sub(r"[^a-z0-9 ]+", " ", text.lower()).split())
+    norm = _normalise(text)
     if not norm:
         return True
     if any(p in norm for p in _HALLUCINATION_PHRASES):
@@ -53,6 +64,73 @@ def _is_hallucination(text):
     if norm in _FILLER_UTTERANCES:  # a politeness token IS the whole utterance
         return True
     return False
+
+
+# --- Turn intent -----------------------------------------------------------
+# What a transcript MEANS for the turn, beyond what it says.
+INTENT_NORMAL = "normal"
+INTENT_CONCLUDE = "conclude"            # "that's it": a deliberate close
+INTENT_VOID_CONTINUE = "void_continue"  # "never mind": discard it, user rephrases
+INTENT_VOID_CLOSE = "void_close"        # "forget it": discard it, user is done
+INTENT_NOISE = "noise"                  # nothing a user would say to JARVIS
+
+# The phrase sets below are stored PRE-NORMALISED: lowercase, with everything but
+# a-z/0-9/space replaced by a space and whitespace collapsed -- i.e. by
+# _normalise above, which is the only copy of that expression and is what
+# _is_hallucination uses too. That turns an apostrophe into a space
+# ("that's it" -> "that s it"), so a list written as "that's it" would match
+# NOTHING, and a phrase list that never matches looks exactly like the old
+# behaviour, so it would ship unnoticed. "thats it" is listed too because some
+# transcripts drop the apostrophe instead of spacing it.
+#
+# Kept apart from _FILLER_UTTERANCES on purpose: that set means "noise, no
+# signal"; this one means "a deliberate close". Merging them would re-create the
+# ambiguity this feature exists to remove. "thank you"/"thanks" are
+# deliberately NOT concluders: Whisper invents "Thank you." from room noise, so
+# if they closed the turn a cough could end it. They stay in _FILLER_UTTERANCES,
+# classify as noise and burn a misfire instead. The concluder check still runs
+# BEFORE _is_hallucination so the phrases below are never mistaken for noise.
+# Whole-utterance only: "remind me to say that's it" is a command.
+_CONCLUDERS = frozenset({
+    "that s it", "thats it", "that s all", "thats all", "we re done",
+})
+
+# Void phrases are anchored to the END of the utterance, on a word boundary:
+# "remind me at five, never mind" voids; "never mind that, what's the weather"
+# is a real command and must not.
+#
+# "nevermind" is listed separately because _normalise does not join words and
+# Whisper frequently renders the phrase as one word; without it a command the
+# user meant to cancel would be executed.
+_VOID_CONTINUE = ("never mind", "nevermind", "scratch that", "disregard that")
+_VOID_CLOSE = ("forget it",)
+
+
+def _ends_with_phrase(norm, phrases):
+    return any(norm == p or norm.endswith(" " + p) for p in phrases)
+
+
+def classify_text(text: str) -> str:
+    """Classify a transcript. Pure: no model, no audio.
+
+    Precedence: whole-utterance concluder, then ends-with void, then noise
+    (_is_hallucination), then normal. "yes"/"no"/"okay" fall through to normal --
+    a spoken confirmation must survive.
+    """
+    norm = _normalise(text)
+    # Order matters. Concluders are whole-utterance, so they cannot collide with
+    # an end-anchored void. Void-close precedes void-continue as a tie-break:
+    # "never mind, forget it" ends the turn, because the user said they are done.
+    if norm in _CONCLUDERS:
+        return INTENT_CONCLUDE
+    if _ends_with_phrase(norm, _VOID_CLOSE):
+        return INTENT_VOID_CLOSE
+    if _ends_with_phrase(norm, _VOID_CONTINUE):
+        return INTENT_VOID_CONTINUE
+    if _is_hallucination(text):
+        return INTENT_NOISE
+    return INTENT_NORMAL
+
 
 # Confidence gates: Whisper hallucinates words on noise / the tail of JARVIS's
 # own speech during the hands-free follow-up window. Drop any segment the model
@@ -160,7 +238,13 @@ class SpeechToText:
         )
 
     def transcribe(self, audio: np.ndarray) -> str:
-        """Transcribe int16 16kHz audio to text."""
+        """Transcribe int16 16kHz audio to text; "" unless it is a normal command
+        (a concluder, void or noise transcript carries no command to act on)."""
+        text, intent = self.transcribe_classified(audio)
+        return text if intent == INTENT_NORMAL else ""
+
+    def transcribe_classified(self, audio: np.ndarray) -> "tuple[str, str]":
+        """Transcribe int16 16kHz audio; return (text, intent) -- see classify_text."""
         audio_float = audio.astype(np.float32) / 32768.0
         segments, _ = self.model.transcribe(
             audio_float,
@@ -175,4 +259,4 @@ class SpeechToText:
             condition_on_previous_text=False,
         )
         text = _confident_text(segments)
-        return "" if _is_hallucination(text) else text
+        return text, classify_text(text)

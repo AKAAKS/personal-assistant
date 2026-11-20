@@ -43,6 +43,46 @@ PRE_ROLL_MS = int(os.getenv("PRE_ROLL_MS", "300"))
 # round trip on a blip, which is the right price for never eating a "yes".
 MIN_SPEECH_MS = int(os.getenv("MIN_SPEECH_MS", "120"))
 
+# Amplitude at or below which a sample counts as silence when trimming a clip's
+# tail. The 300 is spec-mandated but was never validated against real logged
+# audio, and it now shapes the clip the speaker verifier judges as well as the
+# query path -- so a quiet mic making 300 wrong would otherwise need a code
+# edit in two places. Callers can still pass `threshold=` explicitly.
+TRIM_SILENCE_THRESHOLD = int(os.getenv("TRIM_SILENCE_THRESHOLD", "300"))
+
+
+def trim_trailing_silence(
+    audio: np.ndarray,
+    *,
+    threshold: int = TRIM_SILENCE_THRESHOLD,
+    keep_ms: int = 150,
+    sample_rate: int = SAMPLE_RATE,
+) -> np.ndarray:
+    """Drop the silent tail of a capture, keeping `keep_ms` past the last speech.
+
+    record_until_silence appends silence_ms of quiet to every clip, and the
+    speaker verifier judges a clip partly by total length, so that padding both
+    dilutes the embedding and flatters the duration rule. The verifier gets the
+    trimmed clip; Whisper still gets the whole one.
+
+    "Speech" is any sample whose magnitude exceeds `threshold` (300 matches the
+    peak test in clients/enroll_voice.py). The trim is anchored on the LAST such
+    sample, never a fixed length, so a briskly spoken ~250ms "Yes." (see
+    MIN_SPEECH_MS) is kept whole. Leading silence is left alone, and a clip with
+    no sample above threshold is returned unchanged so the verifier still sees a
+    clip and rejects it on its own terms rather than being handed nothing.
+
+    Voiceprints enrolled before 2026-11-20 were embedded from UNTRIMMED clips,
+    so they describe a slightly different clip shape than the server now judges
+    -- re-enroll (python -m clients.enroll_voice) if `unverified` rejections
+    creep up.
+    """
+    loud = np.flatnonzero(np.abs(audio.astype(np.int32)) > threshold)
+    if loud.size == 0:
+        return audio
+    end = int(loud[-1]) + 1 + int(sample_rate * keep_ms / 1000)
+    return audio[:end]
+
 
 class MicrophoneStream:
     """Streams audio from the default microphone at 16kHz mono."""

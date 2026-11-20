@@ -30,7 +30,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
 
-from voice.audio_io import SAMPLE_RATE, MicrophoneStream, VoiceActivityDetector
+from voice.audio_io import (
+    SAMPLE_RATE,
+    MicrophoneStream,
+    VoiceActivityDetector,
+    trim_trailing_silence,
+)
 from voice.speaker_verify import (
     DEFAULT_BACKEND,
     cosine_similarity,
@@ -230,6 +235,7 @@ def main():
             if audio is None or len(audio) < 8000:
                 print("  (didn't catch that)")
                 continue
+            audio = trim_trailing_silence(audio)  # what the server verifies
             emb = embed_audio(encoder, audio, backend)
             sim = cosine_similarity(emb, voiceprint)
             user_sims.append(sim)
@@ -252,7 +258,7 @@ def main():
                 if len(heard) < 8000 or np.abs(heard).max() <= 300:
                     print("  (didn't hear it back — speaker off, or headphones)")
                     continue
-                emb = embed_audio(encoder, heard, backend)
+                emb = embed_audio(encoder, trim_trailing_silence(heard), backend)
                 sim = cosine_similarity(emb, voiceprint)
                 jarvis_sims.append(sim)
                 flag = "  <-- WOULD BE ACCEPTED AS YOU" if sim >= threshold else ""

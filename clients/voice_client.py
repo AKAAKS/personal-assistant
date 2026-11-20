@@ -37,6 +37,32 @@ WAKE_SCAN_SLICE_SEC = 0.5
 # If no speech starts within the window, we drop back to wake-word gating.
 FOLLOWUP_WINDOW_SEC = float(os.getenv("FOLLOWUP_WINDOW_SEC", "6"))
 
+# The wake word is a deliberate act, and the user then needs time to work out
+# how to phrase the request. This is how long we wait for them to START talking
+# after "hey jarvis" before giving up. 5s was too short: the capture gave up
+# while they were still composing the sentence.
+UTTERANCE_SPEECH_TIMEOUT_SEC = float(os.getenv("UTTERANCE_SPEECH_TIMEOUT_SEC", "10.0"))
+
+# How long to wait for the user to START talking after an "open" reply -- a
+# confirmation prompt or a direct question. Longer than FOLLOWUP_WINDOW_SEC on
+# purpose, and NOT the same constant despite sharing its default: the ordinary
+# follow-up window is an "anything else?" courtesy, where a silent timeout costs
+# nothing, whereas timing out on a confirmation drops the pending action and
+# costs the user the whole command. Same reasoning as the wake-word path (users
+# hesitate while phrasing), so same default -- kept separately named so the two
+# stay independently tunable and the intent is visible at the call site.
+CONFIRM_WINDOW_SEC = float(os.getenv("CONFIRM_WINDOW_SEC", "10.0"))
+
+# Trailing silence that ends a wake-word utterance. Raised from 800ms so a
+# mid-sentence pause to rephrase does not cut the user off. Safe for the speaker
+# verifier because the padding is trimmed before verification.
+UTTERANCE_SILENCE_MS = int(os.getenv("UTTERANCE_SILENCE_MS", "1200"))
+
+# Trailing silence that ends a follow-up turn. Kept tight on purpose: follow-ups
+# are confirmations and answers to direct questions, where a quick endpoint is
+# correct. Configurable so it can be tuned alongside the other two.
+FOLLOWUP_SILENCE_MS = int(os.getenv("FOLLOWUP_SILENCE_MS", "800"))
+
 # End the hands-free conversation after this many consecutive non-productive
 # follow-ups (a silent window OR audio that transcribed to nothing). Without a
 # cap, a noisy room keeps tripping the VAD -> empty transcription -> retry,
@@ -325,7 +351,8 @@ class VoiceClient:
         activity.write(activity.HEARING)
         print("  Listening...")
         audio = self.vad.record_until_silence(
-            self.mic, max_seconds=15.0, silence_ms=800, speech_timeout_sec=5.0,
+            self.mic, max_seconds=15.0, silence_ms=UTTERANCE_SILENCE_MS,
+            speech_timeout_sec=UTTERANCE_SPEECH_TIMEOUT_SEC,
         )
         if audio is None:
             log.info("No speech captured")
@@ -473,18 +500,22 @@ class VoiceClient:
         async with self._audio_lock:
             return await asyncio.to_thread(self._play_and_watch, wav)
 
-    def _capture_followup(self) -> bytes | None:
+    def _capture_followup(self, window: float | None = None) -> bytes | None:
         """Record a follow-up utterance WITHOUT the wake word.
 
         Used right after JARVIS replies so a conversation can continue
         hands-free. Returns PCM bytes if the user starts speaking within
-        FOLLOWUP_WINDOW_SEC, or None if the window passes in silence (meaning
-        the conversation is over and we should re-arm the wake word).
+        `window` seconds (default FOLLOWUP_WINDOW_SEC), or None if the window
+        passes in silence (meaning the conversation is over and we should
+        re-arm the wake word).
         """
+        if window is None:
+            window = FOLLOWUP_WINDOW_SEC
         self.mic.clear()  # discard whatever was captured while JARVIS was talking
+        activity.write(activity.YOUR_TURN)  # the mic is open: not the same as idle
         audio = self.vad.record_until_silence(
-            self.mic, max_seconds=15.0, silence_ms=800,
-            speech_timeout_sec=FOLLOWUP_WINDOW_SEC,
+            self.mic, max_seconds=15.0, silence_ms=FOLLOWUP_SILENCE_MS,
+            speech_timeout_sec=window,
         )
         if audio is None:
             return None
@@ -496,7 +527,11 @@ class VoiceClient:
     @staticmethod
     def _stopped_beep():
         """The one and only cue: JARVIS has stopped listening and re-armed the
-        wake word. No cue means it heard you and is thinking (a reply follows).
+        wake word, so the mic is free again. It plays after essentially every
+        completed command (the server closes the turn once an action is done),
+        so it means "done, I'm not listening" -- not "something went wrong".
+        No cue means the turn is still open: a question was asked, a
+        confirmation is outstanding, or it is thinking about a reply.
         A soft mallet note; falls back to a plain beep if the clip is missing."""
         try:
             winsound.PlaySound(VoiceClient._STOPPED_SOUND, winsound.SND_FILENAME)
@@ -573,6 +608,7 @@ class VoiceClient:
                 unverified = 0           # consecutive "not the enrolled speaker"
                 pending_barge_in = False  # user interrupted; record their new turn next
                 active = False           # woken and engaged, vs waiting for wake word
+                followup_window = FOLLOWUP_WINDOW_SEC  # how long the next follow-up waits
 
                 def advance(productive: bool):
                     """Apply the follow-up state transition."""
@@ -614,8 +650,9 @@ class VoiceClient:
                                 continue
                         elif in_conversation:
                             print("  Listening for follow-up... (or stay quiet to end)")
+                            window, followup_window = followup_window, FOLLOWUP_WINDOW_SEC
                             async with self._audio_lock:
-                                pcm = await asyncio.to_thread(self._capture_followup)
+                                pcm = await asyncio.to_thread(self._capture_followup, window)
                             if pcm is None:
                                 misfires = MAX_FOLLOWUP_MISFIRES  # silent window ends it
                                 advance(productive=False)
@@ -663,7 +700,13 @@ class VoiceClient:
                                 rearm()
                             continue
                         unverified = 0
-                        if not reply.get("heard") and not reply.get("text"):
+                        turn = reply.get("turn")
+                        # A voided frame ("never mind" / "forget it") is silent
+                        # by design -- nothing ran -- so it must not fall into
+                        # the empty-transcription path below, which would print
+                        # "(didn't catch that)" and burn a misfire.
+                        if (not reply.get("heard") and not reply.get("text")
+                                and turn not in ("voided_open", "voided_closed")):
                             activity.write(activity.MISSED, activity.NO_WORDS)
                             print("  (didn't catch that)\n")
                             advance(productive=False)
@@ -684,6 +727,43 @@ class VoiceClient:
                                     await ws.send(json.dumps({"type": "interrupt"}))
                                     pending_barge_in = True
                                     continue  # skip advance; go record the new turn
+                        # The server's turn decision is applied only HERE, after
+                        # playback returned not-interrupted. Acting right after
+                        # get_reply() would bypass the interrupted ->
+                        # pending_barge_in -> continue branch above and lose a
+                        # barge-in over a non-question reply. (A missing "turn"
+                        # -- an older server -- falls through to today's path.)
+                        if turn in ("closed", "voided_closed"):
+                            # Nothing more is expected: free the mic now rather
+                            # than holding it open for a window nobody wants.
+                            in_conversation, misfires = False, 0
+                            rearm()
+                            continue
+                        if turn == "voided_open":
+                            # Nothing ran and the user is about to rephrase.
+                            # Set in_conversation explicitly: it otherwise only
+                            # becomes True via advance(productive=True), so on
+                            # the FIRST utterance after the wake word it is
+                            # still False and "reopen" would drop to idle. Like
+                            # the barge-in branch, leave misfires and `active`
+                            # alone (no beep) and wait longer than a normal
+                            # follow-up: 6s is short for "let me rephrase".
+                            in_conversation = True
+                            followup_window = UTTERANCE_SPEECH_TIMEOUT_SEC
+                            # YOUR_TURN, not ARMED: the mic IS open, and this
+                            # is the one path the feature exists to make
+                            # non-idle. ARMED (copied from the completed-
+                            # exchange path below, where it is right) would
+                            # render the tray idle for the millisecond before
+                            # _capture_followup writes YOUR_TURN itself.
+                            activity.write(activity.YOUR_TURN)
+                            continue
+                        if turn == "open":
+                            # JARVIS asked something and the answer is the only
+                            # traffic that reaches the next capture, so widen
+                            # its pre-speech budget -- same one-shot mechanism
+                            # voided_open uses. See CONFIRM_WINDOW_SEC.
+                            followup_window = CONFIRM_WINDOW_SEC
                         # A completed exchange -> keep listening for a follow-up.
                         activity.write(activity.ARMED)
                         advance(productive=True)
