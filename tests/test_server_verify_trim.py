@@ -8,7 +8,7 @@ import asyncio
 import numpy as np
 
 from jarvisd.server import JarvisServer
-from tests.test_server import FakeAssistant, FakeTTS, FakeWS
+from tests.test_server import ClassifyingSTT, FakeAssistant, FakeTTS, FakeWS
 
 
 class RecordingVerifier:
@@ -20,14 +20,9 @@ class RecordingVerifier:
         return True
 
 
-class RecordingSTT:
+class RecordingSTT(ClassifyingSTT):
     def __init__(self, seen):
         self.seen = seen
-
-    def transcribe_classified(self, audio):
-        from voice.stt import classify_text
-        text = self.transcribe(audio)
-        return text, classify_text(text)
 
     def transcribe(self, audio):
         self.seen["stt_len"] = len(audio)

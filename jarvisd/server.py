@@ -323,6 +323,10 @@ class JarvisServer:
                                    turn=turn)
         elif mtype == "reset":
             self.assistant.reset_conversation()
+            # A cleared conversation has no outstanding question, so drop the
+            # "open" memory too; otherwise the next concluder would be exempted
+            # and routed to the agent for no reason.
+            self._last_turn.pop(ws, None)
             await self._safe_send(ws, json.dumps(
                 {"type": "reply", "text": "Conversation cleared.", "heard": None, "audio_follows": False}
             ))
@@ -381,6 +385,9 @@ class JarvisServer:
                 # rejected utterance is usually JARVIS's own TTS echo, and
                 # counting it would end the conversation because the assistant
                 # heard itself. Additive field; older clients ignore it.
+                # Deliberately does NOT touch self._last_turn: this is usually
+                # JARVIS's own TTS echo landing between a question and the
+                # user's answer, and it must not clear the concluder exemption.
                 await self._safe_send(
                     ws, json.dumps({"type": "reply", "text": "", "heard": "",
                                     "audio_follows": False, "reason": "unverified"})
@@ -391,6 +398,9 @@ class JarvisServer:
         # like an empty transcript: same frame, no "turn" key.
         if not heard.strip() or intent == INTENT_NOISE:
             log.info("Transcription empty — no reply generated")
+            # Deliberately does NOT touch self._last_turn, for the same reason
+            # as the unverified frame above: a misfire between a question and
+            # its answer must not clear the concluder exemption.
             await self._safe_send(
                 ws, json.dumps({"type": "reply", "text": "", "heard": "", "audio_follows": False})
             )

@@ -153,3 +153,61 @@ def test_text_in_carries_the_turn_too():
     ws = FakeWS()
     asyncio.run(server._handle_json(ws, json.dumps({"type": "text_in", "text": "hi"})))
     assert json.loads(ws.sent[0])["turn"] == "open"
+
+
+def test_an_unverified_frame_between_a_question_and_its_answer_keeps_the_exemption():
+    """JARVIS's own TTS echo is rejected as 'unverified' between the prompt and
+    the user's answer; it must not clear the concluder exemption."""
+    class RejectOnce:
+        def __init__(self):
+            self.reject = False
+
+        def accepts(self, audio):
+            ok = not self.reject
+            self.reject = False
+            return ok
+
+    verifier = RejectOnce()
+    server = make("Delete it permanently?")
+    server.speaker_verifier = verifier
+    ws = FakeWS()
+    server.stt = ScriptedSTT("delete the meeting")
+    asyncio.run(server._handle_audio(ws, PCM))
+    assert json.loads(ws.sent[0])["turn"] == "open"
+
+    verifier.reject = True
+    asyncio.run(server._handle_audio(ws, PCM))
+    assert json.loads(ws.sent[1])["reason"] == "unverified"
+
+    server.assistant.says = "Okay."
+    server.stt = ScriptedSTT("that's it")
+    asyncio.run(server._handle_audio(ws, PCM))
+    assert json.loads(ws.sent[2])["text"] == "Okay."
+    assert server.assistant.calls == ["delete the meeting", "that's it"]
+
+
+def test_an_empty_transcription_between_a_question_and_its_answer_keeps_the_exemption():
+    server = make("Delete it permanently?")
+    ws = FakeWS()
+    server.stt = ScriptedSTT("delete the meeting")
+    asyncio.run(server._handle_audio(ws, PCM))
+    server.stt = ScriptedSTT("   ")
+    asyncio.run(server._handle_audio(ws, PCM))
+    server.assistant.says = "Okay."
+    server.stt = ScriptedSTT("that's it")
+    asyncio.run(server._handle_audio(ws, PCM))
+    assert server.assistant.calls == ["delete the meeting", "that's it"]
+
+
+def test_reset_clears_the_open_memory_so_a_concluder_is_honoured():
+    server = make("Delete it permanently?")
+    ws = FakeWS()
+    server.stt = ScriptedSTT("delete the meeting")
+    asyncio.run(server._handle_audio(ws, PCM))
+    server.assistant.reset_conversation = lambda: None
+    asyncio.run(server._handle_json(ws, json.dumps({"type": "reset"})))
+    server.stt = ScriptedSTT("that's it")
+    asyncio.run(server._handle_audio(ws, PCM))
+    reply = json.loads(ws.sent[-1])
+    assert reply["turn"] == "closed" and reply["text"] == ""
+    assert server.assistant.calls == ["delete the meeting"]

@@ -10,6 +10,7 @@ from jarvisd import db
 from jarvisd.notifier import Notifier
 from jarvisd.reminder_store import ReminderStore
 from jarvisd.server import JarvisServer
+from tests.test_server import ClassifyingSTT
 
 
 class FakeAssistant:
@@ -288,12 +289,7 @@ def test_text_in_appends_drained_notices_to_reply():
 
 
 def test_audio_in_appends_drained_notices_to_reply():
-    class FakeSTT:
-        def transcribe_classified(self, audio):
-            from voice.stt import classify_text
-            text = self.transcribe(audio)
-            return text, classify_text(text)
-
+    class FakeSTT(ClassifyingSTT):
         def transcribe(self, audio):
             return "turn on the light"
 
