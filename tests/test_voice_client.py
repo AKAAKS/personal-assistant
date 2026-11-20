@@ -820,3 +820,13 @@ def test_followup_capture_forwards_an_explicit_window():
     c = _client(None)
     c._capture_followup(window=10.0)
     assert c.vad.calls[0]["speech_timeout_sec"] == 10.0
+
+
+def test_followup_capture_publishes_your_turn(monkeypatch):
+    """The open mic is the one moment the tray must not look idle."""
+    written = []
+    monkeypatch.setattr(vc.activity, "write",
+                        lambda state, *a, **k: written.append(state))
+    c = _client(None)
+    c._capture_followup()
+    assert written == [vc.activity.YOUR_TURN]

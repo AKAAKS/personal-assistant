@@ -502,6 +502,7 @@ class VoiceClient:
         if window is None:
             window = FOLLOWUP_WINDOW_SEC
         self.mic.clear()  # discard whatever was captured while JARVIS was talking
+        activity.write(activity.YOUR_TURN)  # the mic is open: not the same as idle
         audio = self.vad.record_until_silence(
             self.mic, max_seconds=15.0, silence_ms=FOLLOWUP_SILENCE_MS,
             speech_timeout_sec=window,

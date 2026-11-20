@@ -169,6 +169,8 @@ STATE_COLORS = {
     ERROR: (140, 20, 60),
     STOPPED: (90, 90, 90),
     activity.HEARING: (0, 180, 200),
+    # Lighter than armed cyan, hollow ring: "the mic is open, say something".
+    activity.YOUR_TURN: (90, 215, 230),
     activity.THINKING: (150, 90, 230),
     activity.SPEAKING: (40, 200, 80),
     activity.MISSED: (235, 70, 140),
@@ -181,6 +183,7 @@ STATE_LABEL = {
     ERROR: "JARVIS — voice client error",
     STOPPED: "JARVIS — stopped",
     activity.HEARING: "JARVIS — hearing you…",
+    activity.YOUR_TURN: "JARVIS — your turn…",
     activity.THINKING: "JARVIS — thinking…",
     activity.SPEAKING: "JARVIS — speaking",
     activity.MISSED: "JARVIS — didn't catch that",

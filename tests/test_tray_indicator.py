@@ -158,3 +158,32 @@ def test_second_blink_happens_only_for_two():
     t = T.BLINK_ON_SEC + T.BLINK_OFF_SEC + 0.01
     assert T.blink_on(t, blinks=2) is True
     assert T.blink_on(t, blinks=1) is False
+
+
+# --- YOUR_TURN: an open mic must not look like idle -------------------------
+
+
+def test_your_turn_is_not_collapsed_into_listening():
+    """ARMED renders identically to idle on purpose; an open mic must not."""
+    assert T.effective_state(T.LISTENING, act(activity.YOUR_TURN), now=1000.0) == activity.YOUR_TURN
+
+
+def test_your_turn_has_its_own_colour_and_label():
+    assert T.STATE_COLORS[activity.YOUR_TURN] == (90, 215, 230)
+    assert T.STATE_LABEL[activity.YOUR_TURN] == "JARVIS — your turn…"
+
+
+def test_your_turn_ring_is_hollow():
+    """HEARING's filled ring means 'recording you right now'; YOUR_TURN would
+    sit filled while you are silent."""
+    assert T.is_filled(activity.YOUR_TURN) is False
+
+
+def test_your_turn_colour_differs_from_armed_and_supervisory_states():
+    taken = {T.STATE_COLORS[s] for s in (T.LISTENING, T.STARTING, T.PAUSED,
+                                         T.BRAIN_DOWN, T.ERROR, T.STOPPED)}
+    assert T.STATE_COLORS[activity.YOUR_TURN] not in taken
+
+
+def test_your_turn_is_steady_not_animated():
+    assert activity.YOUR_TURN not in T._ANIMATED_STATES
