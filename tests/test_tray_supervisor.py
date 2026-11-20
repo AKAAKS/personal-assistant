@@ -431,3 +431,110 @@ def test_client_cap_error_reason_and_label():
     assert "voice client" in state_label(sup.state, sup.error_reason)
     assert state_label(sup.state, sup.error_reason) != state_label(
         "error", "daemon")
+
+
+# --- review fixes ---
+
+def test_tick_respawn_does_not_rearm_mic_if_user_paused_meanwhile():
+    port = Port(open_=False)
+    client = Spawner()
+    holder = {}
+    daemon = Spawner()
+
+    def spawn():
+        port.open = True                 # the daemon comes up...
+        holder["sup"].paused = True      # ...but the user hit Pause during the wait
+        holder["sup"].state = "paused"
+        return daemon()
+
+    sup = _make(port, daemon=spawn, client=client)
+    holder["sup"] = sup
+    sup.tick()
+    assert client.calls == 0
+    assert sup.state == "paused"
+
+
+def test_restart_daemon_survives_stop_daemon_raising():
+    def deny():
+        raise PermissionError("access denied")
+
+    daemon, client = Spawner(), Spawner()
+    sup = _make(Port(open_=True), daemon=daemon, client=client, stop=deny)
+    sup.start_listening()
+    assert sup.restart_daemon() is False       # no exception escapes
+    assert sup.state == "brain_down"           # not stuck on STARTING
+    assert daemon.calls == 0
+    assert "access denied" in sup.last_error
+    assert sup._lifecycle.acquire(blocking=False)  # lock released
+    sup._lifecycle.release()
+
+
+def test_restart_daemon_survives_spawn_daemon_raising():
+    def boom():
+        raise OSError("cannot spawn")
+
+    sup = _make(Port(seq=[False]), daemon=boom)
+    assert sup.restart_daemon() is False
+    assert sup.state == "brain_down"
+
+
+def test_tick_survives_spawn_daemon_raising():
+    def boom():
+        raise OSError("cannot spawn")
+
+    sup = _make(Port(open_=False), daemon=boom)
+    sup.tick()                                  # must not raise
+    assert sup.state == "brain_down"
+
+
+def test_quit_mid_restart_spawns_nothing_after_stopped():
+    daemon, client = Spawner(), Spawner()
+    holder = {}
+
+    def stop():
+        holder["sup"].quit()                    # user gets impatient mid-restart
+
+    sup = _make(Port(seq=[False, True]), daemon=daemon, client=client, stop=stop)
+    holder["sup"] = sup
+    sup.start_listening()
+    assert sup.restart_daemon() is False
+    assert daemon.calls == 0
+    assert client.calls == 1                    # only the original
+    assert sup.state == "stopped"
+
+
+def test_quit_during_daemon_spawn_terminates_the_new_daemon():
+    holder = {}
+    daemon = Spawner()
+
+    def spawn():
+        holder["sup"].quit()                    # lands while the spawn is in flight
+        return daemon()
+
+    sup = _make(Port(open_=False), daemon=spawn, client=Spawner())
+    holder["sup"] = sup
+    sup.tick()
+    assert daemon.last.terminated is True       # no orphan holding the port
+    assert sup.state == "stopped"
+
+
+def test_quit_blocks_later_client_spawn():
+    client = Spawner()
+    sup = _make(Port(open_=True), client=client)
+    sup.quit()
+    sup.start_listening()
+    sup.tick()
+    assert client.calls == 0
+    assert sup.state == "stopped"
+
+
+def test_error_reason_clears_when_leaving_error():
+    port = Port(open_=True)
+    client = Spawner(alive=False)
+    sup = _make(port, client=client, max_relaunch=1)
+    sup.start_listening()
+    for _ in range(3):
+        sup.tick()
+    assert sup.state == "error" and sup.error_reason == "client"
+    sup.start_listening()                       # user recovers it
+    assert sup.error_reason is None

@@ -78,6 +78,20 @@ class JarvisSupervisor:
         # non-blocking and skips if held, so the watchdog can never spawn a
         # second daemon while ensure_daemon/restart_daemon are mid-flight.
         self._lifecycle = threading.Lock()
+        # Set by quit() (a flag, not the lock: quit runs on the GUI thread and
+        # must never block behind a 45s respawn). In-flight lifecycle work checks
+        # it before spawning anything and bails, so a quit mid-restart cannot
+        # leave an orphaned daemon/client holding the port.
+        self._stopping = False
+        self.last_error = None  # repr of the exception that last failed a lifecycle op
+
+    def _set_state(self, state) -> None:
+        """Assign state; after quit() only STOPPED sticks. Leaving ERROR clears its reason."""
+        if self._stopping and state != STOPPED:
+            return
+        self.state = state
+        if state != ERROR:
+            self.error_reason = None
 
     # -- daemon --
 
@@ -91,11 +105,26 @@ class JarvisSupervisor:
         return False
 
     def _spawn_daemon_and_wait(self) -> bool:
-        self._daemon = self.spawn_daemon()
+        if self._stopping:
+            return False
+        try:
+            self._daemon = self.spawn_daemon()
+        except Exception as exc:  # e.g. OSError: never leave the caller stuck mid-state
+            self.last_error = repr(exc)
+            self._set_state(BRAIN_DOWN)
+            return False
         self.started_daemon = True
-        if self._wait_for_port(True):
+        if self._stopping:  # quit landed during the spawn: don't orphan it
+            self._daemon.terminate()
+            return False
+        up = self._wait_for_port(True)
+        if self._stopping:
+            if self._daemon.poll() is None:
+                self._daemon.terminate()
+            return False
+        if up:
             return True
-        self.state = BRAIN_DOWN
+        self._set_state(BRAIN_DOWN)
         return False
 
     def ensure_daemon(self) -> bool:
@@ -117,25 +146,30 @@ class JarvisSupervisor:
         BRAIN_DOWN, never LISTENING.
         """
         with self._lifecycle:
-            self.state = STARTING
-            if self._client_alive():
-                self._client.terminate()
-            self._client = None
-            # Our own handle first (a no-op if already gone), then whoever owns the port.
-            if self._daemon is not None and self._daemon.poll() is None:
-                self._daemon.terminate()
-            self.stop_daemon()
-            if not self._wait_for_port(False):
-                self.state = BRAIN_DOWN  # never closed: do not race a second daemon in
+            try:
+                self._set_state(STARTING)
+                if self._client_alive():
+                    self._client.terminate()
+                self._client = None
+                # Our own handle first (a no-op if already gone), then whoever owns the port.
+                if self._daemon is not None and self._daemon.poll() is None:
+                    self._daemon.terminate()
+                self.stop_daemon()
+                if not self._wait_for_port(False):
+                    self._set_state(BRAIN_DOWN)  # never closed: do not race a second daemon in
+                    return False
+                if not self._spawn_daemon_and_wait():
+                    return False
+                self._daemon_relaunch_count = 0
+                if self.paused:
+                    self._set_state(PAUSED)
+                elif not self._stopping:
+                    self.start_listening()
+                return True
+            except Exception as exc:  # AccessDenied on an elevated daemon, OSError on spawn...
+                self.last_error = repr(exc)
+                self._set_state(BRAIN_DOWN)
                 return False
-            if not self._spawn_daemon_and_wait():
-                return False
-            self._daemon_relaunch_count = 0
-            if self.paused:
-                self.state = PAUSED
-            else:
-                self.start_listening()
-            return True
 
     # -- listening (the voice client) --
 
@@ -144,11 +178,13 @@ class JarvisSupervisor:
 
     def start_listening(self) -> None:
         """(Re)start the voice client and clear the paused flag."""
+        if self._stopping:
+            return
         self.paused = False
         self._relaunch_count = 0
         if not self._client_alive():
             self._client = self.spawn_client()
-        self.state = LISTENING
+        self._set_state(LISTENING)
 
     def stop_listening(self) -> None:
         """Pause: terminate the voice client (releases the mic + GPU) and latch paused."""
@@ -156,7 +192,7 @@ class JarvisSupervisor:
         if self._client_alive():
             self._client.terminate()
         self._client = None
-        self.state = PAUSED
+        self._set_state(PAUSED)
 
     def restart(self) -> None:
         self.stop_listening()
@@ -166,7 +202,7 @@ class JarvisSupervisor:
 
     def tick(self) -> None:
         """Called on a timer: keep the voice client alive unless paused."""
-        if self.paused:
+        if self.paused or self._stopping:
             return
         if not self._lifecycle.acquire(blocking=False):
             return  # ensure_daemon/restart_daemon is managing things; stay out
@@ -180,35 +216,44 @@ class JarvisSupervisor:
             self._daemon_relaunch_count = 0  # confirmed healthy
         else:
             if self._daemon_relaunch_count >= self.max_daemon_relaunch:
-                self.state = ERROR
+                self._set_state(ERROR)
                 self.error_reason = "daemon"
                 return
             self._daemon_relaunch_count += 1
+            # Known/accepted: the counter resets on ANY healthy tick, so a daemon
+            # that comes up and then dies between ticks never trips this cap and
+            # is respawned once per tick interval indefinitely. The cap only
+            # bounds a daemon that fails to come up at all.
             if not self._spawn_daemon_and_wait():
                 return  # BRAIN_DOWN; retried next tick, within the cap
+            # The respawn can block ~45s; the user may have paused (or quit)
+            # meanwhile. Pause is a deliberate mic release: never re-arm it.
+            if self.paused or self._stopping:
+                return
         if self._client_alive():
             self._relaunch_count = 0
-            self.state = LISTENING
+            self._set_state(LISTENING)
             return
         # client is dead and we're not paused -> relaunch, within a cap
         if self._relaunch_count >= self.max_relaunch:
-            self.state = ERROR
+            self._set_state(ERROR)
             self.error_reason = "client"
             return
         self._client = self.spawn_client()
         self._relaunch_count += 1
-        self.state = LISTENING
+        self._set_state(LISTENING)
 
     # -- shutdown --
 
     def quit(self) -> None:
         """Stop the voice client always; stop the daemon only if we started it."""
+        self._stopping = True
         if self._client_alive():
             self._client.terminate()
         self._client = None
         if self.started_daemon and self._daemon is not None and self._daemon.poll() is None:
             self._daemon.terminate()
-        self.state = STOPPED
+        self._set_state(STOPPED)
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +446,7 @@ def _stop_port_owner() -> None:
     for c in psutil.net_connections(kind="tcp"):
         if c.status == psutil.CONN_LISTEN and c.laddr and c.laddr.port == port and c.pid:
             pids.add(c.pid)
+    denied = []
     for pid in pids - protected:
         try:
             proc = psutil.Process(pid)
@@ -411,6 +457,10 @@ def _stop_port_owner() -> None:
                 proc.kill()
         except psutil.NoSuchProcess:
             pass
+        except psutil.AccessDenied:
+            denied.append(pid)  # e.g. an elevated daemon and a non-elevated tray
+    if denied:
+        raise PermissionError(f"access denied stopping daemon pid(s) {sorted(denied)}")
 
 
 def _log_file(name: str):
@@ -591,7 +641,10 @@ def run():
         next_tick = time.monotonic() + TICK_INTERVAL_SEC
         while not stop.wait(POLL_INTERVAL_SEC):
             if time.monotonic() >= next_tick:
-                sup.tick()
+                try:
+                    sup.tick()
+                except Exception:
+                    pass  # a transient error must not kill the watchdog thread
                 next_tick = time.monotonic() + TICK_INTERVAL_SEC
             refresh(icon)
 
