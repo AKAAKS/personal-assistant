@@ -21,6 +21,7 @@ import math
 import sys
 import threading
 import time
+import traceback
 
 from clients import activity
 
@@ -53,7 +54,8 @@ class JarvisSupervisor:
 
     def __init__(self, *, is_port_open, spawn_daemon, spawn_client,
                  daemon_timeout=45.0, max_relaunch=3, stop_daemon=None,
-                 max_daemon_relaunch=3, sleep=time.sleep, clock=time.monotonic):
+                 max_daemon_relaunch=3, log_error=None,
+                 sleep=time.sleep, clock=time.monotonic):
         self.is_port_open = is_port_open
         self.spawn_daemon = spawn_daemon
         self.spawn_client = spawn_client
@@ -61,6 +63,10 @@ class JarvisSupervisor:
         self.max_relaunch = max_relaunch
         self.stop_daemon = stop_daemon if stop_daemon is not None else _stop_port_owner
         self.max_daemon_relaunch = max_daemon_relaunch
+        # callable(str) -> None: where watchdog tracebacks go (the shell passes a
+        # logs/tray.log writer). Optional so tests need no files.
+        self._log_error = log_error
+        self._tick_failures = 0
         self._sleep = sleep
         self._clock = clock
 
@@ -86,7 +92,15 @@ class JarvisSupervisor:
         self.last_error = None  # repr of the exception that last failed a lifecycle op
 
     def _set_state(self, state) -> None:
-        """Assign state; after quit() only STOPPED sticks. Leaving ERROR clears its reason."""
+        """Assign state; after quit() only STOPPED sticks. Leaving ERROR clears its reason.
+
+        Known, deliberately NOT locked: this is check-then-act, so a worker
+        preempted between the _stopping check and the assignment could overwrite
+        STOPPED. That needs a thread switch between two adjacent bytecodes; a
+        second lock in a two-thread supervisor would add deadlock surface for a
+        vanishingly rare window. Do not "fix" it with a lock. Resources are
+        protected separately (spawned processes re-check _stopping).
+        """
         if self._stopping and state != STOPPED:
             return
         self.state = state
@@ -99,6 +113,8 @@ class JarvisSupervisor:
         """Poll until the port is (not) open, within daemon_timeout."""
         deadline = self._clock() + self.daemon_timeout
         while self._clock() < deadline:
+            if self._stopping:
+                return False  # quit landed: don't burn the timeout holding the lock
             if self.is_port_open() == want_open:
                 return True
             self._sleep(1.0)
@@ -123,6 +139,7 @@ class JarvisSupervisor:
                 self._daemon.terminate()
             return False
         if up:
+            self.last_error = None  # a good spawn invalidates a stale failure message
             return True
         self._set_state(BRAIN_DOWN)
         return False
@@ -183,8 +200,18 @@ class JarvisSupervisor:
         self.paused = False
         self._relaunch_count = 0
         if not self._client_alive():
-            self._client = self.spawn_client()
+            self._client = self._spawn_client_guarded()
         self._set_state(LISTENING)
+
+    def _spawn_client_guarded(self):
+        """Spawn the voice client; if quit() landed during the Popen it found
+        nothing to terminate, so kill the new client here rather than leave a
+        live mic after the user quit. Returns the handle, or None."""
+        client = self.spawn_client()
+        if self._stopping:
+            client.terminate()
+            return None
+        return client
 
     def stop_listening(self) -> None:
         """Pause: terminate the voice client (releases the mic + GPU) and latch paused."""
@@ -239,9 +266,39 @@ class JarvisSupervisor:
             self._set_state(ERROR)
             self.error_reason = "client"
             return
-        self._client = self.spawn_client()
+        self._client = self._spawn_client_guarded()
         self._relaunch_count += 1
         self._set_state(LISTENING)
+
+    def startup(self) -> None:
+        """First launch: make sure the daemon is up, then start the client unless
+        the user paused (the menu is live while ensure_daemon blocks) or quit."""
+        self.ensure_daemon()
+        if self.state != BRAIN_DOWN and not self.paused and not self._stopping:
+            self.start_listening()
+
+    def watch(self) -> None:
+        """tick() with failure accounting, for the watchdog loop.
+
+        An exception must not kill the watchdog thread, but swallowing it
+        silently would let the tray show LISTENING while supervising nothing.
+        So record it, log it, and after 3 consecutive failures show ERROR.
+        """
+        try:
+            self.tick()
+        except Exception as exc:
+            self.last_error = repr(exc)
+            self._tick_failures += 1
+            if self._log_error is not None:
+                try:
+                    self._log_error(traceback.format_exc())
+                except Exception:
+                    pass
+            if self._tick_failures >= 3:
+                self._set_state(ERROR)
+                self.error_reason = "watchdog"
+        else:
+            self._tick_failures = 0
 
     # -- shutdown --
 
@@ -311,14 +368,27 @@ STATE_LABEL = {
 ERROR_LABEL = {
     "client": "JARVIS — voice client keeps crashing",
     "daemon": "JARVIS — brain won't start (use Restart brain)",
+    "watchdog": "JARVIS — supervisor failing (see Open logs)",
 }
 
+ELEVATED_HINT = " (access denied: run elevated)"
 
-def state_label(state, error_reason=None) -> str:
-    """Tooltip text; ERROR is specific about which half gave up."""
+
+def _is_access_denied(last_error) -> bool:
+    low = (last_error or "").lower()
+    return "access denied" in low or "access is denied" in low
+
+
+def state_label(state, error_reason=None, last_error=None) -> str:
+    """Tooltip text; ERROR is specific about which half gave up, and a
+    permission failure (non-elevated tray vs elevated daemon) says so."""
     if state == ERROR and error_reason in ERROR_LABEL:
-        return ERROR_LABEL[error_reason]
-    return STATE_LABEL.get(state, "JARVIS")
+        text = ERROR_LABEL[error_reason]
+    else:
+        text = STATE_LABEL.get(state, "JARVIS")
+    if state in (BRAIN_DOWN, ERROR) and _is_access_denied(last_error):
+        text += ELEVATED_HINT
+    return text
 
 
 # Only HEARING fills the ring; everything else keeps the hollow arc-reactor look.
@@ -428,6 +498,11 @@ def _port_open() -> bool:
             return True
     except OSError:
         return False
+
+
+def _log_tray_error(text: str) -> None:
+    with _log_file("tray.log") as f:
+        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} watchdog tick failed" + chr(10) + text + chr(10))
 
 
 def _stop_port_owner() -> None:
@@ -549,6 +624,7 @@ def run():
     import pystray
 
     sup = JarvisSupervisor(
+        log_error=_log_tray_error,
         is_port_open=_port_open,
         spawn_daemon=_spawn_daemon,
         spawn_client=_spawn_client,
@@ -573,7 +649,7 @@ def run():
             return
         shown["key"] = key
         icon.icon = _make_icon_image(state, elapsed=elapsed, reason=reason)
-        icon.title = state_label(state, sup.error_reason)
+        icon.title = state_label(state, sup.error_reason, sup.last_error)
         icon.update_menu()
 
     def on_pause_toggle(icon, _item):
@@ -611,6 +687,7 @@ def run():
             lambda _i: state_label(
                 effective_state(sup.state, activity.read(), time.time()),
                 sup.error_reason,
+                sup.last_error,
             ),
             None,
             enabled=False,
@@ -631,9 +708,7 @@ def run():
 
     def setup(icon):
         icon.visible = True
-        sup.ensure_daemon()
-        if sup.state != BRAIN_DOWN:
-            sup.start_listening()
+        sup.startup()
         refresh(icon, force=True)
         # Two cadences in one loop: the watchdog is a slow, relatively expensive
         # check (a TCP connect plus a process poll), while the indicator must
@@ -641,10 +716,7 @@ def run():
         next_tick = time.monotonic() + TICK_INTERVAL_SEC
         while not stop.wait(POLL_INTERVAL_SEC):
             if time.monotonic() >= next_tick:
-                try:
-                    sup.tick()
-                except Exception:
-                    pass  # a transient error must not kill the watchdog thread
+                sup.watch()
                 next_tick = time.monotonic() + TICK_INTERVAL_SEC
             refresh(icon)
 

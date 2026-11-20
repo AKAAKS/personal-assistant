@@ -518,14 +518,227 @@ def test_quit_during_daemon_spawn_terminates_the_new_daemon():
     assert sup.state == "stopped"
 
 
-def test_quit_blocks_later_client_spawn():
+def test_start_listening_after_quit_spawns_nothing():
     client = Spawner()
     sup = _make(Port(open_=True), client=client)
     sup.quit()
     sup.start_listening()
-    sup.tick()
     assert client.calls == 0
     assert sup.state == "stopped"
+
+
+def test_tick_after_quit_spawns_nothing():
+    client, daemon = Spawner(), Spawner()
+    sup = _make(Port(open_=True), client=client, daemon=daemon)
+    sup.quit()
+    sup.tick()
+    assert client.calls == 0 and daemon.calls == 0
+    assert sup.state == "stopped"
+
+
+def test_quit_during_client_spawn_in_start_listening_terminates_it():
+    holder = {}
+    client = Spawner()
+
+    def spawn():
+        holder["sup"].quit()          # lands inside the Popen window
+        return client()
+
+    sup = _make(Port(open_=True), client=spawn)
+    holder["sup"] = sup
+    sup.start_listening()
+    assert client.last.terminated is True   # no live mic after quit
+    assert sup._client is None
+    assert sup.state == "stopped"
+
+
+def test_quit_during_client_spawn_in_tick_terminates_it():
+    holder = {}
+    client = Spawner()
+
+    def spawn():
+        holder["sup"].quit()
+        return client()
+
+    sup = _make(Port(open_=True), client=spawn)
+    holder["sup"] = sup
+    sup.tick()
+    assert client.last.terminated is True
+    assert sup._client is None
+    assert sup.state == "stopped"
+
+
+def test_quit_during_port_wait_bails_instead_of_burning_the_timeout():
+    holder = {}
+    probes = []
+
+    def probe():
+        probes.append(1)
+        holder["sup"].quit()           # quit lands while we poll for the port
+        return False
+
+    daemon = Spawner()
+    sup = _make(probe, daemon=daemon, daemon_timeout=45.0)
+    holder["sup"] = sup
+    sup.tick()
+    assert len(probes) <= 2            # not 45 sleeps' worth
+    assert daemon.last is None or daemon.last.terminated is True
+    assert sup.state == "stopped"
+
+
+def test_pause_during_restart_daemon_tail_keeps_mic_off():
+    holder = {}
+    client = Spawner()
+    daemon = Spawner()
+
+    def spawn():
+        holder["sup"].stop_listening()   # user pauses while the new daemon starts
+        return daemon()
+
+    sup = _make(Port(seq=[False, True]), daemon=spawn, client=client)
+    holder["sup"] = sup
+    assert sup.restart_daemon() is True
+    assert client.calls == 0
+    assert sup.state == "paused"
+
+
+# --- startup path ---
+
+def test_startup_starts_daemon_and_client():
+    client = Spawner()
+    sup = _make(Port(open_=True), client=client)
+    sup.startup()
+    assert client.calls == 1 and sup.state == "listening"
+
+
+def test_startup_respects_pause_pressed_while_daemon_comes_up():
+    holder = {}
+    port = Port(open_=False)
+    client = Spawner()
+    daemon = Spawner()
+
+    def spawn():
+        port.open = True
+        holder["sup"].stop_listening()   # menu is live during ensure_daemon
+        return daemon()
+
+    sup = _make(port, daemon=spawn, client=client)
+    holder["sup"] = sup
+    sup.startup()
+    assert client.calls == 0
+    assert sup.paused is True and sup.state == "paused"
+
+
+def test_startup_skips_client_when_brain_down():
+    ticks = iter(range(0, 10_000, 10))
+    client = Spawner()
+    sup = _make(Port(open_=False), client=client, daemon_timeout=5.0,
+                clock=lambda: next(ticks))
+    sup.startup()
+    assert client.calls == 0 and sup.state == "brain_down"
+
+
+# --- watchdog failure accounting ---
+
+def test_watch_counts_consecutive_failures_to_error_and_logs():
+    logged = []
+
+    def boom():
+        raise RuntimeError("probe exploded")
+
+    sup = JarvisSupervisor(is_port_open=boom, spawn_daemon=Spawner(),
+                           spawn_client=Spawner(), stop_daemon=Stopper(),
+                           log_error=logged.append, sleep=lambda _s: None)
+    sup.watch()
+    sup.watch()
+    assert sup.state != "error"
+    sup.watch()
+    assert sup.state == "error" and sup.error_reason == "watchdog"
+    assert len(logged) == 3 and "probe exploded" in logged[0]
+    assert "RuntimeError" in sup.last_error
+
+
+def test_watch_resets_failure_counter_on_clean_tick():
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise RuntimeError("blip")
+        return True
+
+    sup = _make(flaky)
+    sup.watch(); sup.watch()
+    sup.watch()                      # clean
+    assert sup._tick_failures == 0
+    assert sup.state != "error"
+
+
+# --- last_error visibility ---
+
+def test_elevated_daemon_failure_shows_run_elevated_hint():
+    from clients.tray_app import state_label
+
+    def deny():
+        raise PermissionError("access denied stopping daemon pid(s) [1234]")
+
+    sup = _make(Port(open_=True), stop=deny)
+    sup.restart_daemon()
+    assert sup.state == "brain_down"
+    label = state_label(sup.state, sup.error_reason, sup.last_error)
+    assert "run elevated" in label
+    # ...while a generic failure keeps the plain label
+    assert "elevated" not in state_label("brain_down", None, "OSError('boom')")
+    assert "elevated" not in state_label("brain_down", None, None)
+
+
+def test_last_error_clears_after_a_good_spawn():
+    def deny():
+        raise PermissionError("access denied")
+
+    state = {"deny": True}
+
+    def stop():
+        if state["deny"]:
+            deny()
+
+    sup = _make(Port(seq=[True, False, True], open_=True), stop=stop)
+    assert sup.restart_daemon() is False
+    assert sup.last_error
+    state["deny"] = False
+    assert sup.restart_daemon() is True
+    assert sup.last_error is None
+
+
+# --- _stop_port_owner: AccessDenied -> PermissionError ---
+
+def test_stop_port_owner_converts_access_denied(monkeypatch):
+    import types
+    import psutil
+    from clients import tray_app
+
+    monkeypatch.setenv("JARVIS_PORT", "8765")
+    conn = types.SimpleNamespace(status=psutil.CONN_LISTEN, pid=424242,
+                                 laddr=types.SimpleNamespace(port=8765))
+    monkeypatch.setattr(psutil, "net_connections", lambda kind="tcp": [conn])
+
+    real_process = psutil.Process
+
+    class FakeProcess(real_process):
+        def __init__(self, pid=None):
+            self._fake = pid == 424242
+            if not self._fake:
+                super().__init__(pid)
+
+        def terminate(self):
+            if self._fake:
+                raise psutil.AccessDenied(424242)
+            super().terminate()
+
+    monkeypatch.setattr(psutil, "Process", FakeProcess)
+    import pytest
+    with pytest.raises(PermissionError, match="access denied"):
+        tray_app._stop_port_owner()
 
 
 def test_error_reason_clears_when_leaving_error():
