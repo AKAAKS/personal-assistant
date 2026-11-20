@@ -4,3 +4,7 @@ __pycache__/
 .venv/
 logs/
 data/
+
+# Agent scratch + local harness config (settings.local.json can hold tokens)
+.claude/
+.superpowers/

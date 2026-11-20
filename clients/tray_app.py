@@ -19,7 +19,9 @@ import socket
 import subprocess
 import math
 import sys
+import threading
 import time
+import traceback
 
 from clients import activity
 
@@ -41,17 +43,30 @@ class JarvisSupervisor:
         spawn_client: callable() -> process handle for the voice client.
         daemon_timeout: seconds to wait for the daemon port after spawning it.
         max_relaunch: consecutive client relaunches before giving up (-> ERROR).
+        stop_daemon: callable() -> None that stops whatever owns the daemon port,
+            whether or not this tray started it. Defaults to the real
+            port-owner kill (never by image name: tray, client and daemon are
+            all pythonw.exe).
+        max_daemon_relaunch: consecutive watchdog daemon respawns before giving
+            up (-> ERROR). Separate from max_relaunch (the client's cap).
         sleep/clock: injected for deterministic tests.
     """
 
     def __init__(self, *, is_port_open, spawn_daemon, spawn_client,
-                 daemon_timeout=45.0, max_relaunch=3,
+                 daemon_timeout=45.0, max_relaunch=3, stop_daemon=None,
+                 max_daemon_relaunch=3, log_error=None,
                  sleep=time.sleep, clock=time.monotonic):
         self.is_port_open = is_port_open
         self.spawn_daemon = spawn_daemon
         self.spawn_client = spawn_client
         self.daemon_timeout = daemon_timeout
         self.max_relaunch = max_relaunch
+        self.stop_daemon = stop_daemon if stop_daemon is not None else _stop_port_owner
+        self.max_daemon_relaunch = max_daemon_relaunch
+        # callable(str) -> None: where watchdog tracebacks go (the shell passes a
+        # logs/tray.log writer). Optional so tests need no files.
+        self._log_error = log_error
+        self._tick_failures = 0
         self._sleep = sleep
         self._clock = clock
 
@@ -61,23 +76,117 @@ class JarvisSupervisor:
         self._daemon = None
         self._client = None
         self._relaunch_count = 0
+        self._daemon_relaunch_count = 0
+        # Which half exhausted its relaunch cap when state == ERROR: "client" or
+        # "daemon". Read by the tray shell so the tooltip names the right fix.
+        self.error_reason = None
+        # Guards every daemon-lifecycle operation. tick() acquires it
+        # non-blocking and skips if held, so the watchdog can never spawn a
+        # second daemon while ensure_daemon/restart_daemon are mid-flight.
+        self._lifecycle = threading.Lock()
+        # Set by quit() (a flag, not the lock: quit runs on the GUI thread and
+        # must never block behind a 45s respawn). In-flight lifecycle work checks
+        # it before spawning anything and bails, so a quit mid-restart cannot
+        # leave an orphaned daemon/client holding the port.
+        self._stopping = False
+        self.last_error = None  # repr of the exception that last failed a lifecycle op
+
+    def _set_state(self, state) -> None:
+        """Assign state; after quit() only STOPPED sticks. Leaving ERROR clears its reason.
+
+        Known, deliberately NOT locked: this is check-then-act, so a worker
+        preempted between the _stopping check and the assignment could overwrite
+        STOPPED. That needs a thread switch between two adjacent bytecodes; a
+        second lock in a two-thread supervisor would add deadlock surface for a
+        vanishingly rare window. Do not "fix" it with a lock. Resources are
+        protected separately (spawned processes re-check _stopping).
+        """
+        if self._stopping and state != STOPPED:
+            return
+        self.state = state
+        if state != ERROR:
+            self.error_reason = None
 
     # -- daemon --
 
-    def ensure_daemon(self) -> bool:
-        """Return True once the daemon port is reachable, starting it if needed."""
-        if self.is_port_open():
-            self.started_daemon = False
-            return True
-        self._daemon = self.spawn_daemon()
-        self.started_daemon = True
+    def _wait_for_port(self, want_open: bool) -> bool:
+        """Poll until the port is (not) open, within daemon_timeout."""
         deadline = self._clock() + self.daemon_timeout
         while self._clock() < deadline:
-            if self.is_port_open():
+            if self._stopping:
+                return False  # quit landed: don't burn the timeout holding the lock
+            if self.is_port_open() == want_open:
                 return True
             self._sleep(1.0)
-        self.state = BRAIN_DOWN
         return False
+
+    def _spawn_daemon_and_wait(self) -> bool:
+        if self._stopping:
+            return False
+        try:
+            self._daemon = self.spawn_daemon()
+        except Exception as exc:  # e.g. OSError: never leave the caller stuck mid-state
+            self.last_error = repr(exc)
+            self._set_state(BRAIN_DOWN)
+            return False
+        self.started_daemon = True
+        if self._stopping:  # quit landed during the spawn: don't orphan it
+            self._daemon.terminate()
+            return False
+        up = self._wait_for_port(True)
+        if self._stopping:
+            if self._daemon.poll() is None:
+                self._daemon.terminate()
+            return False
+        if up:
+            self.last_error = None  # a good spawn invalidates a stale failure message
+            return True
+        self._set_state(BRAIN_DOWN)
+        return False
+
+    def ensure_daemon(self) -> bool:
+        """Return True once the daemon port is reachable, starting it if needed."""
+        with self._lifecycle:
+            if self.is_port_open():
+                self.started_daemon = False
+                return True
+            return self._spawn_daemon_and_wait()
+
+    def restart_daemon(self) -> bool:
+        """Stop the daemon (even one this tray did not start), spawn a fresh
+        one, and bring the voice client back up against it.
+
+        The client's websocket dies with the old daemon and clients/voice_client.py
+        does not reconnect (main() exits on ConnectionClosed), so it is restarted
+        too -- unless the user deliberately paused, in which case the mic stays off.
+        Returns True when the new daemon is reachable; on failure state is
+        BRAIN_DOWN, never LISTENING.
+        """
+        with self._lifecycle:
+            try:
+                self._set_state(STARTING)
+                if self._client_alive():
+                    self._client.terminate()
+                self._client = None
+                # Our own handle first (a no-op if already gone), then whoever owns the port.
+                if self._daemon is not None and self._daemon.poll() is None:
+                    self._daemon.terminate()
+                self.stop_daemon()
+                if not self._wait_for_port(False):
+                    self._set_state(BRAIN_DOWN)  # never closed: do not race a second daemon in
+                    return False
+                if not self._spawn_daemon_and_wait():
+                    return False
+                self._daemon_relaunch_count = 0
+                if self.paused:
+                    self._set_state(PAUSED)
+                elif not self._stopping:
+                    self.start_listening()
+                return True
+            except Exception as exc:  # AccessDenied on an elevated daemon, OSError on spawn...
+                self.last_error = repr(exc)
+                self._set_state(BRAIN_DOWN)
+                return False
 
     # -- listening (the voice client) --
 
@@ -86,11 +195,29 @@ class JarvisSupervisor:
 
     def start_listening(self) -> None:
         """(Re)start the voice client and clear the paused flag."""
+        if self._stopping:
+            return
         self.paused = False
         self._relaunch_count = 0
         if not self._client_alive():
-            self._client = self.spawn_client()
-        self.state = LISTENING
+            self._client = self._spawn_client_guarded()
+            if self._client is None:
+                return  # quit/pause landed during the spawn; state is theirs
+        self._set_state(LISTENING)
+
+    def _spawn_client_guarded(self):
+        """Spawn the voice client unless quit or pause is in effect, and kill it
+        if either landed during the Popen (they found nothing to terminate, and
+        a live mic after Quit/Pause is the worst residue). Returns the handle,
+        or None. start_listening clears `paused` before calling, so it is safe
+        to gate on it here."""
+        if self._stopping or self.paused:
+            return None
+        client = self.spawn_client()
+        if self._stopping or self.paused:
+            client.terminate()
+            return None
+        return client
 
     def stop_listening(self) -> None:
         """Pause: terminate the voice client (releases the mic + GPU) and latch paused."""
@@ -98,7 +225,7 @@ class JarvisSupervisor:
         if self._client_alive():
             self._client.terminate()
         self._client = None
-        self.state = PAUSED
+        self._set_state(PAUSED)
 
     def restart(self) -> None:
         self.stop_listening()
@@ -108,33 +235,99 @@ class JarvisSupervisor:
 
     def tick(self) -> None:
         """Called on a timer: keep the voice client alive unless paused."""
-        if self.paused:
+        if self.paused or self._stopping:
             return
-        if not self.is_port_open():
-            self.state = BRAIN_DOWN
-            return
+        if not self._lifecycle.acquire(blocking=False):
+            return  # ensure_daemon/restart_daemon is managing things; stay out
+        try:
+            self._tick_locked()
+        finally:
+            self._lifecycle.release()
+
+    def _tick_locked(self) -> None:
+        if self.is_port_open():
+            self._daemon_relaunch_count = 0  # confirmed healthy
+        else:
+            if self._daemon_relaunch_count >= self.max_daemon_relaunch:
+                self._set_state(ERROR)
+                self.error_reason = "daemon"
+                return
+            self._daemon_relaunch_count += 1
+            # Known/accepted: the counter resets on ANY healthy tick, so a daemon
+            # that comes up and then dies between ticks never trips this cap and
+            # is respawned once per tick interval indefinitely. The cap only
+            # bounds a daemon that fails to come up at all.
+            if not self._spawn_daemon_and_wait():
+                return  # BRAIN_DOWN; retried next tick, within the cap
+            # The respawn can block ~45s; the user may have paused (or quit)
+            # meanwhile. Pause is a deliberate mic release: never re-arm it.
+            if self.paused or self._stopping:
+                return
+            # The old client's websocket died with the old daemon and
+            # voice_client.py never reconnects, so a "live" client here is wired
+            # to nothing. Drop it (as restart_daemon does) and relaunch below;
+            # this is not a client fault, so don't charge the relaunch cap.
+            if self._client_alive():
+                self._client.terminate()
+            self._client = None
+            self._relaunch_count = 0
         if self._client_alive():
             self._relaunch_count = 0
-            self.state = LISTENING
+            self._set_state(LISTENING)
             return
         # client is dead and we're not paused -> relaunch, within a cap
         if self._relaunch_count >= self.max_relaunch:
-            self.state = ERROR
+            self._set_state(ERROR)
+            self.error_reason = "client"
             return
-        self._client = self.spawn_client()
+        client = self._spawn_client_guarded()
+        if client is None:
+            return  # paused/quit during the spawn: leave their state alone
+        self._client = client
         self._relaunch_count += 1
-        self.state = LISTENING
+        self._set_state(LISTENING)
+
+    def startup(self) -> None:
+        """First launch: make sure the daemon is up, then start the client unless
+        the user paused (the menu is live while ensure_daemon blocks) or quit."""
+        self.ensure_daemon()
+        if self.state != BRAIN_DOWN and not self.paused and not self._stopping:
+            self.start_listening()
+
+    def watch(self) -> None:
+        """tick() with failure accounting, for the watchdog loop.
+
+        An exception must not kill the watchdog thread, but swallowing it
+        silently would let the tray show LISTENING while supervising nothing.
+        So record it, log it, and after 3 consecutive failures show ERROR.
+        """
+        try:
+            self.tick()
+        except Exception as exc:
+            self.last_error = repr(exc)
+            self._tick_failures += 1
+            if self._log_error is not None:
+                try:
+                    self._log_error(traceback.format_exc())
+                except Exception:
+                    pass
+            if self._tick_failures >= 3:
+                self._set_state(ERROR)
+                self.error_reason = "watchdog"
+        else:
+            self._tick_failures = 0
 
     # -- shutdown --
 
     def quit(self) -> None:
         """Stop the voice client always; stop the daemon only if we started it."""
+        self._stopping = True
         if self._client_alive():
             self._client.terminate()
         self._client = None
         if self.started_daemon and self._daemon is not None and self._daemon.poll() is None:
             self._daemon.terminate()
-        self.state = STOPPED
+        self._set_state(STOPPED)
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +373,7 @@ STATE_LABEL = {
     LISTENING: "JARVIS — listening",
     PAUSED: "JARVIS — paused (mic off)",
     BRAIN_DOWN: "JARVIS — brain not reachable",
-    ERROR: "JARVIS — voice client error",
+    ERROR: "JARVIS — error",
     STOPPED: "JARVIS — stopped",
     activity.HEARING: "JARVIS — hearing you…",
     activity.YOUR_TURN: "JARVIS — your turn…",
@@ -188,6 +381,39 @@ STATE_LABEL = {
     activity.SPEAKING: "JARVIS — speaking",
     activity.MISSED: "JARVIS — didn't catch that",
 }
+
+ERROR_LABEL = {
+    "client": "JARVIS — voice client keeps crashing",
+    "daemon": "JARVIS — brain won't start (use Restart brain)",
+    "watchdog": "JARVIS — supervisor failing (see Open logs)",
+}
+
+def refresh_key(state, reason, phase, error_reason, last_error):
+    """Icon-redraw cache key. error_reason and the access-denied flag feed the
+    tooltip, so they must be in it or a changed reason keeps a stale tooltip."""
+    return (state, reason, phase, error_reason, _is_access_denied(last_error))
+
+
+ELEVATED_HINT = " (access denied: run elevated)"
+
+
+def _is_access_denied(last_error) -> bool:
+    low = (last_error or "").lower()
+    return ("access denied" in low or "access is denied" in low
+            or "accessdenied" in low)
+
+
+def state_label(state, error_reason=None, last_error=None) -> str:
+    """Tooltip text; ERROR is specific about which half gave up, and a
+    permission failure (non-elevated tray vs elevated daemon) says so."""
+    if state == ERROR and error_reason in ERROR_LABEL:
+        text = ERROR_LABEL[error_reason]
+    else:
+        text = STATE_LABEL.get(state, "JARVIS")
+    if state in (BRAIN_DOWN, ERROR) and _is_access_denied(last_error):
+        text += ELEVATED_HINT
+    return text
+
 
 # Only HEARING fills the ring; everything else keeps the hollow arc-reactor look.
 _FILLED_STATES = frozenset({activity.HEARING})
@@ -298,6 +524,44 @@ def _port_open() -> bool:
         return False
 
 
+def _log_tray_error(text: str) -> None:
+    with _log_file("tray.log") as f:
+        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} watchdog tick failed" + chr(10) + text + chr(10))
+
+
+def _stop_port_owner() -> None:
+    """Terminate whichever process is LISTENing on the daemon port.
+
+    The tray, voice client and daemon are all pythonw.exe, so this targets the
+    port owner's PID only -- never an image name -- and refuses to touch this
+    process or any of its ancestors (the tray's launcher chain).
+    """
+    import psutil
+
+    _host, port = _daemon_endpoint()
+    me = psutil.Process()
+    protected = {me.pid} | {p.pid for p in me.parents()}
+    pids = set()
+    for c in psutil.net_connections(kind="tcp"):
+        if c.status == psutil.CONN_LISTEN and c.laddr and c.laddr.port == port and c.pid:
+            pids.add(c.pid)
+    denied = []
+    for pid in pids - protected:
+        try:
+            proc = psutil.Process(pid)
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except psutil.TimeoutExpired:
+                proc.kill()
+        except psutil.NoSuchProcess:
+            pass
+        except psutil.AccessDenied:
+            denied.append(pid)  # e.g. an elevated daemon and a non-elevated tray
+    if denied:
+        raise PermissionError(f"access denied stopping daemon pid(s) {sorted(denied)}")
+
+
 def _log_file(name: str):
     os.makedirs(LOG_DIR, exist_ok=True)
     return open(os.path.join(LOG_DIR, name), "a", encoding="utf-8")
@@ -384,6 +648,7 @@ def run():
     import pystray
 
     sup = JarvisSupervisor(
+        log_error=_log_tray_error,
         is_port_open=_port_open,
         spawn_daemon=_spawn_daemon,
         spawn_client=_spawn_client,
@@ -403,12 +668,12 @@ def run():
         elapsed = max(0.0, now - began)
         # Quantise the pulse so a steady state is one cache key, not 5 a second.
         phase = round(elapsed, 1) if state in _ANIMATED_STATES else 0.0
-        key = (state, reason, phase)
+        key = refresh_key(state, reason, phase, sup.error_reason, sup.last_error)
         if not force and key == shown["key"]:
             return
         shown["key"] = key
         icon.icon = _make_icon_image(state, elapsed=elapsed, reason=reason)
-        icon.title = STATE_LABEL.get(state, "JARVIS")
+        icon.title = state_label(state, sup.error_reason, sup.last_error)
         icon.update_menu()
 
     def on_pause_toggle(icon, _item):
@@ -421,6 +686,21 @@ def run():
     def on_restart(icon, _item):
         sup.restart()
         refresh(icon, force=True)
+
+    restart_thread = {"t": None}
+
+    def on_restart_brain(icon, _item):
+        # pystray runs menu callbacks inline on the thread pumping Windows
+        # messages, so a restart (up to ~95s) here would freeze the whole tray,
+        # Quit included. Run it on a short-lived thread; the setup loop's
+        # refresh() shows STARTING and then the result. A click while a restart
+        # is still running is ignored rather than queued behind the lifecycle lock.
+        if restart_thread["t"] is not None and restart_thread["t"].is_alive():
+            return
+        t = threading.Thread(target=sup.restart_daemon, name="restart-brain",
+                             daemon=True)
+        restart_thread["t"] = t
+        t.start()
 
     def on_open_logs(_icon, _item):
         os.makedirs(LOG_DIR, exist_ok=True)
@@ -436,8 +716,10 @@ def run():
 
     menu = pystray.Menu(
         pystray.MenuItem(
-            lambda _i: STATE_LABEL.get(
-                effective_state(sup.state, activity.read(), time.time()), "JARVIS"
+            lambda _i: state_label(
+                effective_state(sup.state, activity.read(), time.time()),
+                sup.error_reason,
+                sup.last_error,
             ),
             None,
             enabled=False,
@@ -448,6 +730,7 @@ def run():
             on_pause_toggle,
         ),
         pystray.MenuItem("Restart", on_restart),
+        pystray.MenuItem("Restart brain", on_restart_brain),
         pystray.MenuItem("Open logs", on_open_logs),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Quit", on_quit),
@@ -457,9 +740,7 @@ def run():
 
     def setup(icon):
         icon.visible = True
-        sup.ensure_daemon()
-        if sup.state != BRAIN_DOWN:
-            sup.start_listening()
+        sup.startup()
         refresh(icon, force=True)
         # Two cadences in one loop: the watchdog is a slow, relatively expensive
         # check (a TCP connect plus a process poll), while the indicator must
@@ -467,7 +748,7 @@ def run():
         next_tick = time.monotonic() + TICK_INTERVAL_SEC
         while not stop.wait(POLL_INTERVAL_SEC):
             if time.monotonic() >= next_tick:
-                sup.tick()
+                sup.watch()
                 next_tick = time.monotonic() + TICK_INTERVAL_SEC
             refresh(icon)
 
